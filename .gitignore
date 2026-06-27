@@ -1,4 +1,7 @@
 venv/
 .DS_Store
 data/__pycache__/
+data/lerobot_dataset/
 systems/__pycache__/
+planning/__pycache__/
+test/single_integrator_paths.pdf
