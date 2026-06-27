@@ -6,12 +6,12 @@ import matplotlib.pyplot as plt
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from planning.single_robot_casadi import SingleRobotCasadiPlanner
-from systems.single_integrator import SingleIntegrator
+from systems.double_integrator import DoubleIntegrator
 
 def main():
     config = {"dt": 0.05, "max_accel": 2.0, "horizon": 20, "goal": [1.0, 1.0]}
 
-    simulator = SingleIntegrator(config)
+    simulator = DoubleIntegrator(config)
     planner = SingleRobotCasadiPlanner(simulator, config)
 
     num_trajectories = 15
@@ -42,13 +42,13 @@ def main():
         plt.plot(x_history, y_history, alpha=0.6, linewidth=2)
         plt.scatter(x_history[0], y_history[0], color="black", s=20, zorder=4)
 
-    plt.title("CasADi Optimal Control Paths (Single Integrator)")
+    plt.title("CasADi Optimal Control Paths (Double Integrator)")
     plt.xlabel("X Position")
     plt.ylabel("Y Position")
     plt.grid(True, linestyle="--", alpha=0.7)
     plt.axis("equal")
 
-    output_path = os.path.join(os.path.dirname(__file__), "single_integrator_casadi_paths.pdf")
+    output_path = os.path.join(os.path.dirname(__file__), "double_integrator_casadi_paths.pdf")
     plt.savefig(output_path, format="pdf", bbox_inches="tight")
     print(f"Plot saved successfully to: {output_path}")
 

@@ -9,7 +9,12 @@ class DynamicsSimulator(ABC):
         self.config = config
         self.state = None
         self.time = 0
-        self.dt = config.get("dt", 0.01)
+        self.dt = config.get("dt", 0.05)
+
+        # Agnostic dimensions so planners can read them automatically
+        self.nx = None
+        self.nu = None
+        self.max_action = None
 
     @abstractmethod
     def step(self, state, action):
@@ -19,6 +24,11 @@ class DynamicsSimulator(ABC):
     @abstractmethod
     def observe(self, state):
         """Get observation"""
+        pass
+
+    @abstractmethod
+    def casadi_dynamics(self, x, u):
+        """Must return symbolic CasADi representation of the dynamics"""
         pass
 
     def reset(self, initial_state):

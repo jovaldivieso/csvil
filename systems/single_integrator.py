@@ -1,4 +1,5 @@
 from .dynamics import DynamicsSimulator
+import casadi as ca
 import numpy as np
 
 
@@ -7,29 +8,27 @@ class SingleIntegrator(DynamicsSimulator):
 
     def __init__(self, config):
         super().__init__(config)
-        self.goal = config.get("goal", np.array([0, 0]))
-        self.max_speed = config.get("max_speed", 1.0)
+        self.goal = config.get("goal", np.array([0.0, 0.0]))
+        self.max_action = config.get("max_speed", 1.0)
+        self.nx = 4  # [x, y, vx, vy]
+        self.nu = 2  # [vx_cmd, vy_cmd]
 
     def step(self, state, action):
-        """state = [x, y, vx, vy], action = [ax, ay]"""
         pos = state[:2]
-
-        # Single integrator: x_dot = v
-        # Input action is the velocity (no acceleration integration)
-        action = np.clip(action, -self.max_speed, self.max_speed)
+        action = np.clip(action, -self.max_action, self.max_action)
         next_pos = pos + action * self.dt
-
         return np.concatenate([next_pos, action])
 
     def observe(self, state):
-        """Return: [goal_relative_x, goal_relative_y, vx, vy]"""
         pos = state[:2]
         vel = state[2:4]
-        goal_rel = self.goal - pos
-
-        return np.concatenate([goal_rel, vel])
+        return np.concatenate([self.goal - pos, vel])
 
     def is_done(self, state):
-        """Check if state is goal"""
-        pos = state[:2]
-        return np.linalg.norm(pos - self.goal) < 0.05
+        return np.linalg.norm(state[:2] - self.goal) < 0.05
+
+    def casadi_dynamics(self, x, u):
+        """Symbolic single integrator for CasADi"""
+        next_pos = x[:2] + u * self.dt
+        # Next velocity IS the control input for single integrator
+        return ca.vertcat(next_pos[0], next_pos[1], u[0], u[1])

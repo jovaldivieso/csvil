@@ -1,7 +1,14 @@
 venv/
+
 .DS_Store
-data/__pycache__/
-data/lerobot_dataset/
+
 systems/__pycache__/
+
 planning/__pycache__/
-test/single_integrator_paths.pdf
+
+data/__pycache__/
+data/lerobot_dataset_single_integrator_casadi/
+data/lerobot_dataset_double_integrator_casadi/
+
+test/single_integrator_casadi_paths.pdf
+test/double_integrator_casadi_paths.pdf
