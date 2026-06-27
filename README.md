@@ -19,7 +19,6 @@ csvil/
 └── test/
     ├── double_integrator_casadi_example.py
     ├── double_integrator_casadi_plot.py
-    ├── inspect_dataset.py
     ├── single_integrator_casadi_example.py
     └── single_integrator_casadi_plot.py
 ```
