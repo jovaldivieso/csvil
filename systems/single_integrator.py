@@ -3,7 +3,7 @@ import numpy as np
 
 
 class SingleIntegrator(DynamicsSimulator):
-    """Minimal single-robot dynamics: v_dot = a"""
+    """Single integrator dynamics: v_dot = a"""
 
     def __init__(self, config):
         super().__init__(config)
@@ -15,7 +15,7 @@ class SingleIntegrator(DynamicsSimulator):
         pos = state[:2]
 
         # Single integrator: x_dot = v
-        # Input action IS the velocity (no acceleration integration)
+        # Input action is the velocity (no acceleration integration)
         action = np.clip(action, -self.max_speed, self.max_speed)
         next_pos = pos + action * self.dt
 
@@ -30,6 +30,6 @@ class SingleIntegrator(DynamicsSimulator):
         return np.concatenate([goal_rel, vel])
 
     def is_done(self, state):
-        """Check if reached goal"""
+        """Check if state is goal"""
         pos = state[:2]
         return np.linalg.norm(pos - self.goal) < 0.05

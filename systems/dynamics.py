@@ -13,21 +13,22 @@ class DynamicsSimulator(ABC):
 
     @abstractmethod
     def step(self, state, action):
-        """state + action -> next_state"""
+        """Get next state"""
         pass
 
     @abstractmethod
     def observe(self, state):
-        """state -> observation (what the policy sees)"""
+        """Get observation"""
         pass
 
     def reset(self, initial_state):
+        """Reset system state and time step"""
         self.state = initial_state.copy()
         self.time = 0
         return self.state
 
-    def rollout(self, initial_state, policy_fn, num_steps):
-        """Generate a trajectory"""
+    def simulate(self, initial_state, policy_fn, num_steps):
+        """Simulate a trajectory"""
         states, observations, actions = [], [], []
         state = self.reset(initial_state)
 
