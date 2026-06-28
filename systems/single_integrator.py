@@ -4,7 +4,11 @@ import numpy as np
 
 
 class SingleIntegrator(DynamicsSimulator):
-    """Single integrator dynamics: v_dot = a"""
+    """
+    Single integrator dynamics:
+        u = [vx, vy]
+        s = [x, y, vx, vy]
+    """
 
     def __init__(self, config):
         super().__init__(config)

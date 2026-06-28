@@ -4,7 +4,11 @@ import numpy as np
 
 
 class DoubleIntegrator(DynamicsSimulator):
-    """Double integrator dynamics: a = u"""
+    """
+    Double integrator dynamics:
+        u = [ax, ay]
+        s = [x, y, vx, vy]
+    """
 
     def __init__(self, config):
         super().__init__(config)
