@@ -14,8 +14,8 @@ class SingleIntegrator(DynamicsSimulator):
         super().__init__(config)
         self.goal = config.get("goal", np.array([0.0, 0.0]))
         self.max_action = config.get("max_speed", 1.0)
-        self.nx = 4  # [x, y, vx, vy]
-        self.nu = 2  # [vx_cmd, vy_cmd]
+        self.nx = 4
+        self.nu = 2
 
     def step(self, state, action):
         pos = state[:2]
@@ -34,5 +34,5 @@ class SingleIntegrator(DynamicsSimulator):
     def casadi_dynamics(self, x, u):
         """Symbolic single integrator for CasADi"""
         next_pos = x[:2] + u * self.dt
-        # Next velocity IS the control input for single integrator
+        # Next velocity is the control input for single integrator
         return ca.vertcat(next_pos[0], next_pos[1], u[0], u[1])

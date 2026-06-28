@@ -14,7 +14,7 @@ planner = SingleRobotCasadiPlanner(simulator, config)
 
 collector = DataCollector(
     simulator,
-    repo_id="single_integrator_expert",
+    repo_id="single_integrator_casadi_expert",
     local_dir="data/lerobot_dataset_single_integrator_casadi"
 )
 

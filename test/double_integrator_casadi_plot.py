@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from planning.single_robot_casadi import SingleRobotCasadiPlanner
 from systems.double_integrator import DoubleIntegrator
 
+
 def main():
     config = {"dt": 0.05, "max_accel": 2.0, "horizon": 20, "goal": [1.0, 1.0]}
 
@@ -18,11 +19,12 @@ def main():
     num_steps = 150
 
     plt.figure(figsize=(8, 8))
-    plt.scatter(*config["goal"], color="red", marker="*", s=300, label="Goal", zorder=5)
+    plt.scatter(*config["goal"], color="red", marker="*", s=300, label="Goal",
+                zorder=5)
     print(f"Simulating {num_trajectories} trajectories for plotting...")
 
     for i in range(num_trajectories):
-        initial_state = np.random.randn(4) * 2.0 
+        initial_state = np.random.randn(4) * 2.0
         state = simulator.reset(initial_state)
 
         x_history = [state[0]]
@@ -48,9 +50,11 @@ def main():
     plt.grid(True, linestyle="--", alpha=0.7)
     plt.axis("equal")
 
-    output_path = os.path.join(os.path.dirname(__file__), "double_integrator_casadi_paths.pdf")
+    output_path = os.path.join(os.path.dirname(__file__),
+                               "double_integrator_casadi_paths.pdf")
     plt.savefig(output_path, format="pdf", bbox_inches="tight")
     print(f"Plot saved successfully to: {output_path}")
+
 
 if __name__ == "__main__":
     main()

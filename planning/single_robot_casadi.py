@@ -6,11 +6,11 @@ class SingleRobotCasadiPlanner:
     """
     Dynamics Agnostic Optimal Control Planner.
     Uses the simulator's properties (nx, nu, max_action, and casadi_dynamics)
-    to formulate the NLP for any single-robot system.
+    to formulate the NLP for any single-robot system implemented in systems/.
     """
 
     def __init__(self, simulator, config):
-        self.sim = simulator  # Store the simulator reference
+        self.sim = simulator
         self.N = config.get("horizon", 20)
         self.goal = np.array(config.get("goal", [1.0, 1.0]))
 
@@ -19,12 +19,12 @@ class SingleRobotCasadiPlanner:
         self.R = np.eye(self.sim.nu) * config.get("R_weight", 0.1)
 
     def __call__(self, obs):
-        # 1. State Estimation
+        # State Estimation
         pos_x = self.goal[0] - obs[0]
         pos_y = self.goal[1] - obs[1]
         x0 = np.array([pos_x, pos_y, obs[2], obs[3]])
 
-        # 2. Setup CasADi NLP based on simulator dimensions
+        # Setup CasADi NLP based on simulator dimensions
         opti = ca.Opti()
         X = opti.variable(self.sim.nx, self.N + 1)
         U = opti.variable(self.sim.nu, self.N)
@@ -32,10 +32,11 @@ class SingleRobotCasadiPlanner:
         goal_vec = ca.vertcat(self.goal[0], self.goal[1], 0.0, 0.0)
         cost = 0
 
-        # 3. Build Constraints
+        # Build Constraints
         for k in range(self.N):
-            # AGNOSTIC INJECTION: Let the simulator define the physics!
-            opti.subject_to(X[:, k + 1] == self.sim.casadi_dynamics(X[:, k], U[:, k]))
+            # Dynamics agnostic planner: let the simulator define the physics!
+            opti.subject_to(X[:, k + 1] == self.sim.casadi_dynamics(X[:, k],
+                                                                    U[:, k]))
 
             for i in range(self.sim.nu):
                 opti.subject_to(U[i, k] >= -self.sim.max_action)
@@ -46,7 +47,8 @@ class SingleRobotCasadiPlanner:
             cost += ca.mtimes(U[:, k].T, ca.mtimes(self.R, U[:, k]))
 
         terminal_error = X[:, self.N] - goal_vec
-        cost += ca.mtimes(terminal_error.T, ca.mtimes(self.Q * 10, terminal_error))
+        cost += ca.mtimes(terminal_error.T, ca.mtimes(self.Q * 10,
+                                                      terminal_error))
 
         opti.minimize(cost)
         opti.subject_to(X[:, 0] == x0)

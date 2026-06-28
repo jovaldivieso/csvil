@@ -14,8 +14,8 @@ class DoubleIntegrator(DynamicsSimulator):
         super().__init__(config)
         self.goal = config.get("goal", np.array([0.0, 0.0]))
         self.max_action = config.get("max_accel", 2.0)
-        self.nx = 4  # [x, y, vx, vy]
-        self.nu = 2  # [ax, ay]
+        self.nx = 4
+        self.nu = 2
 
     def step(self, state, action):
         pos = state[:2]
@@ -32,7 +32,7 @@ class DoubleIntegrator(DynamicsSimulator):
         return np.concatenate([self.goal - pos, vel])
 
     def is_done(self, state):
-        # Must reach goal AND stop moving
+        # Must reach goal and stop moving
         dist = np.linalg.norm(state[:2] - self.goal)
         speed = np.linalg.norm(state[2:4])
         return dist < 0.05 and speed < 0.05

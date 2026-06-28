@@ -9,7 +9,7 @@ class DataCollector:
     def __init__(
         self,
         simulator,
-        repo_id="single_integrator_expert",
+        repo_id="undefined_expert",
         local_dir="data/lerobot_dataset",
     ):
         self.sim = simulator
