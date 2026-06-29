@@ -62,10 +62,9 @@ python learning/training.py --config learning/double_integrator_casadi_diffusion
 Checkpoints will be saved automatically in the auto-generated `outputs/train/` directory.
 
 ### Evaluate the cloned policy
-Test the trained neural network independently of the training loop. Make sure to pass your latest timestamped output folder to the `--model-dir` argument!
+Test the trained neural network independently of the training loop. Make sure to pass your latest timestamped output folder or Hugging Face Hub ID to the `--model-dir` argument.
 
 ```bash
-python test/double_integrator_casadi_diffusion_policy.py \
-  --model-dir outputs/train/2026-06-29/22-33-10_diffusion/checkpoints/010000/pretrained_model/
+python test/double_integrator_casadi_diffusion_policy.py --model-dir jovaldivieso/double_integrator_casadi_diffusion_policy
 ```
 This will run an autonomous rollout using the trained policy and output a PDF plot of the trajectory to the workspace.

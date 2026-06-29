@@ -12,11 +12,10 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Trained Diffusion \
-    Policy")
+    parser = argparse.ArgumentParser(
+        description="Evaluate Trained Diffusion Policy")
     parser.add_argument("--model-dir", type=str, required=True,
-                        help="Path to the checkpoint pretrained_model \
-                        directory")
+                        help="Path to local checkpoint or Hugging Face Hub ID")
     parser.add_argument("--goal", type=float, nargs=2, default=[1.0, 1.0],
                         help="Target goal position [x, y]")
     args = parser.parse_args()
@@ -24,9 +23,9 @@ def main():
     config = {"dt": 0.05, "max_accel": 2.0, "goal": args.goal}
     sim = DoubleIntegrator(config)
 
+    # If the path doesn't exist on the hard drive, try hugging face hub id
     if not os.path.exists(args.model_dir):
-        raise FileNotFoundError(f"Cannot find weights at {args.model_dir}. \
-        Please provide a valid path.")
+        print(f"Assuming '{args.model_dir}' is a Hugging Face Hub ID.")
 
     policy = DiffusionPolicy.from_pretrained(args.model_dir)
     policy.eval()  # Set network to evaluation mode
@@ -70,7 +69,7 @@ def main():
         trajectory.append(state[:2].copy())
 
         if sim.is_done(state):
-            print(f"Goal Reached in {step} steps!")
+            print(f"Goal Reached in {step} steps.")
             break
 
     trajectory = np.array(trajectory)

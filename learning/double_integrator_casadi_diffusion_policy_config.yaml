@@ -8,8 +8,8 @@ policy:
   type: diffusion
   device: mps
   
-  repo_id: local/double_integrator_diffusion
-  push_to_hub: false
+  repo_id: jovaldivieso/double_integrator_casadi_diffusion_policy
+  push_to_hub: true
   
   # Neural network settings
   down_dims: [64, 128, 256]        # Reduced from default [512, 1024, 2048]
