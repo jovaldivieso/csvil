@@ -40,7 +40,7 @@ Run the data collection script to simulate the expert CasADi planner and save th
 ```bash
 python test/double_integrator_casadi_example.py
 ```
-*(This will automatically save a Hugging Face compatible dataset to `data/lerobot_dataset_double_integrator_casadi`)*
+This will automatically save a Hugging Face compatible dataset to `data/lerobot_dataset_double_integrator_casadi`.
 
 ### Visualize the dataset
 Once the dataset is generated, you can use LeRobot's native CLI tool to launch a local web visualizer and inspect the expert trajectories:
@@ -59,7 +59,7 @@ Train the neural network using the pre-configured YAML settings. The script will
 ```bash
 python learning/training.py --config learning/double_integrator_casadi_diffusion_policy_config.yaml
 ```
-*(Checkpoints will be saved automatically in the auto-generated `outputs/train/` directory)*
+Checkpoints will be saved automatically in the auto-generated `outputs/train/` directory.
 
 ### Evaluate the cloned policy
 Test the trained neural network independently of the training loop. Make sure to pass your latest timestamped output folder to the `--model-dir` argument!
@@ -68,4 +68,4 @@ Test the trained neural network independently of the training loop. Make sure to
 python test/double_integrator_casadi_diffusion_policy.py \
   --model-dir outputs/train/2026-06-29/22-33-10_diffusion/checkpoints/010000/pretrained_model/
 ```
-This will run an autonomous rollout using the trained policy and output a PDF plot of the trajectory to the workspace
+This will run an autonomous rollout using the trained policy and output a PDF plot of the trajectory to the workspace.
