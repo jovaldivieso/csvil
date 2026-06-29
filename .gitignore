@@ -10,5 +10,4 @@ data/__pycache__/
 data/lerobot_dataset_single_integrator_casadi/
 data/lerobot_dataset_double_integrator_casadi/
 
-test/single_integrator_casadi_paths.pdf
-test/double_integrator_casadi_paths.pdf
+test/*.pdf
