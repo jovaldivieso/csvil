@@ -11,6 +11,7 @@ class SingleRobotCasadiPlanner:
     def __init__(self, simulator, config):
         self.sim = simulator
         self.N = config.get("horizon", 20)
+        # Goal is loaded dynamically from the config!
         self.goal = np.array(config.get("goal", [1.0, 1.0]))
 
         # Cost matrices
@@ -47,7 +48,7 @@ class SingleRobotCasadiPlanner:
             cost += ca.mtimes(error.T, ca.mtimes(self.Q, error))
             cost += ca.mtimes(self.U[:, k].T, ca.mtimes(self.R, self.U[:, k]))
 
-        # Terminal cost (heavily penalize missing the goal at the end of
+        # Terminal cost (heavily penalize missing the goal at the end of the
         # horizon)
         terminal_error = self.X[:, self.N] - goal_vec
         cost += ca.mtimes(terminal_error.T, ca.mtimes(self.Q * 10,
@@ -73,9 +74,7 @@ class SingleRobotCasadiPlanner:
         self.opti.set_value(self.x0_param, x0)
 
         try:
-            # Solve the NLP and return the first optimal action step
             sol = self.opti.solve()
             return sol.value(self.U[:, 0])
         except RuntimeError:
-            # Return zero action if the solver fails to converge
             return np.zeros(self.sim.nu)

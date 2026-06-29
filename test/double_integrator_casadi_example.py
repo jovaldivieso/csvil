@@ -1,5 +1,6 @@
 import sys
 import os
+import argparse
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -7,15 +8,36 @@ from data.data_collection import DataCollector
 from planning.single_robot_casadi import SingleRobotCasadiPlanner
 from systems.double_integrator import DoubleIntegrator
 
-config = {"dt": 0.05, "max_accel": 2.0, "horizon": 20, "goal": [1.0, 1.0]}
 
-simulator = DoubleIntegrator(config)
-planner = SingleRobotCasadiPlanner(simulator, config)
+def main():
+    parser = argparse.ArgumentParser(description="Generate Expert Dataset \
+    using CasADi")
+    parser.add_argument("--goal", type=float, nargs=2, default=[1.0, 1.0],
+                        help="Target goal [x, y]")
+    parser.add_argument("--num_traj", type=int, default=100,
+                        help="Number of expert trajectories to collect")
+    parser.add_argument("--repo_id", type=str,
+                        default="local/double_integrator_casadi_expert")
+    parser.add_argument("--local_dir", type=str,
+                        default="data/lerobot_dataset_double_integrator_casadi"
+                        )
+    args = parser.parse_args()
 
-collector = DataCollector(
-    simulator,
-    repo_id="double_integrator_casadi_expert",
-    local_dir="data/lerobot_dataset_double_integrator_casadi"
-)
+    # Pass the argparse goal into the physics and planner configurations
+    config = {"dt": 0.05, "max_accel": 2.0, "horizon": 20, "goal": args.goal}
 
-collector.collect_trajectories(planner, num_trajectories=100, num_steps=100)
+    simulator = DoubleIntegrator(config)
+    planner = SingleRobotCasadiPlanner(simulator, config)
+
+    collector = DataCollector(
+        simulator,
+        repo_id=args.repo_id,
+        local_dir=args.local_dir
+    )
+
+    collector.collect_trajectories(planner, num_trajectories=args.num_traj,
+                                   num_steps=100)
+
+
+if __name__ == "__main__":
+    main()
