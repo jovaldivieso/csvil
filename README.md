@@ -2,6 +2,44 @@
 
 This repository contains a modular pipeline for controller synthesis via imitation learning. The primary goal is to imitate a computationally heavy motion planner using a faster neural policy to accelerate inference.
 
+## Installation & setup
+
+### Prerequisites
+This project was tested so far with Python 3.11 and 3.12. 
+
+### Clone the repository
+Clone the project to your local machine and navigate into the root directory:
+```bash
+git clone [git@github.com:jovaldivieso/csvil.git](git@github.com/jovaldivieso/csvil.git)
+cd csvil
+```
+
+### Set Up a virtual environment
+Set up the native Python virtual environment (`venv`) or `conda` like in the LeRobot tutorials. Example with Python `venv`:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### Install dependencies
+Once your virtual environment is active, install the required packages:
+```bash
+pip install -r requirements.txt
+```
+This will install LeRobot, CasADi, and their required dependencies like PyTorch and NumPy.
+
+### 4. Hugging Face futhentication
+Because the pipeline uses LeRobot to manage datasets and model checkpoints via the Hugging Face Hub, you must authenticate your terminal.
+1. Create an account at [huggingface.co](https://huggingface.co/).
+2. Go to **Settings > Access Tokens** and create a new token with **Write** permissions.
+3. Run the following command in your terminal and paste your token when prompted:
+```bash
+huggingface-cli login
+```
+
+---
+
 ## File Structure
 
 ```text
@@ -34,7 +72,7 @@ csvil/
 Follow these steps to generate expert data, train the neural network, and evaluate the cloned policy.
 
 ### Generate a motion planning expert dataset
-Run a data collection script to simulate the motion planner expert and save the state or observation and action data of the given system in the LeRoboDataset format. Example with double integrator system and CasADi based motion planner:
+Run a data collection script to simulate the motion planner expert and save the state or observation and action data of the given system in the LeRobot dataset format. Example with the double integrator system and CasADi based motion planner:
 
 ```bash
 python test/double_integrator_casadi_data.py
