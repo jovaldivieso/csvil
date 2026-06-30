@@ -14,7 +14,7 @@ git clone git@github.com/jovaldivieso/csvil.git
 cd csvil
 ```
 
-### Set Up a virtual environment
+### Set up a virtual environment
 Set up the native Python virtual environment (`venv`) or `conda` if you are following the LeRobot tutorials. Example with Python's `venv`:
 
 ```bash
