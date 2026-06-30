@@ -1,5 +1,3 @@
-import numpy as np
-import torch
 import shutil
 from pathlib import Path
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -25,24 +23,8 @@ class DataCollector:
             print(f"Cleaning up existing dataset at {self.local_dir}...")
             shutil.rmtree(self.local_dir)
 
-        # Schema: Split state into environment (goal-relative) and robot state
-        features = {
-            "observation.environment_state": {
-                "dtype": "float32",
-                "shape": (2,),
-                "names": ["goal_rel_x", "goal_rel_y"],
-            },
-            "observation.state": {
-                "dtype": "float32",
-                "shape": (2,),
-                "names": ["vx", "vy"],
-            },
-            "action": {
-                "dtype": "float32",
-                "shape": (2,),
-                "names": ["ax", "ay"],  # Adjusted to represent acceleration
-            },
-        }
+        # Ask the simulator for its specific data schema
+        features = self.sim.get_dataset_features()
 
         dataset = LeRobotDataset.create(
             repo_id=self.repo_id,
@@ -52,30 +34,19 @@ class DataCollector:
         )
 
         for traj_id in range(num_trajectories):
-            # Evenly samples a radius between 0.5m and 3.0m, and an angle
-            # between 0 and 360 degrees
-            radius = np.random.uniform(0.5, 3.0)
-            angle = np.random.uniform(0, 2 * np.pi)
-
-            offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
-            start_pos = np.array(self.sim.goal) + offset
-
-            initial_state = np.array([start_pos[0], start_pos[1], 0.0, 0.0])
-            state = self.sim.reset(initial_state)
-
+            # Ask the simulator to initialize itself in a random, valid way
+            state = self.sim.reset_random()
             done_counter = 0
+
             for _ in range(num_steps):
                 obs = self.sim.observe(state)
                 action = motion_planner(obs)
 
-                dataset.add_frame({
-                    "observation.environment_state":
-                    torch.from_numpy(obs[0:2]).float(),
-                    "observation.state": torch.from_numpy(obs[2:4]).float(),
-                    "action": torch.from_numpy(action).float(),
-                    "task": "reach target"
-                })
+                # Ask the simulator to format the current frame
+                frame_data = self.sim.format_dataset_frame(obs, action)
+                frame_data["task"] = "reach target"
 
+                dataset.add_frame(frame_data)
                 state = self.sim.step(state, action)
 
                 # Break so it learns to hold its position and stop
@@ -87,8 +58,8 @@ class DataCollector:
             dataset.save_episode()
 
             if (traj_id + 1) % 10 == 0:
-                print(f"Collected {traj_id + 1}/{num_trajectories} \
-                trajectories")
+                print(
+                    f"Collected {traj_id + 1}/{num_trajectories} trajectories")
 
         print(f"LeRobot Dataset saved successfully to {self.local_dir}")
         return dataset

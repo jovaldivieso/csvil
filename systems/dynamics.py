@@ -31,6 +31,21 @@ class DynamicsSimulator(ABC):
         """Must return symbolic CasADi representation of the dynamics"""
         pass
 
+    @abstractmethod
+    def get_dataset_features(self):
+        """Return the LeRobot features dictionary for this specific robot"""
+        pass
+
+    @abstractmethod
+    def reset_random(self):
+        """Return a random, dynamically valid initial state"""
+        pass
+
+    @abstractmethod
+    def format_dataset_frame(self, obs, action):
+        """Package the observation and action into a dictionary for LeRobot"""
+        pass
+
     def reset(self, initial_state):
         """Reset system state and time step"""
         self.state = initial_state.copy()

@@ -38,14 +38,11 @@ def main():
 
     np.random.seed(42)  # Fixed seed for reproducible testing
 
-    # Spawn the test rollout using the same uniform polar logic
-    radius = np.random.uniform(0.5, 3.0)
-    angle = np.random.uniform(0, 2 * np.pi)
-    offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
-    start_pos = np.array(sim.goal) + offset
+    # Use the exact same random spawning logic as the data collector
+    state = sim.reset_random()
 
-    initial_state = np.array([start_pos[0], start_pos[1], 0.0, 0.0])
-    state = sim.reset(initial_state)
+    # Update the config dict so the Matplotlib red 'X' knows the new goal
+    config["goal"] = sim.goal.copy()
 
     policy.reset()
 
