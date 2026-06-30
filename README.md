@@ -29,7 +29,7 @@ pip install -r requirements.txt
 ```
 This will install LeRobot, CasADi, and their required dependencies like PyTorch and NumPy.
 
-### 4. Hugging Face futhentication
+### Hugging Face futhentication
 Because the pipeline uses LeRobot to manage datasets and model checkpoints via the Hugging Face Hub, you must authenticate your terminal.
 1. Create an account at [huggingface.co](https://huggingface.co/).
 2. Go to **Settings > Access Tokens** and create a new token with **Write** permissions.
