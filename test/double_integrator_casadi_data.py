@@ -12,8 +12,6 @@ from systems.double_integrator import DoubleIntegrator
 def main():
     parser = argparse.ArgumentParser(description="Generate Expert Dataset \
     using CasADi")
-    parser.add_argument("--goal", type=float, nargs=2, default=[1.0, 1.0],
-                        help="Target goal [x, y]")
     parser.add_argument("--num_traj", type=int, default=100,
                         help="Number of expert trajectories to collect")
     parser.add_argument("--repo_id", type=str,
@@ -24,7 +22,8 @@ def main():
     args = parser.parse_args()
 
     # Pass the argparse goal into the physics and planner configurations
-    config = {"dt": 0.05, "max_accel": 2.0, "horizon": 20, "goal": args.goal, "Q_diag": [10.0, 10.0, 1.0, 1.0], "R_weight": 0.1}
+    config = {"dt": 0.05, "max_accel": 2.0, "horizon": 20,
+              "Q_diag": [10.0, 10.0, 1.0, 1.0], "R_weight": 0.1}
 
     simulator = DoubleIntegrator(config)
     planner = SingleRobotCasadiPlanner(simulator, config)

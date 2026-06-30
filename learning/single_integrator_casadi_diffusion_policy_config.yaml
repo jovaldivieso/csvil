@@ -1,0 +1,43 @@
+# Dataset settings
+dataset:
+  repo_id: local/single_integrator_casadi_expert
+  root: data/lerobot_dataset_single_integrator_casadi
+
+# Policy settings
+policy:
+  type: diffusion
+  device: mps
+  
+  repo_id: jovaldivieso/single_integrator_casadi_diffusion_policy
+  push_to_hub: true
+  
+  # Neural network settings
+  down_dims: [64, 128, 256]        # Reduced from default [512, 1024, 2048]
+  diffusion_step_embed_dim: 64     # Reduced from default 128
+  
+  # Explicitly tell LeRobot how to normalize the new ENV state
+  normalization_mapping:
+    STATE: MIN_MAX
+    ENV: MIN_MAX
+    ACTION: MIN_MAX
+  
+  # Split the inputs to satisfy the diffusion architecture
+  input_features:
+    observation.environment_state:
+      shape: [2]
+      type: ENV
+    observation.state:
+      shape: [2]
+      type: STATE
+      
+  output_features:
+    action:
+      shape: [2]
+      type: ACTION
+
+# Training settings
+steps: 10000
+save_freq: 10000
+batch_size: 64
+num_workers: 0
+save_checkpoint: true

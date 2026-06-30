@@ -10,7 +10,7 @@ from systems.single_integrator import SingleIntegrator
 
 
 def main():
-    config = {"dt": 0.05, "max_accel": 2.0, "horizon": 20, "goal": [1.0, 1.0]}
+    config = {"dt": 0.05, "max_vel": 2.0, "horizon": 20, "goal": [1.0, 1.0]}
 
     simulator = SingleIntegrator(config)
     planner = SingleRobotCasadiPlanner(simulator, config)
@@ -24,7 +24,7 @@ def main():
     print(f"Simulating {num_trajectories} trajectories for plotting...")
 
     for i in range(num_trajectories):
-        initial_state = np.random.randn(4) * 2.0
+        initial_state = np.random.randn(2) * 2.0
         state = simulator.reset(initial_state)
 
         x_history = [state[0]]

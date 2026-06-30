@@ -71,7 +71,8 @@ class DoubleIntegrator(DynamicsSimulator):
         return np.array([pos[0], pos[1], 0.0, 0.0])
 
     def invert_obs(self, obs):
-        return np.array([self.goal[0] - obs[0], self.goal[1] - obs[1], obs[2], obs[3]])
+        return np.array([self.goal[0] - obs[0], self.goal[1] - obs[1], obs[2],
+                         obs[3]])
 
     @property
     def goal_state(self):
@@ -79,7 +80,7 @@ class DoubleIntegrator(DynamicsSimulator):
 
     def reset_random(self):
         """Randomize both the goal and the start position"""
-        # Randomize the Goal anywhere in a predefined workspace
+        # Randomize the goal anywhere in a predefined workspace
         self.goal = np.random.uniform(low=-5.0, high=5.0, size=2)
 
         # Uniform polar sampling for the start position, relative to the goal
