@@ -82,7 +82,7 @@ class DoubleIntegrator(DynamicsSimulator):
         # Randomize the Goal anywhere in a predefined workspace
         self.goal = np.random.uniform(low=-5.0, high=5.0, size=2)
 
-        # Uniform polar Sampling for the start position, relative to the goal
+        # Uniform polar sampling for the start position, relative to the goal
         radius = np.random.uniform(0.5, 3.0)
         angle = np.random.uniform(0, 2 * np.pi)
         offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])

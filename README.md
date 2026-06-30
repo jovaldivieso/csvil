@@ -29,7 +29,7 @@ pip install -r requirements.txt
 ```
 This will install LeRobot, CasADi, and their required dependencies like PyTorch and NumPy.
 
-### Hugging Face futhentication
+### Hugging Face authentication
 Because the pipeline uses LeRobot to manage datasets and model checkpoints via the Hugging Face Hub, you should authenticate your terminal if you want to use this feature.
 1. Create an account at [huggingface.co](https://huggingface.co/).
 2. Go to **Settings > Access Tokens** and create a new token with **Write** permissions.
@@ -46,25 +46,19 @@ hf auth login
 csvil/
 ├── data/
 │   ├── data_collection.py
-│   ├── lerobot_dataset_double_integrator_casadi/   # Example generated dataset
+│   └── lerobot_dataset_double_integrator_casadi/   # Example generated dataset
 ├── learning/
 │   ├── double_integrator_casadi_diffusion_policy_config.yaml
 │   └── training.py
 ├── planning/
 │   └── single_robot_casadi.py
 ├── systems/
-│   ├── __init__.py
 │   ├── double_integrator.py
-│   ├── dynamics.py
-│   ├── gym_wrapper.py
-│   └── single_integrator.py
+│   └── dynamics.py
 └── test/
     ├── double_integrator_casadi_data.py
     ├── double_integrator_casadi_diffusion_policy.py
-    ├── double_integrator_casadi_plot.py
-    ├── gym_double_integrator_casadi_plot.py
-    ├── single_integrator_casadi_data.py
-    └── single_integrator_casadi_plot.py
+    └── double_integrator_casadi_plot.py
 ```
 
 ## Pipeline Features
