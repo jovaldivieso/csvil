@@ -53,7 +53,7 @@ lerobot-dataset-viz \
   --episode-index 0
 ```
 
-### Imitation learning with diffusion dolicy
+### Imitation learning with diffusion policy
 Train the neural network using the pre-configured YAML settings. The script will automatically stop and save the model weights once it reaches the target steps.
 
 ```bash
