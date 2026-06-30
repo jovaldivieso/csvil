@@ -46,6 +46,22 @@ class DynamicsSimulator(ABC):
         """Package the observation and action into a dictionary for LeRobot"""
         pass
 
+    @abstractmethod
+    def random_initial_state(self, rng):
+        """Return a random initial state without changing the goal"""
+        pass
+
+    @abstractmethod
+    def invert_obs(self, obs):
+        """Reconstruct absolute state from observation (inverse of observe())"""
+        pass
+
+    @property
+    @abstractmethod
+    def goal_state(self):
+        """Return the full nx-dim goal vector in state space"""
+        pass
+
     def reset(self, initial_state):
         """Reset system state and time step"""
         self.state = initial_state.copy()

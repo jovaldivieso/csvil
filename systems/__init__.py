@@ -34,3 +34,8 @@ register(
     entry_point=f'{__name__}:make_env',
     kwargs={'simulator_class': DoubleIntegrator}
 )
+
+register(
+    id='Unicycle1-v0',
+    entry_point=f'{__name__}:make_env',
+    kwargs={'simulator_class': 'systems.unicycle1.Unicycle1'})

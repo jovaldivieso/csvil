@@ -12,8 +12,8 @@ class SingleRobotCasadiPlanner:
         self.sim = simulator
         self.N = config.get("horizon", 20)
 
-        # Cost matrices
-        self.Q = np.diag(config.get("Q_diag", [10.0, 10.0, 1.0, 1.0]))
+        # Cost matrices depending on system state
+        self.Q = np.diag(config.get("Q_diag", [10.0] * self.sim.nx))
         self.R = np.eye(self.sim.nu) * config.get("R_weight", 0.1)
 
         # Build the CasADi NLP graph
@@ -62,13 +62,8 @@ class SingleRobotCasadiPlanner:
         self.opti.solver("ipopt", opts)
 
     def __call__(self, obs):
-        # Reconstruct the absolute state using the simulator's CURRENT goal
-        pos_x = self.sim.goal[0] - obs[0]
-        pos_y = self.sim.goal[1] - obs[1]
-        x0 = np.array([pos_x, pos_y, obs[2], obs[3]])
-
-        # Create the 4D goal vector (velocity = 0 at the goal)
-        goal_vec = np.array([self.sim.goal[0], self.sim.goal[1], 0.0, 0.0])
+        x0 = self.sim.invert_obs(obs)
+        goal_vec = self.sim.goal_state
 
         # Inject the current state and current goal into the pre-compiled graph
         self.opti.set_value(self.x0_param, x0)
