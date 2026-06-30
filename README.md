@@ -22,11 +22,11 @@ csvil/
 │   ├── gym_wrapper.py
 │   └── single_integrator.py
 └── test/
+    ├── double_integrator_casadi_data.py
     ├── double_integrator_casadi_diffusion_policy.py
-    ├── double_integrator_casadi_example.py
     ├── double_integrator_casadi_plot.py
     ├── gym_double_integrator_casadi_plot.py
-    ├── single_integrator_casadi_example.py
+    ├── single_integrator_casadi_data.py
     └── single_integrator_casadi_plot.py
 ```
 
@@ -35,10 +35,10 @@ csvil/
 Follow these steps to generate expert data, train the neural network, and evaluate the cloned policy.
 
 ### Generate a motion planning expert dataset
-Run the data collection script to simulate the expert CasADi planner and save the state-action data. This script uses Uniform Polar Sampling to ensure full 360-degree workspace coverage.
+Run a data collection script to simulate the motion planner expert and save the state or observation and action data of the given system in the LeRoboDataset format. Example with double integrator system and CasADi based motion planner:
 
 ```bash
-python test/double_integrator_casadi_example.py
+python test/double_integrator_casadi_data.py
 ```
 This will automatically save a Hugging Face compatible dataset to `data/lerobot_dataset_double_integrator_casadi`.
 
