@@ -35,12 +35,8 @@ class DynamicsGymWrapper(gym.Env):
         super().reset(seed=seed)
         self.current_step = 0
 
-        # Generate a random initial state (e.g., random position, zero velocity)
-        # Using the provided seed ensures perfectly reproducible evaluation rollouts
         rng = np.random.default_rng(seed)
-        random_pos = rng.uniform(low=-5.0, high=5.0, size=2)
-        initial_state = np.array([random_pos[0], random_pos[1], 0.0, 0.0])
-
+        initial_state = self.sim.random_initial_state(rng)
         self.sim.reset(initial_state)
 
         obs = self.sim.observe(self.sim.state).astype(np.float32)
