@@ -5,17 +5,17 @@ This repository contains a modular pipeline for controller synthesis via imitati
 ## Installation & setup
 
 ### Prerequisites
-This project was tested so far with Python 3.11 and 3.12. 
+This project was tested so far with **Python 3.11** and **3.12**. 
 
 ### Clone the repository
 Clone the project to your local machine and navigate into the root directory:
 ```bash
-git clone [git@github.com:jovaldivieso/csvil.git](git@github.com/jovaldivieso/csvil.git)
+git clone git@github.com/jovaldivieso/csvil.git
 cd csvil
 ```
 
 ### Set Up a virtual environment
-Set up the native Python virtual environment (`venv`) or `conda` like in the LeRobot tutorials. Example with Python `venv`:
+Set up the native Python virtual environment (`venv`) or `conda` if you are following the LeRobot tutorials. Example with Python's `venv`:
 
 ```bash
 python3 -m venv venv
@@ -35,7 +35,7 @@ Because the pipeline uses LeRobot to manage datasets and model checkpoints via t
 2. Go to **Settings > Access Tokens** and create a new token with **Write** permissions.
 3. Run the following command in your terminal and paste your token when prompted:
 ```bash
-huggingface-cli login
+hf auth login
 ```
 
 ---
