@@ -8,8 +8,7 @@ This repository contains a modular pipeline for controller synthesis via imitati
 csvil/
 ├── data/
 │   ├── data_collection.py
-│   ├── lerobot_dataset_double_integrator_casadi/   # Generated dataset
-│   └── lerobot_dataset_single_integrator_casadi/   # Generated dataset
+│   ├── lerobot_dataset_double_integrator_casadi/   # Example generated dataset
 ├── learning/
 │   ├── double_integrator_casadi_diffusion_policy_config.yaml
 │   └── training.py
