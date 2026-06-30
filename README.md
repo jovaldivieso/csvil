@@ -1,6 +1,6 @@
 # Controller Synthesis via Imitation Learning
 
-This repository contains a modular pipeline for controller synthesis via imitation learning. The primary goal is to imitate a computationally heavy motion planner using a faster neural policy accelerate inference.
+This repository contains a modular pipeline for controller synthesis via imitation learning. The primary goal is to imitate a computationally heavy motion planner using a faster neural policy to accelerate inference.
 
 ## File Structure
 
