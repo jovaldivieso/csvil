@@ -24,10 +24,10 @@ policy:
   # Split the inputs to satisfy the diffusion architecture
   input_features:
     observation.environment_state:
-      shape: [2]
+      shape: [4]
       type: ENV
     observation.state:
-      shape: [2]
+      shape: [4]
       type: STATE
       
   output_features:

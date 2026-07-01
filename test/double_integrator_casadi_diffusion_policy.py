@@ -18,7 +18,7 @@ def main():
                         help="Path to local checkpoint or Hugging Face Hub ID")
     args = parser.parse_args()
 
-    config = {"dt": 0.05, "max_accel": 2.0, "goal": args.goal}
+    config = {"dt": 0.05, "max_accel": 2.0}
     sim = DoubleIntegrator(config)
 
     # If the path doesn't exist on the hard drive, try hugging face hub id
@@ -51,9 +51,9 @@ def main():
 
         obs_dict = {
             "observation.environment_state":
-            torch.from_numpy(obs[0:2]).float().unsqueeze(0).to(device),
+            torch.from_numpy(obs[0:4]).float().unsqueeze(0).to(device),
             "observation.state":
-            torch.from_numpy(obs[2:4]).float().unsqueeze(0).to(device)
+            torch.from_numpy(obs[0:4]).float().unsqueeze(0).to(device)
         }
 
         with torch.no_grad():

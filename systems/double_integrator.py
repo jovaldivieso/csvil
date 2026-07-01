@@ -51,13 +51,13 @@ class DoubleIntegrator(DynamicsSimulator):
         return {
             "observation.environment_state": {
                 "dtype": "float32",
-                "shape": (2,),
-                "names": ["goal_rel_x", "goal_rel_y"]
+                "shape": (4,),
+                "names": ["goal_rel_x", "goal_rel_y", "vx", "vy"]
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (2,),
-                "names": ["vx", "vy"]
+                "shape": (4,),
+                "names": ["goal_rel_x", "goal_rel_y", "vx", "vy"]
             },
             "action": {
                 "dtype": "float32",
@@ -98,7 +98,7 @@ class DoubleIntegrator(DynamicsSimulator):
         """Package the observation and action into a dictionary for LeRobot"""
         return {
             "observation.environment_state":
-            torch.from_numpy(obs[0:2]).float(),
-            "observation.state": torch.from_numpy(obs[2:4]).float(),
+            torch.from_numpy(obs[0:4]).float(),
+            "observation.state": torch.from_numpy(obs[0:4]).float(),
             "action": torch.from_numpy(action).float(),
         }
