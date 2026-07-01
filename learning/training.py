@@ -7,8 +7,8 @@ from lerobot.configs.train import TrainPipelineConfig
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train LeRobot Diffusion \
-    Policy")
+    parser = argparse.ArgumentParser(
+        description="Train LeRobot Diffusion Policy")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to the LeRobot YAML config file")
     args = parser.parse_args()
