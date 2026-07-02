@@ -16,35 +16,44 @@ def main():
         description="Evaluate Trained Diffusion Policy (Random Scenario)")
     parser.add_argument("--model-dir", type=str, required=True,
                         help="Path to local checkpoint or Hugging Face Hub ID")
+    parser.add_argument("--goal", type=float, nargs=2, default=None,
+                        help="Specific goal coordinate. If not set, goals are randomized.")
     args = parser.parse_args()
 
     config = {"dt": 0.05, "max_vel": 2.0}
+
+    if args.goal is not None:
+        config["goal"] = args.goal
+        config["randomize_goal"] = False
+    else:
+        config["randomize_goal"] = True
+
     sim = SingleIntegrator(config)
 
-    # If the path doesn't exist on the hard drive, try hugging face hub id
     if not os.path.exists(args.model_dir):
         print(f"Assuming '{args.model_dir}' is a Hugging Face Hub ID.")
 
     policy = DiffusionPolicy.from_pretrained(args.model_dir)
-    policy.eval()  # Set network to evaluation mode
+    policy.eval()
 
-    # Explicitly set up the M1 GPU (MPS)
-    device = torch.device("mps" if torch.backends.mps.is_available() else
-                          "cpu")
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
     print(f"Running inference on: {device}")
-    policy.to(device)  # Push the neural network to the GPU
+    policy.to(device)
 
-    np.random.seed(42)  # Fixed seed for reproducible testing
+    np.random.seed(42)
 
-    # Generate a completely random fair test
     state = sim.reset_random()
-
-    # Update the config dict so the Matplotlib red 'X' knows the new goal
     config["goal"] = sim.goal.copy()
 
     policy.reset()
 
-    trajectory = [state[:2].copy()]  # Store (x, y) for plotting
+    trajectory = [state[:2].copy()]
 
     for step in range(150):
         obs = sim.observe(state)
@@ -70,7 +79,6 @@ def main():
     trajectory = np.array(trajectory)
     plt.figure(figsize=(8, 8))
 
-    # Plot the driven path with a bit of transparency
     plt.plot(trajectory[:, 0], trajectory[:, 1], '-o', color='blue',
              label='Diffusion Policy Path', markersize=4, alpha=0.6)
 

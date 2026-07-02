@@ -1,55 +1,55 @@
 import sys
 import os
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from systems.unicycle1 import Unicycle1
-from planning.single_robot_casadi import SingleRobotCasadiPlanner
+from planning.casadi_planner import CasadiPlanner
 
 
 def main():
-    # Updated config for Unicycle1 with a 3D goal and tuned Q_diag
+    parser = argparse.ArgumentParser(description="Plot CasADi optimal paths")
+    parser.add_argument("--num_traj", type=int, default=15)
+    parser.add_argument("--goal", type=float, nargs=3, default=[1.0, 1.0, np.pi / 4],
+                        help="Specific goal (x, y, theta). Defaults to [1.0, 1.0, pi/4].")
+    args = parser.parse_args()
+
     config = {
         "dt": 0.05,
         "max_v": 2.0,
-        "goal": [1.0, 1.0, np.pi / 4],
+        "goal": args.goal,
+        "randomize_goal": False,
         "horizon": 30,
+        "mode": "mpc",
         "Q_diag": [10.0, 10.0, 5.0],
     }
 
     simulator = Unicycle1(config)
-    planner = SingleRobotCasadiPlanner(simulator, config)
+    planner = CasadiPlanner(simulator, config)
 
-    num_trajectories = 15
     num_steps = 200
 
     plt.figure(figsize=(8, 8))
 
-    # Mark goal position and heading
     gx, gy, gtheta = config["goal"]
     plt.scatter(gx, gy, color="red", marker="*", s=300, label="Goal", zorder=5)
     plt.quiver(gx, gy, np.cos(gtheta), np.sin(gtheta),
                color="red", scale=8, width=0.005, zorder=5)
 
-    print(f"\nSimulating {num_trajectories} randomized trajectories...")
+    print(f"\nSimulating {args.num_traj} randomized trajectories...")
 
-    for _ in range(num_trajectories):
-        # Generate a random initial position (x, y) around 0 and heading
-        initial_pos = np.random.randn(2) * 2.0
-        initial_theta = np.random.uniform(-np.pi, np.pi)
-        initial_state = np.array([initial_pos[0], initial_pos[1],
-                                  initial_theta])
-
-        state = simulator.reset(initial_state)
+    for _ in range(args.num_traj):
+        state = simulator.reset_random()
+        planner.reset()
 
         trajectory_x = []
         trajectory_y = []
         trajectory_theta = []
 
         for _ in range(num_steps):
-            # Record current state
             trajectory_x.append(state[0])
             trajectory_y.append(state[1])
             trajectory_theta.append(state[2])
@@ -57,15 +57,12 @@ def main():
             if simulator.is_done(state):
                 break
 
-            # Step simulation forward
             obs = simulator.observe(state)
             action = planner(obs)
             state = simulator.step(state, action)
 
-        # Plot the trajectory path
         line, = plt.plot(trajectory_x, trajectory_y, alpha=0.6, linewidth=2)
 
-        # Show start position and initial heading
         plt.scatter(trajectory_x[0], trajectory_y[0], color="black", s=20,
                     zorder=4)
         plt.quiver(trajectory_x[0], trajectory_y[0],

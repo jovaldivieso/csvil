@@ -1,31 +1,38 @@
 import sys
 import os
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from planning.single_robot_casadi import SingleRobotCasadiPlanner
+from planning.casadi_planner import CasadiPlanner
 from systems.single_integrator import SingleIntegrator
 
 
 def main():
-    config = {"dt": 0.05, "max_vel": 2.0, "horizon": 20, "goal": [1.0, 1.0]}
+    parser = argparse.ArgumentParser(description="Plot CasADi optimal paths")
+    parser.add_argument("--num_traj", type=int, default=15)
+    parser.add_argument("--goal", type=float, nargs=2, default=[1.0, 1.0],
+                        help="Specific goal coordinate. Defaults to [1.0, 1.0].")
+    args = parser.parse_args()
+
+    config = {"dt": 0.05, "max_vel": 2.0, "horizon": 40, "mode": "mpc",
+              "goal": args.goal, "randomize_goal": False}
 
     simulator = SingleIntegrator(config)
-    planner = SingleRobotCasadiPlanner(simulator, config)
+    planner = CasadiPlanner(simulator, config)
 
-    num_trajectories = 15
     num_steps = 150
 
     plt.figure(figsize=(8, 8))
     plt.scatter(*config["goal"], color="red", marker="*", s=300, label="Goal",
                 zorder=5)
-    print(f"Simulating {num_trajectories} trajectories for plotting...")
+    print(f"Simulating {args.num_traj} trajectories for plotting...")
 
-    for i in range(num_trajectories):
-        initial_state = np.random.randn(2) * 2.0
-        state = simulator.reset(initial_state)
+    for i in range(args.num_traj):
+        state = simulator.reset_random()
+        planner.reset()
 
         x_history = [state[0]]
         y_history = [state[1]]

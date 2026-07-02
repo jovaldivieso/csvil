@@ -13,7 +13,9 @@ class SingleIntegrator(DynamicsSimulator):
 
     def __init__(self, config):
         super().__init__(config)
-        self.goal = config.get("goal", np.array([0.0, 0.0]))
+        self.goal = np.array(config.get("goal", [0.0, 0.0]))
+        # Determine if we should randomize the goal based on config
+        self.randomize_goal = config.get("randomize_goal", "goal" not in config)
         self.max_action = config.get("max_vel", 1.0)
         self.nx = 2
         self.nu = 2
@@ -66,8 +68,9 @@ class SingleIntegrator(DynamicsSimulator):
         return np.array([self.goal[0], self.goal[1]])
 
     def reset_random(self):
-        """Randomize both the goal and the start position"""
-        self.goal = np.random.uniform(low=-5.0, high=5.0, size=2)
+        """Randomize start position, and optionally the goal."""
+        if self.randomize_goal:
+            self.goal = np.random.uniform(low=-5.0, high=5.0, size=2)
 
         radius = np.random.uniform(0.5, 3.0)
         angle = np.random.uniform(0, 2 * np.pi)

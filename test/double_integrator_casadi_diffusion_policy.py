@@ -16,9 +16,19 @@ def main():
         description="Evaluate Trained Diffusion Policy")
     parser.add_argument("--model-dir", type=str, required=True,
                         help="Path to local checkpoint or Hugging Face Hub ID")
+    parser.add_argument("--goal", type=float, nargs=2, default=None,
+                        help="Specific goal coordinate. If not set, goals are randomized.")
     args = parser.parse_args()
 
     config = {"dt": 0.05, "max_accel": 2.0}
+
+    # Inject the specific goal logic into the config
+    if args.goal is not None:
+        config["goal"] = args.goal
+        config["randomize_goal"] = False
+    else:
+        config["randomize_goal"] = True
+
     sim = DoubleIntegrator(config)
 
     # If the path doesn't exist on the hard drive, try hugging face hub id
@@ -28,9 +38,14 @@ def main():
     policy = DiffusionPolicy.from_pretrained(args.model_dir)
     policy.eval()  # Set network to evaluation mode
 
-    # Explicitly set up the M1 GPU (MPS)
-    device = torch.device("mps" if torch.backends.mps.is_available() else
-                          "cpu")
+    # Explicitly set up the GPU (MPS for Mac, CUDA for PC)
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+        
     print(f"Running inference on: {device}")
     policy.to(device)  # Push the neural network to the GPU
 
@@ -73,9 +88,9 @@ def main():
     plt.plot(trajectory[:, 0], trajectory[:, 1], '-o', color='blue',
              label='Diffusion Policy Path', markersize=4)
     plt.scatter(trajectory[0, 0], trajectory[0, 1], c='green', marker='o',
-                s=150, label='Start Position')
+                s=150, label='Start Position', zorder=4)
     plt.scatter(config["goal"][0], config["goal"][1], c='red', marker='X',
-                s=150, label='Goal Position')
+                s=150, label='Goal Position', zorder=5)
 
     plt.title("Double Integrator: Trained Diffusion Policy Evaluation")
     plt.xlabel("X Position")

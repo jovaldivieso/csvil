@@ -38,8 +38,14 @@ class DataCollector:
             state = self.sim.reset_random()
             done_counter = 0
 
+            # Tell the planner a new episode is starting!
+            if hasattr(motion_planner, 'reset'):
+                motion_planner.reset()
+
             for _ in range(num_steps):
                 obs = self.sim.observe(state)
+
+                # The collector doesn't know HOW the planner gets the action
                 action = motion_planner(obs)
 
                 # Ask the simulator to format the current frame

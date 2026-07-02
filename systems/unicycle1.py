@@ -13,7 +13,8 @@ class Unicycle1(DynamicsSimulator):
 
     def __init__(self, config):
         super().__init__(config)
-        self.goal = config.get("goal", np.array([0.0, 0.0, 0.0]))
+        self.goal = np.array(config.get("goal", [0.0, 0.0, 0.0]))
+        self.randomize_goal = config.get("randomize_goal", "goal" not in config)
         self.max_action = config.get("max_v", 2.0)
         self.nx = 3
         self.nu = 2
@@ -21,34 +22,27 @@ class Unicycle1(DynamicsSimulator):
     def step(self, state, action):
         action = np.clip(action, -self.max_action, self.max_action)
 
-        # extract state and action components
         pos = state[:2]
         theta = state[2]
         v = action[0]
         omega = action[1]
-        # compute next state using unicycle dynamics
         next_pos = pos + np.array([v * np.cos(theta),
                                    v * np.sin(theta)]) * self.dt
         next_theta = theta + omega * self.dt
         return np.concatenate([next_pos, [next_theta]])
 
     def observe(self, state):
-        # extract state components
         pos = state[:2]
         theta = state[2]
-        # compute relative position to goal and orientation
         rel_pos = self.goal[:2] - pos
-        # theta
         rel_theta = self.goal[2] - theta
-        # wrap to [-pi, pi]
         rel_theta = (rel_theta + np.pi) % (2 * np.pi) - np.pi
         return np.concatenate([rel_pos, [rel_theta]])
 
     def is_done(self, state):
-        # must reach goal position and orientation
         pos_error = np.linalg.norm(state[:2] - self.goal[:2])
         theta_error = abs((state[2] - self.goal[2] + np.pi) %
-                          (2 * np.pi) - np.pi)  # wrap to [-pi, pi]
+                          (2 * np.pi) - np.pi)
         return pos_error < 0.05 and theta_error < 0.05
 
     def casadi_dynamics(self, x, u):
@@ -94,13 +88,12 @@ class Unicycle1(DynamicsSimulator):
         return np.array([self.goal[0], self.goal[1], self.goal[2]])
 
     def reset_random(self):
-        """Randomize both the goal and the start position"""
-        # Randomize the goal anywhere in a predefined workspace
-        goal_pos = np.random.uniform(low=-5.0, high=5.0, size=2)
-        goal_theta = np.random.uniform(low=-np.pi, high=np.pi)
-        self.goal = np.array([goal_pos[0], goal_pos[1], goal_theta])
+        """Randomize start position, and optionally the goal."""
+        if self.randomize_goal:
+            goal_pos = np.random.uniform(low=-5.0, high=5.0, size=2)
+            goal_theta = np.random.uniform(low=-np.pi, high=np.pi)
+            self.goal = np.array([goal_pos[0], goal_pos[1], goal_theta])
 
-        # Uniform polar sampling for the start position, relative to the goal
         radius = np.random.uniform(0.5, 3.0)
         angle = np.random.uniform(0, 2 * np.pi)
         offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
@@ -108,7 +101,6 @@ class Unicycle1(DynamicsSimulator):
         start_pos = self.goal[:2] + offset
         start_theta = np.random.uniform(low=-np.pi, high=np.pi)
 
-        # Initialize at rest
         initial_state = np.array([start_pos[0], start_pos[1], start_theta])
         return self.reset(initial_state)
 

@@ -51,10 +51,11 @@ csvil/
 │   ├── double_integrator_casadi_diffusion_policy_config.yaml
 │   └── training.py
 ├── planning/
-│   └── single_robot_casadi.py
+│   ├── casadi_planner.py     # Subclass
+│   └── planner.py            # Base class
 ├── systems/
-│   ├── double_integrator.py
-│   └── dynamics.py
+│   ├── double_integrator.py  # Subclass
+│   └── dynamics.py           # Base class
 └── test/
     ├── double_integrator_casadi_data.py
     ├── double_integrator_casadi_diffusion_policy.py

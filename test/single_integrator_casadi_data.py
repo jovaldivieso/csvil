@@ -5,28 +5,32 @@ import argparse
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.data_collection import DataCollector
-from planning.single_robot_casadi import SingleRobotCasadiPlanner
+from planning.casadi_planner import CasadiPlanner
 from systems.single_integrator import SingleIntegrator
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate Expert Dataset \
-    using CasADi")
-    parser.add_argument("--num_traj", type=int, default=100,
-                        help="Number of expert trajectories to collect")
+    parser = argparse.ArgumentParser(description="Generate Expert Dataset")
+    parser.add_argument("--num_traj", type=int, default=100)
     parser.add_argument("--repo_id", type=str,
-                        default="local/double_integrator_casadi_expert")
+                        default="local/single_integrator_casadi_expert")
     parser.add_argument("--local_dir", type=str,
-                        default="data/lerobot_dataset_single_integrator_casadi"
-                        )
+                        default="data/lerobot_dataset_single_integrator_casadi")
+    parser.add_argument("--goal", type=float, nargs=2, default=None,
+                        help="Specific goal coordinate. If not set, goals are randomized.")
     args = parser.parse_args()
 
-    # Pass the argparse goal into the physics and planner configurations
-    config = {"dt": 0.05, "max_vel": 2.0, "horizon": 20,
+    config = {"dt": 0.05, "max_vel": 2.0, "horizon": 40, "mode": "mpc",
               "Q_diag": [10.0, 10.0], "R_weight": 0.1}
 
+    if args.goal is not None:
+        config["goal"] = args.goal
+        config["randomize_goal"] = False
+    else:
+        config["randomize_goal"] = True
+
     simulator = SingleIntegrator(config)
-    planner = SingleRobotCasadiPlanner(simulator, config)
+    planner = CasadiPlanner(simulator, config)
 
     collector = DataCollector(
         simulator,
