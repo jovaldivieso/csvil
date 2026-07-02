@@ -13,20 +13,19 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate Trained Diffusion Policy (Random Scenario)")
+        description="Evaluate Trained Diffusion Policy")
     parser.add_argument("--model-dir", type=str, required=True,
                         help="Path to local checkpoint or Hugging Face Hub ID")
-    parser.add_argument("--goal", type=float, nargs=2, default=None,
-                        help="Specific goal coordinate. If not set, goals are randomized.")
+    parser.add_argument("--goal", type=float, nargs=2, default=[0.0, 0.0],
+                        help="Specific goal coordinate. Defaults to [0.0, 0.0].")
     args = parser.parse_args()
 
-    config = {"dt": 0.05, "max_vel": 2.0}
-
-    if args.goal is not None:
-        config["goal"] = args.goal
-        config["randomize_goal"] = False
-    else:
-        config["randomize_goal"] = True
+    config = {
+        "dt": 0.05, 
+        "max_vel": 2.0,
+        "goal": args.goal,
+        "randomize_goal": False
+    }
 
     sim = SingleIntegrator(config)
 

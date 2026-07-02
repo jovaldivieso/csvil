@@ -16,17 +16,16 @@ def main():
         description="Evaluate Trained Diffusion Policy")
     parser.add_argument("--model-dir", type=str, required=True,
                         help="Path to local checkpoint or Hugging Face Hub ID")
-    parser.add_argument("--goal", type=float, nargs=3, default=None,
-                        help="Specific goal (x, y, theta). If not set, randomized.")
+    parser.add_argument("--goal", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+                        help="Specific goal (x, y, theta). Defaults to [0.0, 0.0, 0.0].")
     args = parser.parse_args()
 
-    config = {"dt": 0.05, "max_v": 2.0}
-
-    if args.goal is not None:
-        config["goal"] = args.goal
-        config["randomize_goal"] = False
-    else:
-        config["randomize_goal"] = True
+    config = {
+        "dt": 0.05, 
+        "max_v": 2.0,
+        "goal": args.goal, 
+        "randomize_goal": False
+    }
 
     sim = Unicycle1(config)
 

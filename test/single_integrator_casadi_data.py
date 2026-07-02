@@ -16,18 +16,14 @@ def main():
                         default="local/single_integrator_casadi_expert")
     parser.add_argument("--local_dir", type=str,
                         default="data/lerobot_dataset_single_integrator_casadi")
-    parser.add_argument("--goal", type=float, nargs=2, default=None,
-                        help="Specific goal coordinate. If not set, goals are randomized.")
+    parser.add_argument("--goal", type=float, nargs=2, default=[0.0, 0.0],
+                        help="Specific goal coordinate. Defaults to [0.0, 0.0].")
     args = parser.parse_args()
 
+    # Hardcoded random goal to False, inject goal from args
     config = {"dt": 0.05, "max_vel": 2.0, "horizon": 40, "mode": "mpc",
-              "Q_diag": [10.0, 10.0], "R_weight": 0.1}
-
-    if args.goal is not None:
-        config["goal"] = args.goal
-        config["randomize_goal"] = False
-    else:
-        config["randomize_goal"] = True
+              "Q_diag": [10.0, 10.0], "R_weight": 0.1, 
+              "goal": args.goal, "randomize_goal": False}
 
     simulator = SingleIntegrator(config)
     planner = CasadiPlanner(simulator, config)

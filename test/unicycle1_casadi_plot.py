@@ -13,8 +13,8 @@ from planning.casadi_planner import CasadiPlanner
 def main():
     parser = argparse.ArgumentParser(description="Plot CasADi optimal paths")
     parser.add_argument("--num_traj", type=int, default=15)
-    parser.add_argument("--goal", type=float, nargs=3, default=[1.0, 1.0, np.pi / 4],
-                        help="Specific goal (x, y, theta). Defaults to [1.0, 1.0, pi/4].")
+    parser.add_argument("--goal", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+                        help="Specific goal (x, y, theta). Defaults to [0.0, 0.0, 0.0].")
     args = parser.parse_args()
 
     config = {

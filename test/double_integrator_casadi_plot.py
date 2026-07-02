@@ -12,11 +12,13 @@ from systems.double_integrator import DoubleIntegrator
 def main():
     parser = argparse.ArgumentParser(description="Plot CasADi optimal paths")
     parser.add_argument("--num_traj", type=int, default=15)
-    # Default to a fixed goal so the plot shows paths converging to one point
-    parser.add_argument("--goal", type=float, nargs=2, default=[1.0, 1.0],
-                        help="Specific goal coordinate. Defaults to [1.0, 1.0].")
+    # Changed default to [0.0, 0.0] to match the training data
+    parser.add_argument(
+        "--goal", type=float, nargs=2, default=[0.0, 0.0],
+        help="Specific goal coordinate. Defaults to [0.0, 0.0].")
     args = parser.parse_args()
 
+    # randomize_goal is correctly set to False here
     config = {"dt": 0.05, "max_accel": 2.0, "horizon": 40, "mode": "mpc",
               "goal": args.goal, "randomize_goal": False}
 
@@ -31,10 +33,7 @@ def main():
     print(f"Simulating {args.num_traj} trajectories for plotting...")
 
     for i in range(args.num_traj):
-        # Using reset_random ensures the plot matches your training distribution!
         state = simulator.reset_random()
-
-        # Reset the planner for the new plotting episode!
         planner.reset()
 
         x_history = [state[0]]

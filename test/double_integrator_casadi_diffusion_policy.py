@@ -16,50 +16,47 @@ def main():
         description="Evaluate Trained Diffusion Policy")
     parser.add_argument("--model-dir", type=str, required=True,
                         help="Path to local checkpoint or Hugging Face Hub ID")
-    parser.add_argument("--goal", type=float, nargs=2, default=None,
-                        help="Specific goal coordinate. If not set, goals are randomized.")
+    # Set default to [0.0, 0.0]
+    parser.add_argument(
+        "--goal", type=float, nargs=2, default=[0.0, 0.0],
+        help="Specific goal coordinate. Defaults to [0.0, 0.0].")
     args = parser.parse_args()
 
-    config = {"dt": 0.05, "max_accel": 2.0}
-
-    # Inject the specific goal logic into the config
-    if args.goal is not None:
-        config["goal"] = args.goal
-        config["randomize_goal"] = False
-    else:
-        config["randomize_goal"] = True
+    # Hardcode randomize_goal to False and inject the fixed goal
+    config = {
+        "dt": 0.05,
+        "max_accel": 2.0,
+        "goal": args.goal,
+        "randomize_goal": False
+    }
 
     sim = DoubleIntegrator(config)
 
-    # If the path doesn't exist on the hard drive, try hugging face hub id
     if not os.path.exists(args.model_dir):
         print(f"Assuming '{args.model_dir}' is a Hugging Face Hub ID.")
 
     policy = DiffusionPolicy.from_pretrained(args.model_dir)
-    policy.eval()  # Set network to evaluation mode
+    policy.eval()
 
-    # Explicitly set up the GPU (MPS for Mac, CUDA for PC)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
-        
+
     print(f"Running inference on: {device}")
-    policy.to(device)  # Push the neural network to the GPU
+    policy.to(device)
 
-    np.random.seed(42)  # Fixed seed for reproducible testing
+    np.random.seed(42)
 
-    # Use the exact same random spawning logic as the data collector
     state = sim.reset_random()
 
-    # Update the config dict so the Matplotlib red 'X' knows the new goal
     config["goal"] = sim.goal.copy()
 
     policy.reset()
 
-    trajectory = [state[:2].copy()]  # Store (x, y) for plotting
+    trajectory = [state[:2].copy()]
 
     for step in range(100):
         obs = sim.observe(state)

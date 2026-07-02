@@ -16,19 +16,13 @@ def main():
                         default="local/unicycle1_casadi_expert")
     parser.add_argument("--local_dir", type=str,
                         default="data/lerobot_dataset_unicycle1_casadi")
-    # Note: Unicycle has 3 goal states (x, y, theta)
-    parser.add_argument("--goal", type=float, nargs=3, default=None,
-                        help="Specific goal (x, y, theta). If not set, randomized.")
+    parser.add_argument("--goal", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+                        help="Specific goal (x, y, theta). Defaults to [0.0, 0.0, 0.0].")
     args = parser.parse_args()
 
     config = {"dt": 0.05, "max_v": 2.0, "horizon": 30, "mode": "mpc",
-              "Q_diag": [10.0, 10.0, 5.0], "R_weight": 0.1}
-
-    if args.goal is not None:
-        config["goal"] = args.goal
-        config["randomize_goal"] = False
-    else:
-        config["randomize_goal"] = True
+              "Q_diag": [10.0, 10.0, 5.0], "R_weight": 0.1,
+              "goal": args.goal, "randomize_goal": False}
 
     simulator = Unicycle1(config)
     planner = CasadiPlanner(simulator, config)

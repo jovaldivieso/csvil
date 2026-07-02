@@ -13,8 +13,8 @@ from systems.single_integrator import SingleIntegrator
 def main():
     parser = argparse.ArgumentParser(description="Plot CasADi optimal paths")
     parser.add_argument("--num_traj", type=int, default=15)
-    parser.add_argument("--goal", type=float, nargs=2, default=[1.0, 1.0],
-                        help="Specific goal coordinate. Defaults to [1.0, 1.0].")
+    parser.add_argument("--goal", type=float, nargs=2, default=[0.0, 0.0],
+                        help="Specific goal coordinate. Defaults to [0.0, 0.0].")
     args = parser.parse_args()
 
     config = {"dt": 0.05, "max_vel": 2.0, "horizon": 40, "mode": "mpc",
