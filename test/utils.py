@@ -1,10 +1,6 @@
 from data.data_collection import DataCollector
 from planning.casadi_planner import CasadiPlanner
 
-###############################
-####### data collection #######
-###############################
-
 def collect_casadi_expert_data(
     simulator_class,
     config,

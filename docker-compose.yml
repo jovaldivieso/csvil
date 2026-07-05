@@ -1,0 +1,25 @@
+services:
+  csvil:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    platform: linux/amd64
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - huggingface_cache:/root/.cache/huggingface
+    stdin_open: true
+    tty: true
+  db-lacam:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.db-lacam
+    platform: linux/amd64
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    stdin_open: true
+    tty: true
+
+volumes:
+  huggingface_cache:
