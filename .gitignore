@@ -13,5 +13,8 @@ data/lerobot_dataset_single_integrator_casadi/
 data/lerobot_dataset_double_integrator_casadi/
 
 test/*.pdf
+# ignores all test configs except files starting with "default"
+test/cfg/*
+!test/cfg/default*
 
 outputs/
