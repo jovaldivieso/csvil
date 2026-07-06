@@ -73,7 +73,7 @@ def rollout_diffusion_policy(simulator, policy, device, num_steps):
 
     returns:
         trajectory: array containing visited simulator states
-        reached_goal: whether the simulator reached goal state
+        reached_goal: whether simulator reached goal state
         steps_taken: number of executed simulation steps
     """
 
@@ -122,9 +122,8 @@ def main():
         help="path to json config file for experiment",
     )
     parser.add_argument(
-        "--model_dir",
+        "model_dir",
         type=str,
-        required=True,
         help="path to a local checkpoint or Hugging Face Hub model ID",
     )
     parser.add_argument(

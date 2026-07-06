@@ -11,7 +11,7 @@ PROJECT_ROOT = os.path.dirname(
 )
 sys.path.insert(0, PROJECT_ROOT)
 
-# import new systems here, then add them to SIMULATORS and PLOT_OPTIONS:
+# import new systems here, then add them to SIMULATORS and HEADING_SYSTEMS:
 from planning.casadi_planner import CasadiPlanner
 from systems.double_integrator import DoubleIntegrator
 from systems.single_integrator import SingleIntegrator
@@ -25,19 +25,9 @@ SIMULATORS = {
     "unicycle2": Unicycle2,
 }
 
-PLOT_OPTIONS = {
-    "single_integrator": {
-        "show_heading": False,
-    },
-    "double_integrator": {
-        "show_heading": False,
-    },
-    "unicycle1": {
-        "show_heading": True,
-    },
-    "unicycle2": {
-        "show_heading": True,
-    },
+HEADING_SYSTEMS = {
+    "unicycle1",
+    "unicycle2",
 }
 
 def rollout_trajectory(simulator, planner, num_steps):
@@ -131,8 +121,6 @@ def main():
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    show_heading = PLOT_OPTIONS[args.system]["show_heading"]
-
     fig, ax = plt.subplots(figsize=(8, 8))
 
     goal_x, goal_y = simulator.goal[:2]
@@ -146,6 +134,7 @@ def main():
         zorder=5,
     )
 
+    show_heading = args.system in HEADING_SYSTEMS
     if show_heading:
         goal_theta = simulator.goal[2]
 
