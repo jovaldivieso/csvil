@@ -75,13 +75,13 @@ csvil/
 ├── systems/
 │   ├── dynamics.py           # Base class
 │   └── double_integrator.py  # Example subclass
-├── test/
-│   ├── config/
-│   │   └── double_integrator_casadi_config.yaml  # Example expert config
-│   ├── collect_casadi_expert_data.py
-│   ├── evaluate_diffusion_policy.py 
-│   ├── plot_casadi_trajectories.py
-│   └── utils.py
+└── test/
+    ├── config/
+    │   └── double_integrator_casadi_config.yaml  # Example expert config
+    ├── collect_casadi_expert_data.py
+    ├── evaluate_diffusion_policy.py 
+    ├── plot_casadi_trajectories.py
+    └── utils.py
 ```
 
 The available systems are:
