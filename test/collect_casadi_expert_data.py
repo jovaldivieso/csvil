@@ -1,6 +1,6 @@
 import os
 import sys
-import json
+import yaml
 import argparse
 
 PROJECT_ROOT = os.path.dirname(
@@ -23,54 +23,55 @@ SIMULATORS = {
     "unicycle2": Unicycle2,
 }
 
+
 def main():
     """
     generates a local LeRobot dataset of expert trajectories
     """
 
     parser = argparse.ArgumentParser()
-    
+
     parser.add_argument(
-        "system",
+        "--system",
         type=str.lower,
         choices=SIMULATORS.keys(),
         help="name of system class, e.g. single_integrator, unicycle2, ...",
     )
     parser.add_argument(
-        "path_to_config",
+        "--config",
         type=str,
-        help="path to json config file for experiment",
+        help="path to yaml config file for experiment",
     )
     parser.add_argument(
-        "--num_traj",
+        "--num-traj",
         type=int,
         default=100,
         help="number of expert trajectories to generate",
     )
     parser.add_argument(
-        "--num_steps",
+        "--num-steps",
         type=int,
         default=150,
         help="maximum number of simulation steps per trajectory",
     )
     parser.add_argument(
-        "--repo_id",
+        "--repo-id",
         type=str,
         help="identifier stored in LeRobot dataset metadata",
     )
     parser.add_argument(
-        "--local_dir",
+        "--local-dir",
         type=str,
         help="local directory where dataset is saved",
     )
 
     args = parser.parse_args()
-    
+
     repo_id = args.repo_id or f"local/{args.system}_casadi_expert"
     local_dir = args.local_dir or f"data/lerobot_dataset_{args.system}_casadi"
 
-    with open(args.path_to_config, "r") as file:
-        cfg = json.load(file)
+    with open(args.config, "r") as file:
+        cfg = yaml.safe_load(file)
 
     collect_casadi_expert_data(
         simulator_class=SIMULATORS[args.system],
@@ -80,6 +81,7 @@ def main():
         num_traj=args.num_traj,
         num_steps=args.num_steps,
     )
+
 
 if __name__ == "__main__":
     main()

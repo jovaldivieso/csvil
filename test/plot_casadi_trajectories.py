@@ -1,6 +1,6 @@
 import os
 import sys
-import json
+import yaml
 import argparse
 
 import numpy as np
@@ -29,6 +29,7 @@ HEADING_SYSTEMS = {
     "unicycle1",
     "unicycle2",
 }
+
 
 def rollout_trajectory(simulator, planner, num_steps):
     """
@@ -75,30 +76,30 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "system",
+        "--system",
         type=str.lower,
         choices=SIMULATORS.keys(),
         help="name of system class in lower case, e.g. single_integrator, unicycle2, ...",
     )
     parser.add_argument(
-        "path_to_config",
+        "--config",
         type=str,
-        help="path to json config file for experiment",
+        help="path to yaml config file for experiment",
     )
     parser.add_argument(
-        "--num_traj",
+        "--num-traj",
         type=int,
         default=15,
         help="number of randomized trajectories to plot",
     )
     parser.add_argument(
-        "--num_steps",
+        "--num-steps",
         type=int,
         default=150,
         help="maximum number of simulation steps per trajectory",
     )
     parser.add_argument(
-        "--output_path",
+        "--output-path",
         type=str,
         default=None,
         help="path to generated PDF plot",
@@ -106,8 +107,8 @@ def main():
 
     args = parser.parse_args()
 
-    with open(args.path_to_config, "r") as file:
-        config = json.load(file)
+    with open(args.config, "r") as file:
+        config = yaml.safe_load(file)
 
     simulator = SIMULATORS[args.system](config)
     planner = CasadiPlanner(simulator, config)

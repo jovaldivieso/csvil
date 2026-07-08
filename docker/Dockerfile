@@ -16,14 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements/lerobot.txt /tmp/lerobot.txt
+COPY requirements.txt /tmp/requirements.txt
 
 RUN python -m pip install --upgrade pip \
     && python -m pip install \
         torch==2.7.1 \
         torchvision==0.22.1 \
         --index-url https://download.pytorch.org/whl/cpu \
-    && python -m pip install -r /tmp/lerobot.txt
+    && python -m pip install -r /tmp/requirements.txt
 
 COPY . /workspace
 

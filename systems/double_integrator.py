@@ -20,6 +20,7 @@ class DoubleIntegrator(DynamicsSimulator):
         self.max_action = config.get("max_accel", 2.0)
         self.nx = 4
         self.nu = 2
+        self.error_tolerance = float(config.get("error_tolerance", 0.05))
 
     def step(self, state, action):
         pos = state[:2]
@@ -39,7 +40,7 @@ class DoubleIntegrator(DynamicsSimulator):
         # Must reach goal and stop moving
         dist = np.linalg.norm(state[:2] - self.goal)
         speed = np.linalg.norm(state[2:4])
-        return dist < 0.05 and speed < 0.05
+        return dist < self.error_tolerance and speed < self.error_tolerance
 
     def casadi_dynamics(self, x, u):
         """Symbolic double integrator for CasADi"""
@@ -54,13 +55,13 @@ class DoubleIntegrator(DynamicsSimulator):
         return {
             "observation.environment_state": {
                 "dtype": "float32",
-                "shape": (4,),
-                "names": ["goal_rel_x", "goal_rel_y", "vx", "vy"]
+                "shape": (2,),
+                "names": ["goal_rel_x", "goal_rel_y"]
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (4,),
-                "names": ["goal_rel_x", "goal_rel_y", "vx", "vy"]
+                "shape": (2,),
+                "names": ["vx", "vy"]
             },
             "action": {
                 "dtype": "float32",
@@ -102,7 +103,7 @@ class DoubleIntegrator(DynamicsSimulator):
         """Package the observation and action into a dictionary for LeRobot"""
         return {
             "observation.environment_state":
-            torch.from_numpy(obs[0:4]).float(),
-            "observation.state": torch.from_numpy(obs[0:4]).float(),
+            torch.from_numpy(obs[0:2]).float(),
+            "observation.state": torch.from_numpy(obs[2:4]).float(),
             "action": torch.from_numpy(action).float(),
         }
