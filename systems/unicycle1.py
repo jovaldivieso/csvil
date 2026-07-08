@@ -14,10 +14,12 @@ class Unicycle1(DynamicsSimulator):
     def __init__(self, config):
         super().__init__(config)
         self.goal = np.array(config.get("goal", [0.0, 0.0, 0.0]))
-        self.randomize_goal = config.get("randomize_goal", "goal" not in config)
+        self.randomize_goal = config.get("randomize_goal",
+                                         "goal" not in config)
         self.max_action = config.get("max_v", 2.0)
         self.nx = 3
         self.nu = 2
+        self.error_tolerance = float(config.get("error_tolerance", 0.05))
 
     def step(self, state, action):
         action = np.clip(action, -self.max_action, self.max_action)
@@ -43,7 +45,8 @@ class Unicycle1(DynamicsSimulator):
         pos_error = np.linalg.norm(state[:2] - self.goal[:2])
         theta_error = abs((state[2] - self.goal[2] + np.pi) %
                           (2 * np.pi) - np.pi)
-        return pos_error < 0.05 and theta_error < 0.05
+        return (pos_error < self.error_tolerance and
+                theta_error < self.error_tolerance)
 
     def casadi_dynamics(self, x, u):
         """Symbolic unicycle 1 dynamics for CasADi"""
