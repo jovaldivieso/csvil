@@ -15,10 +15,12 @@ class SingleIntegrator(DynamicsSimulator):
         super().__init__(config)
         self.goal = np.array(config.get("goal", [0.0, 0.0]))
         # Determine if we should randomize the goal based on config
-        self.randomize_goal = config.get("randomize_goal", "goal" not in config)
+        self.randomize_goal = config.get("randomize_goal",
+                                         "goal" not in config)
         self.max_action = config.get("max_vel", 1.0)
         self.nx = 2
         self.nu = 2
+        self.error_tolerance = float(config.get("error_tolerance", 0.05))
 
     def step(self, state, action):
         action = np.clip(action, -self.max_action, self.max_action)
@@ -30,7 +32,7 @@ class SingleIntegrator(DynamicsSimulator):
 
     def is_done(self, state):
         dist = np.linalg.norm(state - self.goal)
-        return dist < 0.05
+        return dist < self.error_tolerance
 
     def casadi_dynamics(self, x, u):
         """Symbolic single integrator for CasADi"""

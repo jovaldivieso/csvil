@@ -57,6 +57,9 @@ class CasadiPlanner(Planner):
         # Cost matrices depending on system state
         self.Q = np.diag(config.get("Q_diag", [10.0] * self.sim.nx))
         self.R = np.eye(self.sim.nu) * config.get("R_weight", 0.1)
+        
+        state_lower_bounds = getattr(self.sim, "state_lower_bounds", None)
+        state_upper_bounds = getattr(self.sim, "state_upper_bounds", None)
 
         # Build the CasADi NLP graph
         self.opti = ca.Opti()
@@ -78,6 +81,20 @@ class CasadiPlanner(Planner):
             for i in range(self.sim.nu):
                 self.opti.subject_to(self.U[i, k] >= -self.sim.max_action)
                 self.opti.subject_to(self.U[i, k] <= self.sim.max_action)
+            
+            # adds lower and upper bounds for state variables:    
+            if state_lower_bounds is not None:
+                for i in range(self.sim.nx):
+                    if np.isfinite(state_lower_bounds[i]):
+                        self.opti.subject_to(
+                            self.X[i, k + 1] >= state_lower_bounds[i]
+                        )
+            if state_upper_bounds is not None:
+                for i in range(self.sim.nx):
+                    if np.isfinite(state_upper_bounds[i]):
+                        self.opti.subject_to(
+                            self.X[i, k + 1] <= state_upper_bounds[i]
+                        )
 
             error = self.X[:, k] - self.goal_param
             cost += ca.mtimes(error.T, ca.mtimes(self.Q, error))

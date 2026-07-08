@@ -1,102 +1,162 @@
 # Controller Synthesis via Imitation Learning
 
-This repository contains a modular pipeline for controller synthesis via imitation learning. The primary goal is to imitate a computationally heavy motion planner using a faster neural policy to accelerate inference.
+This repository contains a modular pipeline for controller synthesis via imitation learning. The goal is to imitate a computationally expensive motion planner with a faster neural policy for online control.
+
+The current expert planner uses CasADi. A separate Docker environment for future work with db-LaCAM is included as well.
 
 ## Installation & setup
-
-### Prerequisites
-This project was tested so far with **Python 3.11** and **3.12**. 
 
 ### Clone the repository
 Clone the project to your local machine and navigate into the root directory:
 ```bash
-git clone git@github.com/jovaldivieso/csvil.git
+git clone git@github.com:jovaldivieso/csvil.git
 cd csvil
 ```
 
-### Set up a virtual environment
-Set up the native Python virtual environment (`venv`) or `conda` if you are following the LeRobot tutorials. Example with Python's `venv`:
+### Install Docker
+Docker is used so every contributor runs the same dependency stack (this is particularly useful on Intel Macs, since some newer PyTorch versions required by LeRobot are not available as native macOS Intel x86_64 packages).
+
+[Install](https://docs.docker.com/desktop/setup/install/windows-install/) Docker Desktop. On macOS, open it from your Applications folder and wait until Docker Desktop indicates that it is running. Verify the installation:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+docker --version
+docker compose version
 ```
 
-### Install dependencies
-Once your virtual environment is active, install the required packages:
+`docker-compose.yml` defines the runnable services. The `csvil` service is the main Python environment and runs the project in a Linux amd64 container. The `db-lacam` service is a separate environment for db-LaCAM and its C++ dependencies.
+
+### Build the project environment
+
+Build the project environment once:
+
 ```bash
-pip install -r requirements.txt
+docker compose build csvil
 ```
-This will install LeRobot, CasADi, and their required dependencies like PyTorch and NumPy.
+
+Run project commands through Docker:
+
+```bash
+docker compose run --rm csvil <command>
+```
+
+The repository is available as `/workspace` inside the container. The `--rm` option removes the temporary container after the command completes (but does not remove the image, generated files or Hugging Face cache).
+
+The db-LaCAM environment is optional and is not needed for the standard CasADi workflow:
+
+```bash
+docker compose build db-lacam
+```
+The first build may take several minutes. Rebuilding is only necessary when changing the Dockerfile, compose-file or requirements-file.
 
 ### Hugging Face authentication
-Because the pipeline uses LeRobot to manage datasets and model checkpoints via the Hugging Face Hub, you should authenticate your terminal if you want to use this feature.
+Hugging Face authentication is only needed when uploading datasets or models to the Hub.
 1. Create an account at [huggingface.co](https://huggingface.co/).
 2. Go to **Settings > Access Tokens** and create a new token with **Write** permissions.
 3. Run the following command in your terminal and paste your token when prompted:
+
 ```bash
-hf auth login
+docker compose run --rm csvil hf auth login
 ```
 
----
-
-## File Structure
+## Core file structure
 
 ```text
 csvil/
 ├── data/
 │   ├── data_collection.py
-│   └── lerobot_dataset_double_integrator_casadi/   # Example generated dataset
+│   └── lerobot_dataset_double_integrator_casadi/  # Example generated dataset
 ├── learning/
-│   ├── double_integrator_casadi_diffusion_policy_config.yaml
+│   ├── config/
+│   │   └── double_integrator_casadi_diffusion_policy_config.yaml  # Example training config
 │   └── training.py
 ├── planning/
-│   ├── casadi_planner.py     # Subclass
-│   └── planner.py            # Base class
+│   ├── planner.py            # Base class
+│   └── casadi_planner.py     # Example subclass
 ├── systems/
-│   ├── double_integrator.py  # Subclass
-│   └── dynamics.py           # Base class
-└── test/
-    ├── double_integrator_casadi_data.py
-    ├── double_integrator_casadi_diffusion_policy.py
-    └── double_integrator_casadi_plot.py
+│   ├── dynamics.py           # Base class
+│   └── double_integrator.py  # Example subclass
+├── test/
+│   ├── config/
+│   │   └── double_integrator_casadi_config.yaml  # Example expert config
+│   ├── collect_casadi_expert_data.py
+│   ├── evaluate_diffusion_policy.py 
+│   ├── plot_casadi_trajectories.py
+│   └── utils.py
 ```
 
-## Pipeline Features
+The available systems are:
 
-Follow these steps to generate expert data, train the neural network, and evaluate the cloned policy.
+- `single_integrator`
+- `double_integrator`
+- `unicycle1`
+- `unicycle2`
+
+Each planner and corresponding dynamics use a yaml configuration file in `test/config/`. These files contain the simulator and planner parameters, including e.g. the time step, MPC horizon, goal state and system-specific limits.
+
+## Pipeline features
 
 ### Generate a motion planning expert dataset
-Run a data collection script to simulate the motion planner expert and save the state or observation and action data of the given system in the LeRobot dataset format. Example with the double integrator system and CasADi based motion planner:
+
+Generate trajectories from the CasADi expert and save them in the LeRobot dataset format:
 
 ```bash
-python test/double_integrator_casadi_data.py
+docker compose run --rm csvil \
+  python test/collect_casadi_expert_data.py \
+  --system double_integrator \
+  --config test/config/double_integrator_casadi_config.yaml
 ```
-This will automatically save a Hugging Face compatible dataset to `data/lerobot_dataset_double_integrator_casadi`.
+
+The Hugging Face compatible dataset is saved locally in a directory similar to:
+
+```text
+data/lerobot_dataset_double_integrator_casadi/
+```
+
+### Visualize expert trajectories
+
+Create a PDF plot of trajectories generated by the CasADi expert:
+
+```bash
+docker compose run --rm csvil \
+  python test/plot_casadi_trajectories.py \
+  --system double_integrator \
+  --config test/config/double_integrator_casadi_config.yaml
+```
 
 ### Visualize the dataset
 Once the dataset is generated, you can use LeRobot's native CLI tool to launch a local web visualizer and inspect the expert trajectories:
 
 ```bash
-lerobot-dataset-viz \
+docker compose run --rm csvil \
+  lerobot-dataset-viz \
   --repo-id local/double_integrator_casadi_expert \
   --root data/lerobot_dataset_double_integrator_casadi \
   --mode local \
   --episode-index 0
 ```
 
-### Imitation learning with diffusion policy
-Train the neural network using the pre-configured YAML settings. The script will automatically stop and save the model weights once it reaches the target steps.
+### Train a diffusion policy with imitation learning
+
+Train a diffusion policy using the matching YAML configuration:
 
 ```bash
-python learning/training.py --config learning/double_integrator_casadi_diffusion_policy_config.yaml
+docker compose run --rm csvil \
+  python learning/training.py \
+  --config learning/config/double_integrator_casadi_diffusion_policy_config.yaml
 ```
-Checkpoints will be saved automatically in the auto-generated `outputs/train/` directory.
 
-### Evaluate the cloned policy
-Test the trained neural network independently of the training loop. Make sure to pass your latest timestamped output folder or Hugging Face Hub ID to the `--model-dir` argument.
+Training outputs and checkpoints are saved in the configured output directory.
+
+### Evaluate the learned policy
+
+Evaluate a trained policy in the selected simulator independently of the training loop. Make sure to pass your latest timestamped output folder or Hugging Face Hub ID to the --model-dir argument:
 
 ```bash
-python test/double_integrator_casadi_diffusion_policy.py --model-dir jovaldivieso/double_integrator_casadi_diffusion_policy
+docker compose run --rm csvil \
+  python test/evaluate_diffusion_policy.py \
+  --system double_integrator \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --model-dir outputs/train/<run-name>/checkpoints/<checkpoint-name>
 ```
-This will run an autonomous rollout using the trained policy and output a PDF plot of the trajectory to the workspace.
+
+The script runs a rollout using the trained policy and saves a trajectory plot.
