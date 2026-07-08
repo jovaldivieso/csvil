@@ -1,6 +1,6 @@
 import os
 import sys
-import json
+import yaml
 import torch
 import argparse
 
@@ -33,6 +33,7 @@ HEADING_SYSTEMS = {
     "unicycle2",
 }
 
+
 def get_inference_device():
     """
     returns the best available device for diffusion-policy inference
@@ -48,23 +49,32 @@ def get_inference_device():
 
 def create_policy_input(simulator, observation, device):
     """
-    converts a simulator observation into dictionary expected by LeRobot
-
-    current single-robot systems use same observation vector for
-    ``observation.environment_state`` and ``observation.state``
+    Dynamically slices the flat observation array based on the
+    feature shapes defined by the simulator.
     """
+    policy_input = {}
+    features = simulator.get_dataset_features()
 
-    observation_tensor = torch.as_tensor(
-        observation,
-        dtype=torch.float32,
-        device=device,
-    ).unsqueeze(0)
+    current_idx = 0
+    for feature_name, feature_info in features.items():
+        if feature_name.startswith("observation."):
+            # Get the dimension of this specific observation feature
+            dim = feature_info["shape"][0]
 
-    return {
-        feature_name: observation_tensor
-        for feature_name in simulator.get_dataset_features()
-        if feature_name.startswith("observation.")
-    }
+            # Slice the exact chunk of the observation array
+            sliced_obs = observation[current_idx: current_idx + dim]
+
+            # Convert to tensor, add batch dimension, and send to device
+            policy_input[feature_name] = torch.as_tensor(
+                sliced_obs,
+                dtype=torch.float32,
+                device=device
+            ).unsqueeze(0)
+
+            # Move the pointer forward for the next feature
+            current_idx += dim
+
+    return policy_input
 
 
 def rollout_diffusion_policy(simulator, policy, device, num_steps):
@@ -103,6 +113,7 @@ def rollout_diffusion_policy(simulator, policy, device, num_steps):
 
     return np.asarray(trajectory), False, num_steps
 
+
 def main():
     """
     evaluates a trained diffusion policy for a selected dynamics system
@@ -111,23 +122,23 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "system",
+        "--system",
         type=str.lower,
         choices=SIMULATORS.keys(),
         help="name of system class, e.g. single_integrator, unicycle2, ...",
     )
     parser.add_argument(
-        "path_to_config",
+        "--config",
         type=str,
-        help="path to json config file for experiment",
+        help="path to yaml config file for experiment",
     )
     parser.add_argument(
-        "model_dir",
+        "--model-dir",
         type=str,
         help="path to a local checkpoint or Hugging Face Hub model ID",
     )
     parser.add_argument(
-        "--num_steps",
+        "--num-steps",
         type=int,
         default=150,
         help="maximum number of simulation steps",
@@ -139,7 +150,7 @@ def main():
         help="random seed for initial state and policy sampling",
     )
     parser.add_argument(
-        "--output_path",
+        "--output-path",
         type=str,
         default=None,
         help="path to generated PDF plot",
@@ -147,8 +158,8 @@ def main():
 
     args = parser.parse_args()
 
-    with open(args.path_to_config, "r") as file:
-        config = json.load(file)
+    with open(args.config, "r") as file:
+        config = yaml.safe_load(file)
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -193,6 +204,7 @@ def main():
         show_heading=args.system in HEADING_SYSTEMS,
         marker="o",
     )
+
 
 if __name__ == "__main__":
     main()
