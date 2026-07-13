@@ -9,7 +9,6 @@ import warnings
 
 import numpy as np
 
-
 from .planner import Planner
 
 class DbLacamPlanner(Planner):
@@ -32,6 +31,7 @@ class DbLacamPlanner(Planner):
         self.robot_type = self.sim.db_lacam_robot_type
 
         self.mode = self.config.get("mode", "open_loop")
+        self.replan_freq = int(self.config.get("replan_frequency", 5))
         
         # path to db-lacam executable and working directory:
         self.executable = self.config.get("executable", "/opt/db-lacam/buildRelease/run_dblacam")
@@ -45,7 +45,6 @@ class DbLacamPlanner(Planner):
         self.time_limit_ms = int(self.config.get("time_limit_ms", 60_000))
 
         # raises planning error:
-        # TODO: probably deal with planning error to not return 0 action 
         self.raise_planning_error = bool(self.config.get("raise_planning_error", True))
 
         # environment configuration, no obstacles:
@@ -60,8 +59,6 @@ class DbLacamPlanner(Planner):
         # dynobench model and db-lacam motion primitives were generated with dt = 0.1:
         if self.sim.dt != 0.1:
             raise ValueError(f"parameter mismatch: simulator dt is {self.sim.dt}, but {self.robot_type} uses dt = 0.1")
-
-
 
     def reset(self):
         """
@@ -136,18 +133,16 @@ class DbLacamPlanner(Planner):
             actions = np.empty((0, self.sim.nu), dtype=float)
 
         self.cached_plan = actions
-        # resets to first action: 
-        self.step_idx = 0
-
+        
     def __call__(self, obs):
         
         try:
-            # replans or plans once for the first time if 'open_loop' mode is used:
-            if self.mode == "replan" or self.cached_plan is None:
+            if self.cached_plan is None:
                 self._compute_plan(obs)
-
-            if self.step_idx >= len(self.cached_plan):
-                return np.zeros(self.sim.nu, dtype=float)
+            # replans after 'replan_freq' many actions:
+            elif self.mode == "replan" and (self.step_idx >= self.replan_freq or self.step_idx >= len(self.cached_plan)):
+                self.reset()
+                self._compute_plan(obs)
 
             action = self.cached_plan[self.step_idx].copy()
             self.step_idx += 1

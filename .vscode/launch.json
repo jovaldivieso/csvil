@@ -2,11 +2,11 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Collect db-LaCAM expert data",
+            "name": "collect db-lacam expert data",
             "type": "debugpy",
             "request": "launch",
             "python": "/opt/venv/bin/python",
-            "program": "/workspace/test/collect_casadi_expert_data.py",
+            "program": "/workspace/test/collect_expert_data.py",
             "cwd": "/workspace",
             "console": "integratedTerminal",
             "stopOnEntry": false,
@@ -24,6 +24,31 @@
                 "10",
                 "--num-steps",
                 "100"
+            ]
+        },
+        {
+            "name": "plot db-lacam trajectories",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/opt/venv/bin/python",
+            "program": "/workspace/test/plot_trajectories.py",
+            "cwd": "/workspace",
+            "console": "integratedTerminal",
+            "stopOnEntry": false,
+            "justMyCode": true,
+            "args": [
+                "--system",
+                "single_integrator",
+                "--planner",
+                "dblacam",
+                "--config",
+                "test/config/single_integrator_dblacam_config.yaml",
+                "--algorithm-config",
+                "planning/dblacam_algorithm_default.yaml",
+                "--num-traj",
+                "3",
+                "--num-steps",
+                "150"
             ]
         }
     ]

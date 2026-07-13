@@ -1,6 +1,6 @@
 # more search parameter examples in db-lacam/example/algorithms.yaml
 
-delta_0: 0.5
+delta_0: 0.05
 goal_delta: 0.05
 num_primitives_0: 500
 alpha: 0.5

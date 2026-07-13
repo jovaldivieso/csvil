@@ -136,6 +136,7 @@ def main():
     with open(args.config, "r") as file:
         config = yaml.safe_load(file)
 
+    
     simulator = SIMULATORS[args.system](config)
     
     # creates planner:
@@ -150,6 +151,7 @@ def main():
             
     output_path = args.output_path or os.path.join(
         os.path.dirname(__file__),
+        "output",
         f"{args.planner}_{args.system}_{args.num_steps}_paths.pdf",
     )
 
@@ -231,8 +233,9 @@ def main():
             )
 
     system_title = args.system.replace("_", " ").title()
-
-    ax.set_title(f"{args.planner} optimal control paths ({system_title})")
+    planner_title = "db-LaCAM" if args.planner == "dblacam" else "CasADi"
+        
+    ax.set_title(f"{planner_title} optimal control paths for {system_title}")
     ax.set_xlabel("X position")
     ax.set_ylabel("Y position")
     ax.grid(True, linestyle="--", alpha=0.7)
