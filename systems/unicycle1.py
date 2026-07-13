@@ -20,6 +20,9 @@ class Unicycle1(DynamicsSimulator):
         self.nx = 3
         self.nu = 2
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
+        
+        # db-lacam’s mapping from identifiers to motion-primitives is in src/run_dblacam.cpp:
+        self.db_lacam_robot_type = "unicycle1_v0"
 
     def step(self, state, action):
         action = np.clip(action, -self.max_action, self.max_action)

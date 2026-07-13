@@ -21,6 +21,9 @@ class SingleIntegrator(DynamicsSimulator):
         self.nx = 2
         self.nu = 2
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
+        
+        # db-lacam’s mapping from identifiers to motion-primitives is in src/run_dblacam.cpp:
+        self.db_lacam_robot_type = "integrator1_2d_v0"
 
     def step(self, state, action):
         action = np.clip(action, -self.max_action, self.max_action)

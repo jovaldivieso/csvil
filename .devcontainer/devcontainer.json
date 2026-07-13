@@ -1,0 +1,15 @@
+{
+    "name": "db-lacam",
+    "dockerComposeFile": "../docker-compose.yml",
+    "service": "db-lacam",
+    "workspaceFolder": "/workspace",
+    "overrideCommand": true,
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.debugpy"
+            ]
+        }
+    }
+}

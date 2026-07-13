@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Collect db-LaCAM expert data",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/opt/venv/bin/python",
+            "program": "/workspace/test/collect_casadi_expert_data.py",
+            "cwd": "/workspace",
+            "console": "integratedTerminal",
+            "stopOnEntry": false,
+            "justMyCode": true,
+            "args": [
+                "--system",
+                "single_integrator",
+                "--planner",
+                "dblacam",
+                "--config",
+                "test/config/single_integrator_dblacam_config.yaml",
+                "--algorithm-config",
+                "planning/dblacam_algorithm_default.yaml",
+                "--num-traj",
+                "10",
+                "--num-steps",
+                "100"
+            ]
+        }
+    ]
+}

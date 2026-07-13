@@ -1,0 +1,40 @@
+# dataset settings:
+dataset:
+  repo_id: local/single_integrator_dblacam_expert
+  root: data/lerobot_dataset_dblacam_single_integrator
+
+# policy settings:
+policy:
+  type: diffusion
+  device: cpu
+
+  repo_id: pau-klawon/single_integrator_dblacam_diffusion_policy
+  push_to_hub: true
+
+  down_dims: [64, 128, 256]
+  diffusion_step_embed_dim: 64
+
+  normalization_mapping:
+    STATE: MIN_MAX
+    ENV: MIN_MAX
+    ACTION: MIN_MAX
+
+  input_features:
+    observation.environment_state:
+      shape: [2]
+      type: ENV
+    observation.state:
+      shape: [2]
+      type: STATE
+
+  output_features:
+    action:
+      shape: [2]
+      type: ACTION
+
+# training settings:
+steps: 1000
+save_freq: 1000
+batch_size: 64
+num_workers: 0
+save_checkpoint: true

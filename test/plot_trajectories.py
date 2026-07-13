@@ -13,6 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 # import new systems here, then add them to SIMULATORS and HEADING_SYSTEMS:
 from planning.casadi_planner import CasadiPlanner
+from planning.dblacam_planner import DbLacamPlanner
 from systems.double_integrator import DoubleIntegrator
 from systems.single_integrator import SingleIntegrator
 from systems.unicycle1 import Unicycle1
@@ -30,6 +31,15 @@ HEADING_SYSTEMS = {
     "unicycle2",
 }
 
+PLANNERS = {
+    "casadi": CasadiPlanner,
+    "dblacam": DbLacamPlanner,
+}
+
+DBLACAM_SIMULATORS = {
+    "single_integrator",
+    "unicycle1",
+}
 
 def rollout_trajectory(simulator, planner, num_steps):
     """
@@ -78,13 +88,26 @@ def main():
     parser.add_argument(
         "--system",
         type=str.lower,
+        required=True,
         choices=SIMULATORS.keys(),
-        help="name of system class in lower case, e.g. single_integrator, unicycle2, ...",
+    )
+    parser.add_argument(
+        "--planner",
+        type=str.lower,
+        required=True,
+        choices=PLANNERS.keys(),
     )
     parser.add_argument(
         "--config",
         type=str,
-        help="path to yaml config file for experiment",
+        required=True,
+        help="path to system experiment config",
+    )
+    parser.add_argument(
+        "--algorithm-config",
+        type=str,
+        default=None,
+        help="path to db-lacam algorithm yaml config, required with --planner 'dblacam'"
     )
     parser.add_argument(
         "--num-traj",
@@ -106,16 +129,28 @@ def main():
     )
 
     args = parser.parse_args()
+    
+    if args.planner == "dblacam" and args.algorithm_config is None:
+        parser.error( "--algorithm-config is required when using db-lacam")
 
     with open(args.config, "r") as file:
         config = yaml.safe_load(file)
 
     simulator = SIMULATORS[args.system](config)
-    planner = CasadiPlanner(simulator, config)
-
+    
+    # creates planner:
+    if PLANNERS[args.planner] is CasadiPlanner:
+        planner = CasadiPlanner(simulator, config)    
+    else:
+        if args.system not in DBLACAM_SIMULATORS:
+            raise ValueError(f"db-lacam does not support {args.system}")
+        with open(args.algorithm_config, "r", encoding="utf-8") as file:
+            algorithm_config = yaml.safe_load(file)
+        planner = DbLacamPlanner(simulator, config, algorithm_config)
+            
     output_path = args.output_path or os.path.join(
         os.path.dirname(__file__),
-        f"{args.system}_casadi_paths.pdf",
+        f"{args.planner}_{args.system}_{args.num_steps}_paths.pdf",
     )
 
     output_dir = os.path.dirname(output_path)
@@ -197,7 +232,7 @@ def main():
 
     system_title = args.system.replace("_", " ").title()
 
-    ax.set_title(f"CasADi optimal control paths ({system_title})")
+    ax.set_title(f"{args.planner} optimal control paths ({system_title})")
     ax.set_xlabel("X position")
     ax.set_ylabel("Y position")
     ax.grid(True, linestyle="--", alpha=0.7)
