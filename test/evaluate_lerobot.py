@@ -3,16 +3,16 @@ import sys
 import yaml
 import torch
 import argparse
-
 import numpy as np
-
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 sys.path.insert(0, PROJECT_ROOT)
 
+# Import both policy types
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.policies.act.modeling_act import ACTPolicy
 
 # import new systems here, then add them to SIMULATORS (and HEADING_SYSTEMS):
 from systems.double_integrator import DoubleIntegrator
@@ -36,9 +36,8 @@ HEADING_SYSTEMS = {
 
 def get_inference_device():
     """
-    returns the best available device for diffusion-policy inference
+    returns the best available device for policy inference
     """
-
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -77,16 +76,15 @@ def create_policy_input(simulator, observation, device):
     return policy_input
 
 
-def rollout_diffusion_policy(simulator, policy, device, num_steps):
+def rollout_policy(simulator, policy, device, num_steps):
     """
-    runs one rollout of a trained diffusion policy
+    runs one rollout of a trained policy
 
     returns:
         trajectory: array containing visited simulator states
         reached_goal: whether simulator reached goal state
         steps_taken: number of executed simulation steps
     """
-
     state = simulator.reset_random()
     trajectory = [state.copy()]
     policy.reset()
@@ -116,25 +114,34 @@ def rollout_diffusion_policy(simulator, policy, device, num_steps):
 
 def main():
     """
-    evaluates a trained diffusion policy for a selected dynamics system
+    evaluates a trained policy for a selected dynamics system
     """
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--system",
         type=str.lower,
         choices=SIMULATORS.keys(),
+        required=True,
         help="name of system class, e.g. single_integrator, unicycle2, ...",
+    )
+    parser.add_argument(
+        "--policy-type",
+        type=str.lower,
+        choices=["diffusion", "act"],
+        required=True,
+        help="the type of policy architecture to evaluate",
     )
     parser.add_argument(
         "--config",
         type=str,
+        required=True,
         help="path to yaml config file for experiment",
     )
     parser.add_argument(
         "--model-dir",
         type=str,
+        required=True,
         help="path to a local checkpoint or Hugging Face Hub model ID",
     )
     parser.add_argument(
@@ -172,11 +179,18 @@ def main():
     device = get_inference_device()
     print(f"running inference on {device}")
 
-    policy = DiffusionPolicy.from_pretrained(args.model_dir)
+    # Dynamically load the requested policy
+    if args.policy_type == "diffusion":
+        policy = DiffusionPolicy.from_pretrained(args.model_dir)
+        policy_display_name = "Diffusion"
+    elif args.policy_type == "act":
+        policy = ACTPolicy.from_pretrained(args.model_dir)
+        policy_display_name = "ACT"
+
     policy.eval()
     policy.to(device)
 
-    trajectory, reached_goal, steps_taken = rollout_diffusion_policy(
+    trajectory, reached_goal, steps_taken = rollout_policy(
         simulator=simulator,
         policy=policy,
         device=device,
@@ -188,9 +202,10 @@ def main():
     else:
         print(f"goal not reached after {steps_taken} steps")
 
+    # Dynamically set output names based on policy type
     output_path = args.output_path or os.path.join(
         os.path.dirname(__file__),
-        f"{args.system}_diffusion_policy_path.pdf",
+        f"{args.system}_{args.policy_type}_policy_path.pdf",
     )
 
     system_title = args.system.replace("_", " ").title()
@@ -199,8 +214,8 @@ def main():
         simulator=simulator,
         trajectories=[trajectory],
         path_to_output=output_path,
-        title=f"{system_title} diffusion policy evaluation",
-        path_label="diffusion policy path",
+        title=f"{system_title} {policy_display_name} Policy Evaluation",
+        path_label=f"{policy_display_name} policy path",
         show_heading=args.system in HEADING_SYSTEMS,
         marker="o",
     )

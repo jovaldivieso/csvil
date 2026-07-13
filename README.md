@@ -79,7 +79,7 @@ csvil/
     ├── config/
     │   └── double_integrator_casadi_config.yaml  # Example expert config
     ├── collect_casadi_expert_data.py
-    ├── evaluate_diffusion_policy.py 
+    ├── evaluate_lerobot.py 
     ├── plot_casadi_trajectories.py
     └── utils.py
 ```
@@ -153,8 +153,9 @@ Evaluate a trained policy in the selected simulator independently of the trainin
 
 ```bash
 docker compose run --rm csvil \
-  python test/evaluate_diffusion_policy.py \
+  python test/evaluate_lerobot.py \
   --system double_integrator \
+  --policy-type diffusion \
   --config test/config/double_integrator_casadi_config.yaml \
   --model-dir outputs/train/<run-name>/checkpoints/<checkpoint-name>
 ```
