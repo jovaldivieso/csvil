@@ -1,5 +1,6 @@
 from .dynamics import DynamicsSimulator
 from .utils import wrap_angle, get_relative_position
+from typing import Any, Mapping
 
 import casadi as ca
 import numpy as np
@@ -14,7 +15,7 @@ class Unicycle2(DynamicsSimulator):
     u = [a_v (acceleration), a_omega (angular acceleration)]
     """
 
-    def __init__(self, config):
+    def __init__(self, config: Mapping[str, Any]):
         super().__init__(config)
 
         # fixed goal position:
@@ -45,12 +46,14 @@ class Unicycle2(DynamicsSimulator):
             dtype=float,
         )
 
-    def step(self, state, action):
+    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
         """
         applies one simulation step
         """
+        state = self.validate_state(state)
+        action = self.validate_action(action)
         # limits action to valid range: 
-        action = np.clip(np.asarray(action, dtype=float), -self.max_action, self.max_action)
+        action = np.clip(action, -self.max_action, self.max_action)
 
         x, y, theta, v, omega = state
         a_v, a_omega = action
@@ -64,18 +67,21 @@ class Unicycle2(DynamicsSimulator):
 
         return np.array([x, y, theta, v, omega])
 
-    def observe(self, state):
+    def observe(self, state: np.ndarray) -> np.ndarray:
         """
         turns absoulte simulator state into observation,
         [goal_rel_x, goal_rel_y, rel_theta, velocity, angular velocity]
         """
+        state = self.validate_state(state)
         goal_rel_x, goal_rel_y, rel_theta = get_relative_position(pos=state[:3], goal_pos=self.goal[:3])
-        return np.array([goal_rel_x, goal_rel_y, rel_theta, state[3], state[4]])
+        obs = np.array([goal_rel_x, goal_rel_y, rel_theta, state[3], state[4]])
+        return self.validate_observation(obs)
 
-    def invert_obs(self, obs):
+    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         """
         reconstructs absolute state from observation
         """
+        obs = self.validate_observation(obs)
         return np.array(
             [
                 self.goal[0] - obs[0],
@@ -87,16 +93,17 @@ class Unicycle2(DynamicsSimulator):
         )
 
     @property
-    def goal_state(self):
+    def goal_state(self) -> np.ndarray:
         """
         defines full final state [x_goal, y_goal, theta_goal, 0.0, 0.0]
         """
         return np.array([self.goal[0], self.goal[1], self.goal[2], 0.0, 0.0])
 
-    def is_done(self, state):
+    def is_done(self, state: np.ndarray) -> bool:
         """
         checks whether robot has successfully completed task
         """
+        state = self.validate_state(state)
         pos_error = np.linalg.norm(state[:2] - self.goal[:2])
         theta_error = abs(wrap_angle(state[2] - self.goal[2]))
 
@@ -107,7 +114,7 @@ class Unicycle2(DynamicsSimulator):
             and abs(state[4]) < self.error_tolerance # omega error
         )
 
-    def casadi_dynamics(self, x, u):
+    def casadi_dynamics(self, x: Any, u: Any):
         """
         symbolic second-order unicycle dynamics for CasADi
         """
@@ -127,7 +134,7 @@ class Unicycle2(DynamicsSimulator):
             next_omega,
         )
 
-    def get_dataset_features(self):
+    def get_dataset_features(self) -> dict[str, Any]:
         """
         creates LeRobot feature schema
         """
@@ -157,7 +164,7 @@ class Unicycle2(DynamicsSimulator):
             },
         }
 
-    def random_initial_state(self, rng):
+    def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
         """
         samples random state
         """
@@ -172,7 +179,7 @@ class Unicycle2(DynamicsSimulator):
         
         return np.array([pos[0], pos[1], theta, v, omega])
 
-    def reset_random(self):
+    def reset_random(self) -> np.ndarray:
         """
         creates a random valid initial state around goal
         """
@@ -194,10 +201,12 @@ class Unicycle2(DynamicsSimulator):
         initial_state = np.array([pos[0], pos[1], theta, v, omega])
         return self.reset(initial_state)
 
-    def format_dataset_frame(self, obs, action):
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
         """
         converts observation-action pair into format expected by LeRobot
         """
+        obs = self.validate_observation(obs)
+        action = self.validate_action(action)
 
         return {
             "observation.environment_state": torch.as_tensor(

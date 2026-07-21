@@ -1,27 +1,39 @@
 import os
 import sys
-import yaml
 import argparse
+from typing import Any, Mapping
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 sys.path.insert(0, PROJECT_ROOT)
 
+from core.config import load_and_validate_system_config, validate_system_config
+from core.factory import DynamicsFactory
 from utils import collect_casadi_expert_data
 
-# import new systems here and then add them to SIMULATORS:
-from systems.double_integrator import DoubleIntegrator
-from systems.single_integrator import SingleIntegrator
-from systems.unicycle1 import Unicycle1
-from systems.unicycle2 import Unicycle2
 
-SIMULATORS = {
-    "single_integrator": SingleIntegrator,
-    "double_integrator": DoubleIntegrator,
-    "unicycle1": Unicycle1,
-    "unicycle2": Unicycle2,
-}
+def run_collection(
+    system: str,
+    config: Mapping[str, Any],
+    num_traj: int,
+    num_steps: int,
+    repo_id: str | None = None,
+    local_dir: str | None = None,
+):
+    repo_id = repo_id or f"local/{system}_casadi_expert"
+    local_dir = local_dir or f"data/lerobot_dataset_{system}_casadi"
+
+    validated_config = validate_system_config(system_name=system, raw_config=config)
+
+    return collect_casadi_expert_data(
+        simulator_name=system,
+        config=validated_config,
+        repo_id=repo_id,
+        local_dir=local_dir,
+        num_traj=num_traj,
+        num_steps=num_steps,
+    )
 
 
 def main():
@@ -34,7 +46,7 @@ def main():
     parser.add_argument(
         "--system",
         type=str.lower,
-        choices=SIMULATORS.keys(),
+        choices=DynamicsFactory.names(),
         help="name of system class, e.g. single_integrator, unicycle2, ...",
     )
     parser.add_argument(
@@ -66,18 +78,13 @@ def main():
     )
 
     args = parser.parse_args()
+    cfg = load_and_validate_system_config(system_name=args.system, config_path=args.config)
 
-    repo_id = args.repo_id or f"local/{args.system}_casadi_expert"
-    local_dir = args.local_dir or f"data/lerobot_dataset_{args.system}_casadi"
-
-    with open(args.config, "r") as file:
-        cfg = yaml.safe_load(file)
-
-    collect_casadi_expert_data(
-        simulator_class=SIMULATORS[args.system],
+    run_collection(
+        system=args.system,
         config=cfg,
-        repo_id=repo_id,
-        local_dir=local_dir,
+        repo_id=args.repo_id,
+        local_dir=args.local_dir,
         num_traj=args.num_traj,
         num_steps=args.num_steps,
     )

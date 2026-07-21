@@ -4,6 +4,9 @@ This repository contains a modular pipeline for controller synthesis via imitati
 
 The current expert planner uses CasADi. A separate Docker environment for future work with db-LaCAM is included as well.
 
+Recent refactors added strict runtime shape checks for states/observations/actions,
+centralized simulator/planner factories, and validated typed system configuration loading.
+
 ## Installation & setup
 
 ### Clone the repository
@@ -62,6 +65,10 @@ docker compose run --rm csvil hf auth login
 
 ```text
 csvil/
+├── core/
+│   ├── config.py            # Typed validation and normalized YAML loading
+│   ├── factory.py           # DynamicsFactory + PlannerFactory registries
+│   └── types.py             # Shared vector schemas and dimension checks
 ├── data/
 │   ├── data_collection.py
 │   └── lerobot_dataset_double_integrator_casadi/  # Example generated dataset
@@ -93,6 +100,18 @@ The available systems are:
 
 Each planner and corresponding dynamics use a yaml configuration file in `test/config/`. These files contain the simulator and planner parameters, including e.g. the time step, MPC horizon, goal state and system-specific limits.
 
+System configs are now validated through `core/config.py` before simulation/evaluation
+to catch malformed keys and shape mismatches early. Planner-specific keys include:
+
+- `horizon`
+- `mode` (`mpc` or `open_loop`)
+- `Q_diag` (must match state dimension `nx`)
+- `R_weight`
+- `terminal_cost_multiplier`
+
+Simulator and planner creation is centralized through `DynamicsFactory` and
+`PlannerFactory` in `core/factory.py`.
+
 ## Pipeline features
 
 ### Generate a motion planning expert dataset
@@ -105,6 +124,10 @@ docker compose run --rm csvil \
   --system double_integrator \
   --config test/config/double_integrator_casadi_config.yaml
 ```
+
+If the CasADi solver fails for a rollout, that trajectory is skipped and not
+written to the dataset. The collector keeps sampling until the requested number
+of successful trajectories is reached (or a safety max-attempt threshold is hit).
 
 The Hugging Face compatible dataset is saved locally in a directory similar to:
 
@@ -145,6 +168,9 @@ docker compose run --rm csvil \
   --config learning/config/double_integrator_casadi_diffusion_policy_config.yaml
 ```
 
+The training entrypoint now exposes `run_training(config_path)` for programmatic
+use in sweep/automation scripts while preserving the same CLI behavior.
+
 Training outputs and checkpoints are saved in the configured output directory.
 
 ### Evaluate the learned policy
@@ -161,3 +187,7 @@ docker compose run --rm csvil \
 ```
 
 The script runs a rollout using the trained policy and saves a trajectory plot.
+
+The evaluation, plotting, and expert collection scripts also expose importable
+execution functions (`run_evaluation`, `run_plotting`, `run_collection`) so they
+can be called from Python workflows without shelling out to CLI.

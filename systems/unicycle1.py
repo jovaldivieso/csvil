@@ -2,6 +2,7 @@ from .dynamics import DynamicsSimulator
 import casadi as ca
 import numpy as np
 import torch
+from typing import Any, Mapping
 
 
 class Unicycle1(DynamicsSimulator):
@@ -11,7 +12,7 @@ class Unicycle1(DynamicsSimulator):
         s = [x, y, theta]
     """
 
-    def __init__(self, config):
+    def __init__(self, config: Mapping[str, Any]):
         super().__init__(config)
         self.goal = np.array(config.get("goal", [0.0, 0.0, 0.0]))
         self.randomize_goal = config.get("randomize_goal",
@@ -21,7 +22,9 @@ class Unicycle1(DynamicsSimulator):
         self.nu = 2
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
 
-    def step(self, state, action):
+    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
+        state = self.validate_state(state)
+        action = self.validate_action(action)
         action = np.clip(action, -self.max_action, self.max_action)
 
         pos = state[:2]
@@ -33,22 +36,25 @@ class Unicycle1(DynamicsSimulator):
         next_theta = theta + omega * self.dt
         return np.concatenate([next_pos, [next_theta]])
 
-    def observe(self, state):
+    def observe(self, state: np.ndarray) -> np.ndarray:
+        state = self.validate_state(state)
         pos = state[:2]
         theta = state[2]
         rel_pos = self.goal[:2] - pos
         rel_theta = self.goal[2] - theta
         rel_theta = (rel_theta + np.pi) % (2 * np.pi) - np.pi
-        return np.concatenate([rel_pos, [rel_theta]])
+        obs = np.concatenate([rel_pos, [rel_theta]])
+        return self.validate_observation(obs)
 
-    def is_done(self, state):
+    def is_done(self, state: np.ndarray) -> bool:
+        state = self.validate_state(state)
         pos_error = np.linalg.norm(state[:2] - self.goal[:2])
         theta_error = abs((state[2] - self.goal[2] + np.pi) %
                           (2 * np.pi) - np.pi)
         return (pos_error < self.error_tolerance and
                 theta_error < self.error_tolerance)
 
-    def casadi_dynamics(self, x, u):
+    def casadi_dynamics(self, x: Any, u: Any):
         """Symbolic unicycle 1 dynamics for CasADi"""
         pos = x[:2]
         theta = x[2]
@@ -57,7 +63,7 @@ class Unicycle1(DynamicsSimulator):
         next_theta = theta + u[1] * self.dt
         return ca.vertcat(next_pos[0], next_pos[1], next_theta)
 
-    def get_dataset_features(self):
+    def get_dataset_features(self) -> dict[str, Any]:
         """Return the LeRobot features dictionary for the unicylce 1"""
         return {
             "observation.environment_state": {
@@ -77,20 +83,21 @@ class Unicycle1(DynamicsSimulator):
             },
         }
 
-    def random_initial_state(self, rng):
+    def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
         pos = rng.uniform(low=-5.0, high=5.0, size=2)
         theta = rng.uniform(low=-np.pi, high=np.pi)
         return np.array([pos[0], pos[1], theta])
 
-    def invert_obs(self, obs):
+    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
+        obs = self.validate_observation(obs)
         return np.array([self.goal[0] - obs[0], self.goal[1] - obs[1],
                          self.goal[2] - obs[2]])
 
     @property
-    def goal_state(self):
+    def goal_state(self) -> np.ndarray:
         return np.array([self.goal[0], self.goal[1], self.goal[2]])
 
-    def reset_random(self):
+    def reset_random(self) -> np.ndarray:
         """Randomize start position, and optionally the goal."""
         if self.randomize_goal:
             goal_pos = np.random.uniform(low=-5.0, high=5.0, size=2)
@@ -107,8 +114,10 @@ class Unicycle1(DynamicsSimulator):
         initial_state = np.array([start_pos[0], start_pos[1], start_theta])
         return self.reset(initial_state)
 
-    def format_dataset_frame(self, obs, action):
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
         """Package the observation and action into a dictionary for LeRobot"""
+        obs = self.validate_observation(obs)
+        action = self.validate_action(action)
         return {
             "observation.environment_state":
             torch.from_numpy(obs[0:3]).float(),

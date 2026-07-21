@@ -8,4 +8,5 @@ horizon: 100
 mode: mpc
 Q_diag: [10.0, 10.0, 5.0, 0.2, 0.2]
 R_weight: 0.1
+terminal_cost_multiplier: 10.0
 error_tolerance: 0.05

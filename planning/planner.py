@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+import numpy as np
+
 
 class Planner(ABC):
     """
@@ -7,7 +9,7 @@ class Planner(ABC):
     """
 
     @abstractmethod
-    def reset(self):
+    def reset(self) -> None:
         """
         Clear internal state (e.g., cached trajectories) for a new episode.
         Stateless planners (like pure MPC) can implement this as a pass/no-op.
@@ -15,7 +17,7 @@ class Planner(ABC):
         pass
 
     @abstractmethod
-    def __call__(self, obs):
+    def __call__(self, obs: np.ndarray) -> np.ndarray:
         """
         Compute and return the next action based on the current observation.
         """

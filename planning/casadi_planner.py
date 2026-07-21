@@ -1,6 +1,12 @@
 import casadi as ca
 import numpy as np
+from typing import Any, Mapping
+
 from .planner import Planner
+
+
+class PlannerSolveError(RuntimeError):
+    """Raised when the CasADi optimization problem cannot be solved."""
 
 
 class CasadiPlanner(Planner):
@@ -45,17 +51,30 @@ class CasadiPlanner(Planner):
         3. Actuator Limits:   -u_max <= u_k <= u_max     for k = 0, ..., N-1
     """
 
-    def __init__(self, simulator, config):
+    def __init__(self, simulator, config: Mapping[str, Any]):
         self.sim = simulator
         self.N = config.get("horizon", 20)
         self.mode = config.get("mode", "mpc")  # Default to MPC
+        self.terminal_cost_multiplier = float(config.get("terminal_cost_multiplier", 10.0))
+
+        if self.N <= 0:
+            raise ValueError("'horizon' must be a positive integer.")
+        if self.mode not in {"mpc", "open_loop"}:
+            raise ValueError("'mode' must be one of {'mpc', 'open_loop'}.")
+        if self.terminal_cost_multiplier <= 0:
+            raise ValueError("'terminal_cost_multiplier' must be positive.")
 
         # State variables for open-loop planning
         self.cached_plan = None
         self.step_idx = 0
 
         # Cost matrices depending on system state
-        self.Q = np.diag(config.get("Q_diag", [10.0] * self.sim.nx))
+        q_diag = config.get("Q_diag", [10.0] * self.sim.nx)
+        if len(q_diag) != self.sim.nx:
+            raise ValueError(
+                f"'Q_diag' length must equal simulator state dimension nx={self.sim.nx}, got {len(q_diag)}."
+            )
+        self.Q = np.diag(q_diag)
         self.R = np.eye(self.sim.nu) * config.get("R_weight", 0.1)
         
         state_lower_bounds = getattr(self.sim, "state_lower_bounds", None)
@@ -101,7 +120,7 @@ class CasadiPlanner(Planner):
             cost += ca.mtimes(self.U[:, k].T, ca.mtimes(self.R, self.U[:, k]))
 
         terminal_error = self.X[:, self.N] - self.goal_param
-        cost += ca.mtimes(terminal_error.T, ca.mtimes(self.Q * 10,
+        cost += ca.mtimes(terminal_error.T, ca.mtimes(self.Q * self.terminal_cost_multiplier,
                                                       terminal_error))
 
         self.opti.minimize(cost)
@@ -110,13 +129,13 @@ class CasadiPlanner(Planner):
         opts = {"ipopt.print_level": 0, "print_time": 0, "ipopt.sb": "yes"}
         self.opti.solver("ipopt", opts)
 
-    def reset(self):
+    def reset(self) -> None:
         """Signals the start of a new episode."""
         if self.mode == "open_loop":
             self.cached_plan = None
             self.step_idx = 0
 
-    def __call__(self, obs):
+    def __call__(self, obs: np.ndarray) -> np.ndarray:
         if self.mode == "mpc":
             x0 = self.sim.invert_obs(obs)
             self.opti.set_value(self.x0_param, x0)
@@ -125,8 +144,11 @@ class CasadiPlanner(Planner):
             try:
                 sol = self.opti.solve()
                 return sol.value(self.U[:, 0])
-            except RuntimeError:
-                return np.zeros(self.sim.nu)
+            except RuntimeError as exc:
+                raise PlannerSolveError(
+                    "CasADi planner solve failed in MPC mode. "
+                    f"Current state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
+                ) from exc
 
         elif self.mode == "open_loop":
             # Plan once on the first step
@@ -138,8 +160,11 @@ class CasadiPlanner(Planner):
                 try:
                     sol = self.opti.solve()
                     self.cached_plan = sol.value(self.U)
-                except RuntimeError:
-                    self.cached_plan = np.zeros((self.sim.nu, self.N))
+                except RuntimeError as exc:
+                    raise PlannerSolveError(
+                        "CasADi planner solve failed in open-loop mode. "
+                        f"Initial state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
+                    ) from exc
 
             # Iterate through the cached plan
             if self.step_idx < self.cached_plan.shape[1]:

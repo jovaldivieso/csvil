@@ -1,6 +1,8 @@
 import shutil
 from pathlib import Path
+
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from planning.casadi_planner import PlannerSolveError
 
 
 class DataCollector:
@@ -33,10 +35,22 @@ class DataCollector:
             features=features,
         )
 
-        for traj_id in range(num_trajectories):
+        successful_trajectories = 0
+        attempted_trajectories = 0
+        max_attempts = max(num_trajectories * 3, num_trajectories)
+
+        while successful_trajectories < num_trajectories:
+            attempted_trajectories += 1
+            if attempted_trajectories > max_attempts:
+                raise RuntimeError(
+                    "Too many failed trajectory attempts. "
+                    f"Collected {successful_trajectories}/{num_trajectories} successful trajectories."
+                )
+
             # Ask the simulator to initialize itself in a random, valid way
             state = self.sim.reset_random()
             done_counter = 0
+            planner_failed = False
 
             # Tell the planner a new episode is starting!
             if hasattr(motion_planner, 'reset'):
@@ -46,7 +60,15 @@ class DataCollector:
                 obs = self.sim.observe(state)
 
                 # The collector doesn't know HOW the planner gets the action
-                action = motion_planner(obs)
+                try:
+                    action = motion_planner(obs)
+                except PlannerSolveError as exc:
+                    print(
+                        "Skipping trajectory due to planner failure: "
+                        f"{exc}"
+                    )
+                    planner_failed = True
+                    break
 
                 # Ask the simulator to format the current frame
                 frame_data = self.sim.format_dataset_frame(obs, action)
@@ -61,11 +83,17 @@ class DataCollector:
                     if done_counter >= 5:
                         break
 
-            dataset.save_episode()
+            if planner_failed:
+                continue
 
-            if (traj_id + 1) % 10 == 0:
+            dataset.save_episode()
+            successful_trajectories += 1
+
+            if successful_trajectories % 10 == 0:
                 print(
-                    f"Collected {traj_id + 1}/{num_trajectories} trajectories")
+                    "Collected "
+                    f"{successful_trajectories}/{num_trajectories} trajectories"
+                )
 
         print(f"LeRobot Dataset saved successfully to {self.local_dir}")
         return dataset

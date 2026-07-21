@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+from typing import Any, Mapping, Type
+
+from planning.casadi_planner import CasadiPlanner
+from planning.planner import Planner
+from systems.double_integrator import DoubleIntegrator
+from systems.dynamics import DynamicsSimulator
+from systems.single_integrator import SingleIntegrator
+from systems.unicycle1 import Unicycle1
+from systems.unicycle2 import Unicycle2
+
+SYSTEM_REGISTRY: dict[str, Type[DynamicsSimulator]] = {
+    "single_integrator": SingleIntegrator,
+    "double_integrator": DoubleIntegrator,
+    "unicycle1": Unicycle1,
+    "unicycle2": Unicycle2,
+}
+
+PLANNER_REGISTRY: dict[str, Type[Planner]] = {
+    "casadi": CasadiPlanner,
+}
+
+HEADING_SYSTEMS: set[str] = {"unicycle1", "unicycle2"}
+
+
+class DynamicsFactory:
+    """Factory for dynamics simulator instances."""
+
+    @staticmethod
+    def names() -> tuple[str, ...]:
+        return tuple(SYSTEM_REGISTRY.keys())
+
+    @staticmethod
+    def create(system_name: str, config: Mapping[str, Any]) -> DynamicsSimulator:
+        try:
+            simulator_cls = SYSTEM_REGISTRY[system_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown system '{system_name}'. Available: {sorted(SYSTEM_REGISTRY.keys())}"
+            ) from exc
+        return simulator_cls(config)
+
+
+class PlannerFactory:
+    """Factory for planner instances."""
+
+    @staticmethod
+    def create(planner_name: str, simulator: DynamicsSimulator, config: Mapping[str, Any]) -> Planner:
+        try:
+            planner_cls = PLANNER_REGISTRY[planner_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown planner '{planner_name}'. Available: {sorted(PLANNER_REGISTRY.keys())}"
+            ) from exc
+        return planner_cls(simulator, config)

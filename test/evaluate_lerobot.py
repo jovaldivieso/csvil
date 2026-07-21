@@ -1,37 +1,23 @@
 import os
 import sys
-import yaml
 import torch
 import argparse
 import numpy as np
+from typing import Any, Mapping
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 sys.path.insert(0, PROJECT_ROOT)
 
+from core.config import load_and_validate_system_config, validate_system_config
+from core.factory import DynamicsFactory, HEADING_SYSTEMS
+
 # Import both policy types
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.act.modeling_act import ACTPolicy
 
-# import new systems here, then add them to SIMULATORS (and HEADING_SYSTEMS):
-from systems.double_integrator import DoubleIntegrator
-from systems.single_integrator import SingleIntegrator
-from systems.unicycle1 import Unicycle1
-from systems.unicycle2 import Unicycle2
 from utils import plot_xy_trajectories
-
-SIMULATORS = {
-    "single_integrator": SingleIntegrator,
-    "double_integrator": DoubleIntegrator,
-    "unicycle1": Unicycle1,
-    "unicycle2": Unicycle2,
-}
-
-HEADING_SYSTEMS = {
-    "unicycle1",
-    "unicycle2",
-}
 
 
 def get_inference_device():
@@ -112,6 +98,71 @@ def rollout_policy(simulator, policy, device, num_steps):
     return np.asarray(trajectory), False, num_steps
 
 
+def run_evaluation(
+    system: str,
+    policy_type: str,
+    config: Mapping[str, Any],
+    model_dir: str,
+    num_steps: int = 150,
+    seed: int = 42,
+    output_path: str | None = None,
+):
+    validated_config = validate_system_config(system_name=system, raw_config=config)
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    simulator = DynamicsFactory.create(system_name=system, config=validated_config)
+
+    if not os.path.exists(model_dir):
+        print(f"assuming '{model_dir}' is a Hugging Face Hub ID")
+
+    device = get_inference_device()
+    print(f"running inference on {device}")
+
+    if policy_type == "diffusion":
+        policy = DiffusionPolicy.from_pretrained(model_dir)
+        policy_display_name = "Diffusion"
+    elif policy_type == "act":
+        policy = ACTPolicy.from_pretrained(model_dir)
+        policy_display_name = "ACT"
+    else:
+        raise ValueError("'policy_type' must be either 'diffusion' or 'act'.")
+
+    policy.eval()
+    policy.to(device)
+
+    trajectory, reached_goal, steps_taken = rollout_policy(
+        simulator=simulator,
+        policy=policy,
+        device=device,
+        num_steps=num_steps,
+    )
+
+    if reached_goal:
+        print(f"goal reached in {steps_taken} steps")
+    else:
+        print(f"goal not reached after {steps_taken} steps")
+
+    output_path = output_path or os.path.join(
+        os.path.dirname(__file__),
+        f"{system}_{policy_type}_policy_path.pdf",
+    )
+
+    system_title = system.replace("_", " ").title()
+
+    plot_xy_trajectories(
+        simulator=simulator,
+        trajectories=[trajectory],
+        path_to_output=output_path,
+        title=f"{system_title} {policy_display_name} Policy Evaluation",
+        path_label=f"{policy_display_name} policy path",
+        show_heading=system in HEADING_SYSTEMS,
+        marker="o",
+    )
+    return output_path
+
+
 def main():
     """
     evaluates a trained policy for a selected dynamics system
@@ -121,7 +172,7 @@ def main():
     parser.add_argument(
         "--system",
         type=str.lower,
-        choices=SIMULATORS.keys(),
+        choices=DynamicsFactory.names(),
         required=True,
         help="name of system class, e.g. single_integrator, unicycle2, ...",
     )
@@ -164,60 +215,16 @@ def main():
     )
 
     args = parser.parse_args()
+    config = load_and_validate_system_config(system_name=args.system, config_path=args.config)
 
-    with open(args.config, "r") as file:
-        config = yaml.safe_load(file)
-
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-
-    simulator = SIMULATORS[args.system](config)
-
-    if not os.path.exists(args.model_dir):
-        print(f"assuming '{args.model_dir}' is a Hugging Face Hub ID")
-
-    device = get_inference_device()
-    print(f"running inference on {device}")
-
-    # Dynamically load the requested policy
-    if args.policy_type == "diffusion":
-        policy = DiffusionPolicy.from_pretrained(args.model_dir)
-        policy_display_name = "Diffusion"
-    elif args.policy_type == "act":
-        policy = ACTPolicy.from_pretrained(args.model_dir)
-        policy_display_name = "ACT"
-
-    policy.eval()
-    policy.to(device)
-
-    trajectory, reached_goal, steps_taken = rollout_policy(
-        simulator=simulator,
-        policy=policy,
-        device=device,
+    run_evaluation(
+        system=args.system,
+        policy_type=args.policy_type,
+        config=config,
+        model_dir=args.model_dir,
         num_steps=args.num_steps,
-    )
-
-    if reached_goal:
-        print(f"goal reached in {steps_taken} steps")
-    else:
-        print(f"goal not reached after {steps_taken} steps")
-
-    # Dynamically set output names based on policy type
-    output_path = args.output_path or os.path.join(
-        os.path.dirname(__file__),
-        f"{args.system}_{args.policy_type}_policy_path.pdf",
-    )
-
-    system_title = args.system.replace("_", " ").title()
-
-    plot_xy_trajectories(
-        simulator=simulator,
-        trajectories=[trajectory],
-        path_to_output=output_path,
-        title=f"{system_title} {policy_display_name} Policy Evaluation",
-        path_label=f"{policy_display_name} policy path",
-        show_heading=args.system in HEADING_SYSTEMS,
-        marker="o",
+        seed=args.seed,
+        output_path=args.output_path,
     )
 
 

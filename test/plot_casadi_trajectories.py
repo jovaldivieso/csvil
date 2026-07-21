@@ -1,7 +1,7 @@
 import os
 import sys
-import yaml
 import argparse
+from typing import Any, Mapping
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,24 +11,8 @@ PROJECT_ROOT = os.path.dirname(
 )
 sys.path.insert(0, PROJECT_ROOT)
 
-# import new systems here, then add them to SIMULATORS and HEADING_SYSTEMS:
-from planning.casadi_planner import CasadiPlanner
-from systems.double_integrator import DoubleIntegrator
-from systems.single_integrator import SingleIntegrator
-from systems.unicycle1 import Unicycle1
-from systems.unicycle2 import Unicycle2
-
-SIMULATORS = {
-    "single_integrator": SingleIntegrator,
-    "double_integrator": DoubleIntegrator,
-    "unicycle1": Unicycle1,
-    "unicycle2": Unicycle2,
-}
-
-HEADING_SYSTEMS = {
-    "unicycle1",
-    "unicycle2",
-}
+from core.config import load_and_validate_system_config, validate_system_config
+from core.factory import DynamicsFactory, HEADING_SYSTEMS, PlannerFactory
 
 
 def rollout_trajectory(simulator, planner, num_steps):
@@ -68,54 +52,21 @@ def rollout_trajectory(simulator, planner, num_steps):
     return np.asarray(trajectory), reached_goal
 
 
-def main():
-    """
-    plots CasADi controlled trajectories for a selected dynamics system
-    """
+def run_plotting(
+    system: str,
+    config: Mapping[str, Any],
+    num_traj: int,
+    num_steps: int,
+    output_path: str | None = None,
+) -> str:
+    validated_config = validate_system_config(system_name=system, raw_config=config)
 
-    parser = argparse.ArgumentParser()
+    simulator = DynamicsFactory.create(system_name=system, config=validated_config)
+    planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
 
-    parser.add_argument(
-        "--system",
-        type=str.lower,
-        choices=SIMULATORS.keys(),
-        help="name of system class in lower case, e.g. single_integrator, unicycle2, ...",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        help="path to yaml config file for experiment",
-    )
-    parser.add_argument(
-        "--num-traj",
-        type=int,
-        default=15,
-        help="number of randomized trajectories to plot",
-    )
-    parser.add_argument(
-        "--num-steps",
-        type=int,
-        default=150,
-        help="maximum number of simulation steps per trajectory",
-    )
-    parser.add_argument(
-        "--output-path",
-        type=str,
-        default=None,
-        help="path to generated PDF plot",
-    )
-
-    args = parser.parse_args()
-
-    with open(args.config, "r") as file:
-        config = yaml.safe_load(file)
-
-    simulator = SIMULATORS[args.system](config)
-    planner = CasadiPlanner(simulator, config)
-
-    output_path = args.output_path or os.path.join(
+    output_path = output_path or os.path.join(
         os.path.dirname(__file__),
-        f"{args.system}_casadi_paths.pdf",
+        f"{system}_casadi_paths.pdf",
     )
 
     output_dir = os.path.dirname(output_path)
@@ -135,7 +86,7 @@ def main():
         zorder=5,
     )
 
-    show_heading = args.system in HEADING_SYSTEMS
+    show_heading = system in HEADING_SYSTEMS
     if show_heading:
         goal_theta = simulator.goal[2]
 
@@ -151,14 +102,14 @@ def main():
             zorder=5,
         )
 
-    print(f"simulating {args.num_traj} randomized trajectories...")
+    print(f"simulating {num_traj} randomized trajectories...")
 
     goals_reached = 0
-    for _ in range(args.num_traj):
+    for _ in range(num_traj):
         trajectory, reached_goal = rollout_trajectory(
             simulator=simulator,
             planner=planner,
-            num_steps=args.num_steps,
+            num_steps=num_steps,
         )
 
         if reached_goal:
@@ -195,7 +146,7 @@ def main():
                 zorder=4,
             )
 
-    system_title = args.system.replace("_", " ").title()
+    system_title = system.replace("_", " ").title()
 
     ax.set_title(f"CasADi optimal control paths ({system_title})")
     ax.set_xlabel("X position")
@@ -206,8 +157,58 @@ def main():
     fig.savefig(output_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
 
-    print(f"goal reached in {goals_reached}/{args.num_traj} trajectories")
+    print(f"goal reached in {goals_reached}/{num_traj} trajectories")
     print(f"plot saved to {output_path}")
+    return output_path
+
+
+def main():
+    """
+    plots CasADi controlled trajectories for a selected dynamics system
+    """
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--system",
+        type=str.lower,
+        choices=DynamicsFactory.names(),
+        help="name of system class in lower case, e.g. single_integrator, unicycle2, ...",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="path to yaml config file for experiment",
+    )
+    parser.add_argument(
+        "--num-traj",
+        type=int,
+        default=15,
+        help="number of randomized trajectories to plot",
+    )
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=150,
+        help="maximum number of simulation steps per trajectory",
+    )
+    parser.add_argument(
+        "--output-path",
+        type=str,
+        default=None,
+        help="path to generated PDF plot",
+    )
+
+    args = parser.parse_args()
+    config = load_and_validate_system_config(system_name=args.system, config_path=args.config)
+
+    run_plotting(
+        system=args.system,
+        config=config,
+        num_traj=args.num_traj,
+        num_steps=args.num_steps,
+        output_path=args.output_path,
+    )
 
 
 if __name__ == "__main__":
