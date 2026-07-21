@@ -53,7 +53,7 @@ def plot_xy_trajectories(
     trajectories,
     path_to_output,
     title,
-    path_label="trajectory",
+    path_labels=None,
     show_heading=False,
     marker=None,
 ):
@@ -64,6 +64,7 @@ def plot_xy_trajectories(
         simulator: system instance containing goal state in ``simulator.goal``.
         trajectories: iterable of state trajectories (each trajectories must have
             shape ``(num_steps, state_dim)`` and use x and y as its first two state entries)
+        path_labels: a string or list of strings to label the trajectories in the legend
         show_heading: whether to draw heading arrows for initial and goal states 
         (requires orientation as third state entry)
     """
@@ -98,6 +99,12 @@ def plot_xy_trajectories(
             zorder=5,
         )
 
+    # Ensure path_labels is a list to handle multiple trajectory labels
+    if path_labels is None:
+        path_labels = ["trajectory"] + [None] * (len(trajectories) - 1)
+    elif isinstance(path_labels, str):
+        path_labels = [path_labels] + [None] * (len(trajectories) - 1)
+
     for trajectory_index, trajectory in enumerate(trajectories):
         line_kwargs = {
             "alpha": 0.6,
@@ -108,10 +115,15 @@ def plot_xy_trajectories(
             line_kwargs["marker"] = marker
             line_kwargs["markersize"] = 3
 
+        # Assign the label if one exists for this index, otherwise None
+        current_label = None
+        if trajectory_index < len(path_labels):
+            current_label = path_labels[trajectory_index]
+
         line, = ax.plot(
             trajectory[:, 0],
             trajectory[:, 1],
-            label=path_label if trajectory_index == 0 else None,
+            label=current_label,
             **line_kwargs,
         )
 

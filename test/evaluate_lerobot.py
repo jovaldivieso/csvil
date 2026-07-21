@@ -11,7 +11,8 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
-from core.factory import DynamicsFactory, HEADING_SYSTEMS
+from core.factory import DynamicsFactory, HEADING_SYSTEMS, PlannerFactory
+from planning.casadi_planner import PlannerSolveError
 
 # Import both policy types
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
@@ -62,16 +63,42 @@ def create_policy_input(simulator, observation, device):
     return policy_input
 
 
-def rollout_policy(simulator, policy, device, num_steps):
+def rollout_planner(simulator, planner, initial_state, num_steps):
     """
-    runs one rollout of a trained policy
+    Rolls out the expert planner from a given initial state.
+    """
+    state = simulator.reset(initial_state)
+    planner.reset()
+    trajectory = [state.copy()]
 
+    for _ in range(num_steps):
+        if simulator.is_done(state):
+            break
+        
+        obs = simulator.observe(state)
+        
+        try:
+            action = planner(obs)
+        except PlannerSolveError as exc:
+            print(f"Expert planner failed to solve during evaluation: {exc}")
+            break
+            
+        state = simulator.step(state, action)
+        trajectory.append(state.copy())
+
+    return np.asarray(trajectory)
+
+
+def rollout_policy(simulator, policy, device, initial_state, num_steps):
+    """
+    Rolls out the neural policy from a given initial state.
+    
     returns:
         trajectory: array containing visited simulator states
         reached_goal: whether simulator reached goal state
         steps_taken: number of executed simulation steps
     """
-    state = simulator.reset_random()
+    state = simulator.reset(initial_state)
     trajectory = [state.copy()]
     policy.reset()
 
@@ -109,6 +136,7 @@ def run_evaluation(
 ):
     validated_config = validate_system_config(system_name=system, raw_config=config)
 
+    # Set seeds to ensure reproducibility of the random initial state
     np.random.seed(seed)
     torch.manual_seed(seed)
 
@@ -120,6 +148,7 @@ def run_evaluation(
     device = get_inference_device()
     print(f"running inference on {device}")
 
+    # Dynamically load the requested policy
     if policy_type == "diffusion":
         policy = DiffusionPolicy.from_pretrained(model_dir)
         policy_display_name = "Diffusion"
@@ -132,18 +161,35 @@ def run_evaluation(
     policy.eval()
     policy.to(device)
 
-    trajectory, reached_goal, steps_taken = rollout_policy(
+    # 1. Sample a single initial state to be shared by both rollouts
+    initial_state = simulator.reset_random()
+
+    # 2. Instantiate and rollout the expert planner
+    print("Rolling out expert planner...")
+    expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
+    expert_trajectory = rollout_planner(
+        simulator=simulator,
+        planner=expert_planner,
+        initial_state=initial_state,
+        num_steps=num_steps,
+    )
+
+    # 3. Rollout the neural policy from the EXACT same initial state
+    print("Rolling out neural policy...")
+    policy_trajectory, reached_goal, steps_taken = rollout_policy(
         simulator=simulator,
         policy=policy,
         device=device,
+        initial_state=initial_state,
         num_steps=num_steps,
     )
 
     if reached_goal:
-        print(f"goal reached in {steps_taken} steps")
+        print(f"Policy reached goal in {steps_taken} steps")
     else:
-        print(f"goal not reached after {steps_taken} steps")
+        print(f"Policy did not reach goal after {steps_taken} steps")
 
+    # Dynamically set output names
     output_path = output_path or os.path.join(
         os.path.dirname(__file__),
         f"{system}_{policy_type}_policy_path.pdf",
@@ -151,15 +197,17 @@ def run_evaluation(
 
     system_title = system.replace("_", " ").title()
 
+    # 4. Plot both trajectories overlaying each other
     plot_xy_trajectories(
         simulator=simulator,
-        trajectories=[trajectory],
+        trajectories=[expert_trajectory, policy_trajectory],
         path_to_output=output_path,
-        title=f"{system_title} {policy_display_name} Policy Evaluation",
-        path_label=f"{policy_display_name} policy path",
+        title=f"{system_title} {policy_display_name} vs Expert",
+        path_labels=["Expert", f"{policy_display_name} Policy"],
         show_heading=system in HEADING_SYSTEMS,
         marker="o",
     )
+    print(f"Plot saved to {output_path}")
     return output_path
 
 
