@@ -11,15 +11,16 @@ policy:
   repo_id: jovaldivieso/double_integrator_casadi_act
   push_to_hub: true
 
-  # Neural network settings
-  dim_model: 64
-  dim_feedforward: 256
+  # Neural network settings (Reduced capacity to prevent overfitting on transit phase)
+  dim_model: 32             # Reduced from 64
+  dim_feedforward: 128      # Reduced from 256
   n_heads: 4
   n_encoder_layers: 2
   n_decoder_layers: 1
   
-  chunk_size: 24
-  n_action_steps: 24
+  # Action chunking (Tightened to force faster closed-loop correction)
+  chunk_size: 4             # Reduced from 24
+  n_action_steps: 4         # Reduced from 24
   
   # Explicitly tell LeRobot how to normalize the new ENV state
   normalization_mapping:
@@ -42,8 +43,8 @@ policy:
       type: ACTION
 
 # Training settings
-steps: 50000
-save_freq: 10000
+steps: 12500
+save_freq: 12500
 batch_size: 64
 num_workers: 0
 save_checkpoint: true

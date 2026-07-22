@@ -11,17 +11,26 @@ policy:
   repo_id: jovaldivieso/double_integrator_casadi_diffusion_policy
   push_to_hub: true
   
-  # Neural network settings
-  down_dims: [16, 32, 64]       # Reduced from default [512, 1024, 2048]
-  diffusion_step_embed_dim: 16  # Reduced from default 128
+  # Neural network settings (Adjusted down_dims length to 2 so horizon=4 is a valid multiple)
+  down_dims: [32, 64]
+  diffusion_step_embed_dim: 16  
   
-  # Explicitly tell LeRobot how to normalize the new ENV state
+  # Inference Speed Optimizations
+  noise_scheduler_type: DDIM    # Faster deterministic sampling
+  num_inference_steps: 10       # Rapid evaluation
+  
+  # Closed-loop horizon matching ACT's chunk size (4 is divisible by len(down_dims)=2)
+  horizon: 4                    
+  n_action_steps: 4             
+  n_obs_steps: 1
+  
+  # Explicitly tell LeRobot how to normalize the states
   normalization_mapping:
     STATE: MIN_MAX
     ENV: MIN_MAX
     ACTION: MIN_MAX
   
-  # Split the inputs to satisfy the diffusion architecture
+  # Split inputs to satisfy the architecture
   input_features:
     observation.environment_state:
       shape: [2]
@@ -36,12 +45,10 @@ policy:
       type: ACTION
 
   drop_n_last_frames: 0
-  horizon: 24
-  n_action_steps: 1
 
 # Training settings
-steps: 50000
-save_freq: 10000
+steps: 12500
+save_freq: 12500
 batch_size: 64
 num_workers: 0
 save_checkpoint: true
