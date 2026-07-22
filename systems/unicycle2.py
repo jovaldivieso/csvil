@@ -138,10 +138,13 @@ class Unicycle2(DynamicsSimulator):
         """
         creates LeRobot feature schema
         """
-        observation_names = [
+        exteroception_names = [
             "goal_rel_x",
             "goal_rel_y",
             "rel_theta",
+        ]
+
+        proprioception_names = [
             "v",
             "omega",
         ]
@@ -149,13 +152,13 @@ class Unicycle2(DynamicsSimulator):
         return {
             "observation.environment_state": {
                 "dtype": "float32",
-                "shape": (5,),
-                "names": observation_names,
+                "shape": (3,),
+                "names": exteroception_names,
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (5,),
-                "names": observation_names,
+                "shape": (2,),
+                "names": proprioception_names,
             },
             "action": {
                 "dtype": "float32",
@@ -210,11 +213,11 @@ class Unicycle2(DynamicsSimulator):
 
         return {
             "observation.environment_state": torch.as_tensor(
-                obs,
+                obs[0:3],
                 dtype=torch.float32,
             ),
             "observation.state": torch.as_tensor(
-                obs,
+                obs[3:5],
                 dtype=torch.float32,
             ),
             "action": torch.as_tensor(

@@ -1,4 +1,5 @@
 from .dynamics import DynamicsSimulator
+from core.types import VectorSpec, as_vector
 import casadi as ca
 import numpy as np
 import torch
@@ -21,18 +22,29 @@ class SingleIntegrator(DynamicsSimulator):
         self.max_action = config.get("max_vel", 1.0)
         self.nx = 2
         self.nu = 2
+        self.obs_dim = 4
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
+        self.current_action = np.zeros(self.nu, dtype=float)
+
+    def validate_observation(self, observation: np.ndarray) -> np.ndarray:
+        return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))
+
+    def reset(self, initial_state: np.ndarray) -> np.ndarray:
+        state = super().reset(initial_state)
+        self.current_action = np.zeros(self.nu, dtype=float)
+        return state
 
     def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
         state = self.validate_state(state)
         action = self.validate_action(action)
         action = np.clip(action, -self.max_action, self.max_action)
+        self.current_action = action.copy()
         next_pos = state + action * self.dt
         return next_pos
 
     def observe(self, state: np.ndarray) -> np.ndarray:
         state = self.validate_state(state)
-        obs = self.goal - state
+        obs = np.concatenate([self.goal - state, self.current_action])
         return self.validate_observation(obs)
 
     def is_done(self, state: np.ndarray) -> bool:
@@ -47,21 +59,31 @@ class SingleIntegrator(DynamicsSimulator):
 
     def get_dataset_features(self) -> dict[str, Any]:
         """Return the LeRobot features dictionary for the single integrator"""
+        exteroception_names = [
+            "goal_rel_x",
+            "goal_rel_y",
+        ]
+
+        proprioception_names = [
+            "vx",
+            "vy",
+        ]
+
         return {
             "observation.environment_state": {
                 "dtype": "float32",
                 "shape": (2,),
-                "names": ["goal_rel_x", "goal_rel_y"]
+                "names": exteroception_names,
             },
             "observation.state": {
                 "dtype": "float32",
                 "shape": (2,),
-                "names": ["goal_rel_x", "goal_rel_y"]
+                "names": proprioception_names,
             },
             "action": {
                 "dtype": "float32",
                 "shape": (2,),
-                "names": ["vx", "vy"]
+                "names": ["vx", "vy"],
             },
         }
 
@@ -70,7 +92,7 @@ class SingleIntegrator(DynamicsSimulator):
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)
-        return self.goal - obs
+        return self.goal - obs[0:2]
 
     @property
     def goal_state(self) -> np.ndarray:
@@ -93,8 +115,7 @@ class SingleIntegrator(DynamicsSimulator):
         obs = self.validate_observation(obs)
         action = self.validate_action(action)
         return {
-            # Pass relative position to both to satisfy LeRobot's architecture
-            "observation.environment_state": torch.from_numpy(obs).float(),
-            "observation.state": torch.from_numpy(obs).float(),
+            "observation.environment_state": torch.from_numpy(obs[0:2]).float(),
+            "observation.state": torch.from_numpy(obs[2:4]).float(),
             "action": torch.from_numpy(action).float(),
         }

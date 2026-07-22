@@ -58,21 +58,31 @@ class DoubleIntegrator(DynamicsSimulator):
 
     def get_dataset_features(self) -> dict[str, Any]:
         """Return the LeRobot features dictionary for the double integrator"""
+        exteroception_names = [
+            "goal_rel_x",
+            "goal_rel_y",
+        ]
+
+        proprioception_names = [
+            "vx",
+            "vy",
+        ]
+
         return {
             "observation.environment_state": {
                 "dtype": "float32",
                 "shape": (2,),
-                "names": ["goal_rel_x", "goal_rel_y"]
+                "names": exteroception_names,
             },
             "observation.state": {
                 "dtype": "float32",
                 "shape": (2,),
-                "names": ["vx", "vy"]
+                "names": proprioception_names,
             },
             "action": {
                 "dtype": "float32",
                 "shape": (2,),
-                "names": ["ax", "ay"]
+                "names": ["ax", "ay"],
             },
         }
 
