@@ -21,7 +21,8 @@ PLANNER_REGISTRY: dict[str, Type[Planner]] = {
     "casadi": CasadiPlanner,
 }
 
-HEADING_SYSTEMS: set[str] = {"unicycle1", "unicycle2"}
+# SE(2) is the 2D rigid-body task space (x, y, theta), enabling orientation-aware arrow plotting.
+SE2_SYSTEMS: set[str] = {"unicycle1", "unicycle2"}
 
 
 class DynamicsFactory:

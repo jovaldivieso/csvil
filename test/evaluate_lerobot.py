@@ -11,7 +11,7 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
-from core.factory import DynamicsFactory, HEADING_SYSTEMS, PlannerFactory
+from core.factory import DynamicsFactory, SE2_SYSTEMS, PlannerFactory
 from planning.casadi_planner import PlannerSolveError
 
 # Import both policy types
@@ -204,7 +204,7 @@ def run_evaluation(
         path_to_output=output_path,
         title=f"{system_title} {policy_display_name} vs Expert",
         path_labels=["Expert", f"{policy_display_name} Policy"],
-        show_heading=system in HEADING_SYSTEMS,
+        show_heading=system in SE2_SYSTEMS,
         marker="o",
     )
     print(f"Plot saved to {output_path}")

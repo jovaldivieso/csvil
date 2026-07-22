@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
-from core.factory import DynamicsFactory, HEADING_SYSTEMS, PlannerFactory
+from core.factory import DynamicsFactory, SE2_SYSTEMS, PlannerFactory
 
 
 def rollout_trajectory(simulator, planner, num_steps):
@@ -86,7 +86,7 @@ def run_plotting(
         zorder=5,
     )
 
-    show_heading = system in HEADING_SYSTEMS
+    show_heading = system in SE2_SYSTEMS
     if show_heading:
         goal_theta = simulator.goal[2]
 
