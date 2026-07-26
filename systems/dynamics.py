@@ -37,7 +37,12 @@ class DynamicsSimulator(ABC):
         pass
 
     @abstractmethod
-    def reset_random(self):
+    def random_initial_state(
+        self,
+        rng,
+        environment_min,
+        environment_max,
+    ):
         """Return a random, dynamically valid initial state"""
         pass
 

@@ -1,6 +1,3 @@
-
-# db-LaCAM’s mapping from identifiers to motion-primitives is in src/run_dblacam.cpp
-
 import os
 import yaml
 import subprocess
@@ -13,13 +10,14 @@ from .planner import Planner
 
 class DbLacamPlanner(Planner):
     """
-    python wrapper around db-lacam executable
+    python wrapper around db-lacam executable for single- and multi-robot planning,
+    supporting heterogeneous robot teams
 
     modes:
-        - "open_loop": plans once at beginning of an episode and executes returned actions sequentially
-        - "replan": runs db-lacam again for every observation and executes only first returned action
+        - "open_loop": plans once and executes returned actions sequentially
+        - "replan": computes a new joint plan after replan_freq steps
 
-    supported CSVIL systems:
+    currently supported CSVIL systems:
         - SingleIntegrator
         - Unicycle1       
     """
@@ -27,12 +25,20 @@ class DbLacamPlanner(Planner):
     def __init__(self, simulator, config, algorithm_config):
         self.sim = simulator
         self.config = config.get("db_lacam", config)
-        self.algorithm_config = algorithm_config
-        self.robot_type = self.sim.db_lacam_robot_type
-
-        self.mode = self.config.get("mode", "open_loop")
-        self.replan_freq = int(self.config.get("replan_frequency", 5))
         
+        # algorithm_config is a separate YAML file containing db-lacam’s internal planning parameters,
+        # such as search resolution, heuristic settings, motion primitive counts, etc.
+        self.algorithm_config = algorithm_config
+
+        self.multi_robot = hasattr(self.sim, "robots")
+        if self.multi_robot:
+            self.robots = list(self.sim.robots)
+        else:
+            self.robots = [self.sim]
+
+        self.mode = self.config.get("mode", "replan")
+        self.replan_freq = int(self.config.get("replan_freq", 5))
+
         # path to db-lacam executable and working directory:
         self.executable = self.config.get("executable", "/opt/db-lacam/buildRelease/run_dblacam")
         if not os.path.isfile(self.executable):
@@ -40,7 +46,7 @@ class DbLacamPlanner(Planner):
         self.cwd = self.config.get("cwd", os.path.dirname(self.executable))
         if not os.path.isdir(self.cwd):
             raise FileNotFoundError(f"working directory not found: {self.cwd}")
-
+        
         # run_dblacam requires time limit: 
         self.time_limit_ms = int(self.config.get("time_limit_ms", 60_000))
 
@@ -53,48 +59,64 @@ class DbLacamPlanner(Planner):
         self.environment_max = environment.get("max", [6.0, 6.0])
         self.obstacles = []
 
-        self.cached_plan = None
+        self.cached_plans = None
         self.step_idx = 0
-        
+
         # dynobench model and db-lacam motion primitives were generated with dt = 0.1:
-        if self.sim.dt != 0.1:
-            raise ValueError(f"parameter mismatch: simulator dt is {self.sim.dt}, but {self.robot_type} uses dt = 0.1")
-
+        for robot in self.robots:
+            if robot.dt != 0.1:
+                raise ValueError(f"parameter mismatch: simulator dt is {self.sim.dt}, but {robot.db_lacam_robot_type} uses dt = 0.1")
+     
     def reset(self):
-        """
-        clears cached trajectory for new episode
-        """
-        self.cached_plan = None
+        self.cached_plans = None
         self.step_idx = 0
 
-    def _compute_plan(self, obs):
+    def _create_observations_list(self, obs):
+        if not self.multi_robot:
+            return [obs]
+        return list(obs)
+
+
+    def _define_dblacam_problem(self, obs):
+        """
+        converts csvil observations into one db-lacam problem dictionary for all robot
+        """
         
-        # converts observation to state:
-        initial_state = self.sim.invert_obs(obs)
-        
+        observations = self._create_observations_list(obs)
+
+        robot_entries = []
+        for robot, robot_obs in zip(self.robots, observations):
+            
+            initial_state = robot.invert_obs(robot_obs)
+            robot_entries.append(
+                {
+                    "type": robot.db_lacam_robot_type,
+                    "start": np.asarray(initial_state, dtype=float).tolist(),
+                    "goal": np.asarray(robot.goal_state, dtype=float).tolist(),
+                }
+            )
+
         # defines db-lacam problem:
-        problem = {
+        return {
             "environment": {
                 "min": [float(value) for value in self.environment_min],
                 "max": [float(value) for value in self.environment_max],
                 "obstacles": self.obstacles, # []
             },
-            "robots": [
-                {
-                    "type": self.robot_type,
-                    "start": np.asarray(initial_state, dtype=float).tolist(),
-                    "goal": np.asarray(self.sim.goal_state, dtype=float).tolist(),
-                }
-            ],
+            "robots": robot_entries,
         }
+
+    def _compute_plan(self, obs):
+        
+        problem = self._define_dblacam_problem(obs)
 
         with tempfile.TemporaryDirectory(prefix="dblacam_") as temp_dir:
             
-            # db-lacam communicates through yaml-files:
+            # db-lacam communicates through yaml files:
             algorithm_yaml_path = os.path.join(temp_dir, "algorithm.yaml")
             problem_yaml_path = os.path.join(temp_dir,"problem.yaml")
             result_yaml_path = os.path.join(temp_dir, "result.yaml")
-
+            
             with open(algorithm_yaml_path, "w", encoding="utf-8") as file:
                 yaml.safe_dump(self.algorithm_config, file, sort_keys=False)
                 
@@ -102,55 +124,81 @@ class DbLacamPlanner(Planner):
                 yaml.safe_dump(problem, file, sort_keys=False)
 
             command = [
-                str(self.executable),
-                "-i", str(problem_yaml_path),
-                "-o", str(result_yaml_path),
-                "--stats", str(os.path.join(temp_dir,"stats.yaml")),
-                "--cfg", str(algorithm_yaml_path),
+                self.executable,
+                "-i", problem_yaml_path,
+                "-o", result_yaml_path,
+                "--stats", os.path.join(temp_dir,"stats.yaml"),
+                "--cfg", algorithm_yaml_path,
                 "-t", str(self.time_limit_ms),
             ]
-
-            process = subprocess.run(command, cwd=self.cwd, capture_output=True)
+            process = subprocess.run(command, cwd=self.cwd, capture_output=True, text=True)
 
             # useful error check cases were generated with ChatGPT:
             if process.returncode != 0:
-                raise RuntimeError(f"db-lacam failed:\n{process.stdout=}\n{process.stderr=}")
+                raise RuntimeError(f"db-lacam failed:\n{process.stdout[:-2000]=}\n{process.stderr[:-2000]=}")
             if not os.path.isfile(result_yaml_path):
-                raise RuntimeError(f"db-lacam did not create an output yaml:\n{process.stdout=}\n{process.stderr=}")
+                raise RuntimeError(f"db-lacam did not create an output yaml:\n{process.stdout[:-2000]=}\n{process.stderr[:-2000]=}")
 
             with open(result_yaml_path, "r", encoding="utf-8") as file:
                 result_data = yaml.safe_load(file)
-
+                
+        # extracts one action plan per robot from db-lacam result:
         trajectories = result_data.get("result")
-        # may happen if db-lacam times out or finds no solution:
-        if not trajectories:
-            raise RuntimeError("db-lacam output contains no trajectories")
 
-        trajectory = trajectories[0]
-        actions = np.asarray(trajectory.get("actions", []), dtype=float)
-        # check added by ChatGPT:
-        if actions.size == 0:
-            actions = np.empty((0, self.sim.nu), dtype=float)
+        self.cached_plans = []
+        for robot, trajectory in zip(self.robots, trajectories):
+            actions = np.asarray(trajectory.get("actions") or [], dtype=float)
+            actions = actions.reshape(-1, robot.nu)
+            self.cached_plans.append(actions)
 
-        self.cached_plan = actions
+        self.step_idx = 0
+
+    def _get_current_actions(self):
+        """
+        returns one action per robot for current planning step
+        """
         
+        actions = []
+        for robot, plan in zip(self.robots, self.cached_plans):
+            if self.step_idx < len(plan):
+                action = plan[self.step_idx].copy()
+            else:
+                # returns a zero action if a robot’s plan is already finished:
+                action = np.zeros(robot.nu, dtype=float)
+
+            actions.append(action)
+
+        return actions
+
     def __call__(self, obs):
         
         try:
-            if self.cached_plan is None:
-                self._compute_plan(obs)
-            # replans after 'replan_freq' many actions:
-            elif self.mode == "replan" and (self.step_idx >= self.replan_freq or self.step_idx >= len(self.cached_plan)):
-                self.reset()
-                self._compute_plan(obs)
+            # computes plan if no cached plan exists or all cached actions were used 
+            # or replan mode is active and replan_freq steps passed:
+            if (
+                self.cached_plans is None
+                or self.step_idx >= max((len(plan) for plan in self.cached_plans), default=0)
+                or (
+                    self.mode == "replan"
+                    and self.step_idx >= self.replan_freq
+                )
+            ):                self._compute_plan(obs)
 
-            action = self.cached_plan[self.step_idx].copy()
+            actions = self._get_current_actions()
             self.step_idx += 1
-            return action
 
-        except (RuntimeError) as error:
+            if self.multi_robot:
+                return actions
+            return actions[0]
+
+        except RuntimeError as error:
+            
             if self.raise_planning_error:
                 raise
-
             warnings.warn(f"db-lacam planning failed: {error}")
-            return np.zeros(self.sim.nu, dtype=float)
+
+            # creates one zero-action vector per robot in case of failure:
+            actions = [np.zeros(robot.nu, dtype=float) for robot in self.robots]
+            if self.multi_robot:
+                return actions
+            return actions[0]

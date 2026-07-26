@@ -62,8 +62,11 @@ class SingleIntegrator(DynamicsSimulator):
             },
         }
 
-    def random_initial_state(self, rng):
-        return rng.uniform(low=-5.0, high=5.0, size=2)
+    def random_initial_state(self, rng, environment_min, environment_max):
+        return rng.uniform(
+            low=environment_min,
+            high=environment_max,
+        )
 
     def invert_obs(self, obs):
         return self.goal - obs

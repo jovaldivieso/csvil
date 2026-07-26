@@ -80,10 +80,13 @@ class Unicycle1(DynamicsSimulator):
             },
         }
 
-    def random_initial_state(self, rng):
-        pos = rng.uniform(low=-5.0, high=5.0, size=2)
-        theta = rng.uniform(low=-np.pi, high=np.pi)
-        return np.array([pos[0], pos[1], theta])
+    def random_initial_state(self, rng, environment_min, environment_max):
+        position = rng.uniform(
+            low=environment_min,
+            high=environment_max,
+        )
+        theta = rng.uniform(-np.pi, np.pi)
+        return np.array([position[0], position[1],theta,])
 
     def invert_obs(self, obs):
         return np.array([self.goal[0] - obs[0], self.goal[1] - obs[1],
