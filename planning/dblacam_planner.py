@@ -135,9 +135,9 @@ class DbLacamPlanner(Planner):
 
             # useful error check cases were generated with ChatGPT:
             if process.returncode != 0:
-                raise RuntimeError(f"db-lacam failed:\n{process.stdout[:-2000]=}\n{process.stderr[:-2000]=}")
+                raise RuntimeError(f"db-lacam failed:\n{process.stdout[-2000:]=}\n{process.stderr[-2000:]=}")
             if not os.path.isfile(result_yaml_path):
-                raise RuntimeError(f"db-lacam did not create an output yaml:\n{process.stdout[:-2000]=}\n{process.stderr[:-2000]=}")
+                raise RuntimeError(f"db-lacam did not create an output yaml:\n{process.stdout[-2000:]=}\n{process.stderr[-2000:]=}")
 
             with open(result_yaml_path, "r", encoding="utf-8") as file:
                 result_data = yaml.safe_load(file)

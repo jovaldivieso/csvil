@@ -46,7 +46,6 @@ def create_multi_robot_simulator(config):
 
         robot_config = robot.get("config", {}).copy()
 
-        # adds fixed goal to robot config:
         robot_config["goal"] = robot["goal"]
         robot_config["randomize_goal"] = False
 

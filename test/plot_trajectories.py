@@ -11,6 +11,8 @@ PROJECT_ROOT = os.path.dirname(
 )
 sys.path.insert(0, PROJECT_ROOT)
 
+from utils import plot_xy_trajectories
+
 # import new systems here, then add them to SIMULATORS and HEADING_SYSTEMS:
 from planning.casadi_planner import CasadiPlanner
 from planning.dblacam_planner import DbLacamPlanner
@@ -155,41 +157,10 @@ def main():
         f"{args.planner}_{args.system}_{args.num_steps}_paths.pdf",
     )
 
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-
-    goal_x, goal_y = simulator.goal[:2]
-
-    ax.scatter(
-        goal_x,
-        goal_y,
-        marker="*",
-        s=300,
-        label="Goal",
-        zorder=5,
-    )
-
     show_heading = args.system in HEADING_SYSTEMS
-    if show_heading:
-        goal_theta = simulator.goal[2]
-
-        ax.quiver(
-            goal_x,
-            goal_y,
-            0.25 * np.cos(goal_theta),
-            0.25 * np.sin(goal_theta),
-            angles="xy",
-            scale_units="xy",
-            scale=1,
-            width=0.005,
-            zorder=5,
-        )
 
     print(f"simulating {args.num_traj} randomized trajectories...")
-
+    trajectories = []
     goals_reached = 0
     for _ in range(args.num_traj):
         trajectory, reached_goal = rollout_trajectory(
@@ -197,52 +168,21 @@ def main():
             planner=planner,
             num_steps=args.num_steps,
         )
+        trajectories.append(trajectory)
 
         if reached_goal:
             goals_reached += 1
 
-        line, = ax.plot(
-            trajectory[:, 0],
-            trajectory[:, 1],
-            alpha=0.6,
-            linewidth=2,
-        )
-
-        ax.scatter(
-            trajectory[0, 0],
-            trajectory[0, 1],
-            color="black",
-            s=20,
-            zorder=4,
-        )
-
-        if show_heading:
-            start_theta = trajectory[0, 2]
-
-            ax.quiver(
-                trajectory[0, 0],
-                trajectory[0, 1],
-                0.25 * np.cos(start_theta),
-                0.25 * np.sin(start_theta),
-                color=line.get_color(),
-                angles="xy",
-                scale_units="xy",
-                scale=1,
-                width=0.004,
-                zorder=4,
-            )
-
     system_title = args.system.replace("_", " ").title()
     planner_title = "db-LaCAM" if args.planner == "dblacam" else "CasADi"
-        
-    ax.set_title(f"{planner_title} optimal control paths for {system_title}")
-    ax.set_xlabel("X position")
-    ax.set_ylabel("Y position")
-    ax.grid(True, linestyle="--", alpha=0.7)
-    ax.axis("equal")
 
-    fig.savefig(output_path, format="pdf", bbox_inches="tight")
-    plt.close(fig)
+    plot_xy_trajectories(
+        simulator=simulator,
+        trajectories=trajectories,
+        path_to_output=output_path,
+        title=f"{planner_title} optimal control paths for {system_title}",
+        show_headings=[show_heading] * len(trajectories),
+    )
 
     print(f"goal reached in {goals_reached}/{args.num_traj} trajectories")
     print(f"plot saved to {output_path}")

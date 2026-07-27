@@ -1,84 +1,79 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
- 
+    
 def plot_xy_trajectories(
     simulator,
     trajectories,
     path_to_output,
     title,
-    path_label="trajectory",
-    show_heading=False,
-    marker=None,
+    goals=None,
+    show_headings=None,
+    labels=None,
 ):
     """
     plots and saves simulated trajectories
 
-    Args:
-        simulator: system instance containing goal state in ``simulator.goal``.
-        trajectories: iterable of state trajectories (each trajectories must have
-            shape ``(num_steps, state_dim)`` and use x and y as its first two state entries)
-        show_heading: whether to draw heading arrows for initial and goal states 
-        (requires orientation as third state entry)
+    args:
+        simulator: single- or multi-robot simulator
+        trajectories: iterable containing one trajectory per plotted path
+        goals: optional goal state for each trajectory
+        show_headings: optional heading flag for each trajectory
+        labels: optional label for each trajectory
     """
-    
     output_dir = os.path.dirname(path_to_output)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
+    trajectories = [np.asarray(trajectory) for trajectory in trajectories]
+
+    if goals is None:
+        goals = [simulator.goal] * len(trajectories)
+
+    if show_headings is None:
+        show_headings = [False] * len(trajectories)
+        
+    if labels is None:
+        labels = [None] * len(trajectories)
+
     fig, ax = plt.subplots(figsize=(8, 8))
 
-    goal_x, goal_y = simulator.goal[:2]
-    ax.scatter(
-        goal_x,
-        goal_y,
-        marker="*",
-        s=300,
-        label="goal",
-        zorder=5,
-    )
-
-    if show_heading:
-        goal_theta = simulator.goal[2]
-        ax.quiver(
-            goal_x,
-            goal_y,
-            0.25 * np.cos(goal_theta),
-            0.25 * np.sin(goal_theta),
-            angles="xy",
-            scale_units="xy",
-            scale=1,
-            width=0.005,
-            zorder=5,
-        )
-
-    for trajectory_index, trajectory in enumerate(trajectories):
-        line_kwargs = {
-            "alpha": 0.6,
-            "linewidth": 2,
-        }
-
-        if marker is not None:
-            line_kwargs["marker"] = marker
-            line_kwargs["markersize"] = 3
+    for trajectory, goal, label, show_heading in zip(trajectories, goals, labels, show_headings):
+        line_kwargs = {"alpha": 0.6, "linewidth": 2}
 
         line, = ax.plot(
             trajectory[:, 0],
             trajectory[:, 1],
-            label=path_label if trajectory_index == 0 else None,
+            label=label,
             **line_kwargs,
         )
 
+        # marks start:
         ax.scatter(
             trajectory[0, 0],
             trajectory[0, 1],
-            color="black",
-            s=20,
-            zorder=4,
+            color=line.get_color(),
+            marker="o",
+            s=40,
+            edgecolor="black",
+            zorder=5,
+        )
+
+        # marks goal:
+        ax.scatter(
+            goal[0],
+            goal[1],
+            color=line.get_color(),
+            marker="*",
+            s=250,
+            edgecolor="black",
+            zorder=5,
         )
 
         if show_heading:
             start_theta = trajectory[0, 2]
+            goal_theta = goal[2]
+
             ax.quiver(
                 trajectory[0, 0],
                 trajectory[0, 1],
@@ -89,7 +84,20 @@ def plot_xy_trajectories(
                 scale_units="xy",
                 scale=1,
                 width=0.004,
-                zorder=4,
+                zorder=5,
+            )
+
+            ax.quiver(
+                goal[0],
+                goal[1],
+                0.25 * np.cos(goal_theta),
+                0.25 * np.sin(goal_theta),
+                color=line.get_color(),
+                angles="xy",
+                scale_units="xy",
+                scale=1,
+                width=0.005,
+                zorder=5,
             )
 
     ax.set_title(title)

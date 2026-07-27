@@ -55,7 +55,7 @@ class DataCollector:
                     action = motion_planner(obs)
 
                     if multi_robot:
-                        local_observations = self.sim.create_dataset_observations(state)
+                        local_observations = self.sim.create_local_observations(state)
 
                         # Ask the simulator to format the current frame
                         for robot_ind, (local_observation, robot_action) in enumerate(

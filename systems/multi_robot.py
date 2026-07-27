@@ -66,7 +66,7 @@ class MultiRobotSimulator:
         """ 
         return [robot.observe(state) for robot, state in zip(self.robots, states)]
     
-    def create_dataset_observations(self, states):
+    def create_local_observations(self, states):
         """
         creates one robot centric dataset observation per robot
         """
@@ -221,73 +221,6 @@ class MultiRobotSimulator:
                 dtype=torch.int64,
             ),
         }
-    # def get_dataset_features(self):
-    #     """
-    #     creates joint lerobot feature definitions with robot specific names
-    #     """
-
-    #     obs_names, act_names = [], []
-    #     for robot_ind, robot in enumerate(self.robots):
-            
-    #         features = robot.get_dataset_features()
-    #         robot_obs_names = features["observation.state"]["names"]    # e.g. "goal_rel_x", "goal_rel_y", "goal_rel_theta"
-    #         robot_act_names = features["action"]["names"]               # e.g. "vx", "vy", "v","omega",
-
-    #         obs_names.extend([f"robot_{robot_ind}_{name}" for name in robot_obs_names])
-    #         act_names.extend([f"robot_{robot_ind}_{name}" for name in robot_act_names])
-
-    #     obs_dimension = len(obs_names)
-    #     act_dimension = len(act_names)
-
-    #     # defines joint schema of lerobot dataset frame:
-    #     return {
-    #         "observation.environment_state": {
-    #             "dtype": "float32",
-    #             "shape": (obs_dimension,),
-    #             "names": obs_names,
-    #         },
-    #         "observation.state": {
-    #             "dtype": "float32",
-    #             "shape": (obs_dimension,),
-    #             "names": obs_names,
-    #         },
-    #         "action": {
-    #             "dtype": "float32",
-    #             "shape": (act_dimension,),
-    #             "names": act_names,
-    #         },
-    #     }
-
-    # def format_dataset_frame(self, observations, actions):
-    #     """
-    #     concatenates observations and actions in fixed robot order
-        
-    #     example for one single integrator and one unicycle: 
-    #     observation.state:
-    #     [
-    #         robot_0_obs_0,
-    #         robot_0_obs_1,
-    #         robot_1_obs_0,
-    #         robot_1_obs_1,
-    #         robot_1_obs_2,
-    #     ]
-    #     action:
-    #     [
-    #         robot_0_action_0,
-    #         robot_0_action_1,
-    #         robot_1_action_0,
-    #         robot_1_action_1,
-    #     ]
-    #     """
-
-    #     observation = torch.tensor(np.concatenate(observations), dtype=torch.float32)
-    #     action = torch.tensor(np.concatenate(actions), dtype=torch.float32)
-
-    #     return {
-    #         "observation.environment_state": observation,
-    #         "observation.state": observation,
-    #         "action": action,
-    #     }
 
     @property
     def goal_states(self):
