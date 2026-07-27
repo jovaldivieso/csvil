@@ -68,7 +68,25 @@ class MultiRobotSimulator:
     
     def create_local_observations(self, states):
         """
-        creates one robot centric dataset observation per robot
+        creates one robot centric observation per robot
+        
+        example:
+            robots = [SingleIntegrator(), Unicycle1()],
+        
+            single_integrator_state = [1.0, 2.0]
+            unicycle_state = [3.0, 2.5, 1.57]
+            
+            observation of robot 0:
+            [
+                goal_rel_x,
+                goal_rel_y,
+                0.0,       # padded (because single integrator has no heading)
+                1.0, 0.0,  # OHE of ego type (ego is single integrator)
+                2.0,       # neighbor x - ego x
+                0.5,       # neighbor y - ego y
+                1.57,      # neighbor heading
+                0.0, 1.0,  # OHE of neighbor type (neighbor is unicycle)
+            ]
         """
 
         observations = []
@@ -128,24 +146,6 @@ class MultiRobotSimulator:
     def get_dataset_features(self):
         """
         creates feature definitions for one robot centric sample
-        
-        example:
-            robots = [SingleIntegrator(), Unicycle1()],
-        
-            single_integrator_state = [1.0, 2.0]
-            unicycle_state = [3.0, 2.5, 1.57]
-            
-            observation of robot 0:
-            [
-                goal_rel_x,
-                goal_rel_y,
-                0.0,       # padded (because single integrator has no heading)
-                1.0, 0.0,  # ego is single integrator
-                2.0,       # neighbor x - ego x
-                0.5,       # neighbor y - ego y
-                1.57,      # neighbor heading
-                0.0, 1.0,  # neighbor is unicycle
-            ]
         """
 
         obs_names = [f"ego_obs_{index}" for index in range(self.max_obs_dim)]
