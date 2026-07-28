@@ -14,6 +14,8 @@ from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, SE2_SYSTEMS, PlannerFactory
 from planning.casadi_planner import PlannerSolveError
 from learning.models.mlp import CustomMLPPolicy
+from planning.planner import PlannerProtocol
+from systems.dynamics import DynamicsProtocol
 
 # Import both policy types
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
@@ -34,7 +36,11 @@ def get_inference_device():
     return torch.device("cpu")
 
 
-def create_policy_input(simulator, observation, device):
+def create_policy_input(
+    simulator: DynamicsProtocol,
+    observation: np.ndarray,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
     """
     Dynamically slices the flat observation array based on the
     feature shapes defined by the simulator.
@@ -64,7 +70,12 @@ def create_policy_input(simulator, observation, device):
     return policy_input
 
 
-def rollout_planner(simulator, planner, initial_state, num_steps):
+def rollout_planner(
+    simulator: DynamicsProtocol,
+    planner: PlannerProtocol,
+    initial_state: np.ndarray,
+    num_steps: int,
+) -> np.ndarray:
     """
     Rolls out the expert planner from a given initial state.
     """
@@ -90,7 +101,13 @@ def rollout_planner(simulator, planner, initial_state, num_steps):
     return np.asarray(trajectory)
 
 
-def rollout_policy(simulator, policy, device, initial_state, num_steps):
+def rollout_policy(
+    simulator: DynamicsProtocol,
+    policy: DiffusionPolicy | ACTPolicy | CustomMLPPolicy,
+    device: torch.device,
+    initial_state: np.ndarray,
+    num_steps: int,
+) -> tuple[np.ndarray, bool, int]:
     """
     Rolls out the neural policy from a given initial state.
     

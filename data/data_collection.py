@@ -3,12 +3,14 @@ from pathlib import Path
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerProtocol
+from systems.dynamics import DynamicsProtocol
 
 
 class DataCollector:
     def __init__(
         self,
-        simulator,
+        simulator: DynamicsProtocol,
         repo_id="undefined_expert",
         local_dir="data/lerobot_dataset",
     ):
@@ -17,8 +19,12 @@ class DataCollector:
         self.local_dir = Path(local_dir)
         self.fps = int(1 / self.sim.dt)
 
-    def collect_trajectories(self, motion_planner, num_trajectories,
-                             num_steps=100):
+    def collect_trajectories(
+        self,
+        motion_planner: PlannerProtocol,
+        num_trajectories: int,
+        num_steps: int = 100,
+    ) -> LeRobotDataset:
         print(f"Collecting {num_trajectories} trajectories...")
 
         if self.local_dir.exists():
@@ -53,7 +59,7 @@ class DataCollector:
             planner_failed = False
 
             # Tell the planner a new episode is starting!
-            if hasattr(motion_planner, 'reset'):
+            if hasattr(motion_planner, "reset"):
                 motion_planner.reset()
 
             for _ in range(num_steps):

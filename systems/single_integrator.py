@@ -1,4 +1,9 @@
 from .dynamics import DynamicsSimulator
+from .state_space_types import (
+    Euclidean2DAction,
+    Euclidean2DState,
+    Euclidean4DObservation,
+)
 from core.types import VectorSpec, as_vector
 import casadi as ca
 import numpy as np
@@ -37,9 +42,10 @@ class SingleIntegrator(DynamicsSimulator):
     def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
         state = self.validate_state(state)
         action = self.validate_action(action)
-        action = np.clip(action, -self.max_action, self.max_action)
-        self.current_action = action.copy()
-        next_pos = state + action * self.dt
+        state_view = Euclidean2DState.from_array(state)
+        action_view = Euclidean2DAction.from_array(action).clipped(self.max_action)
+        self.current_action = action_view.as_numpy().copy()
+        next_pos = state_view.as_numpy() + action_view.as_numpy() * self.dt
         return next_pos
 
     def observe(self, state: np.ndarray) -> np.ndarray:
@@ -92,7 +98,8 @@ class SingleIntegrator(DynamicsSimulator):
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)
-        return self.goal - obs[0:2]
+        obs_view = Euclidean4DObservation.from_array(obs)
+        return self.goal - obs_view.goal_relative
 
     @property
     def goal_state(self) -> np.ndarray:
@@ -114,8 +121,10 @@ class SingleIntegrator(DynamicsSimulator):
         """Package the observation and action into a dictionary for LeRobot"""
         obs = self.validate_observation(obs)
         action = self.validate_action(action)
+        obs_view = Euclidean4DObservation.from_array(obs)
+        action_view = Euclidean2DAction.from_array(action)
         return {
-            "observation.environment_state": torch.from_numpy(obs[0:2]).float(),
-            "observation.state": torch.from_numpy(obs[2:4]).float(),
-            "action": torch.from_numpy(action).float(),
+            "observation.environment_state": torch.from_numpy(obs_view.goal_relative).float(),
+            "observation.state": torch.from_numpy(obs_view.velocity_like).float(),
+            "action": action_view.as_torch(),
         }

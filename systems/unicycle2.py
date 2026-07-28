@@ -1,5 +1,10 @@
 from .dynamics import DynamicsSimulator
-from .utils import wrap_angle, get_relative_position
+from .state_space_types import (
+    Euclidean2DAction,
+    SE2PoseAndEuclidean2DObservation,
+    SE2PoseAndEuclidean2DState,
+)
+from .utils import wrap_angle
 from typing import Any, Mapping
 
 import casadi as ca
@@ -52,11 +57,19 @@ class Unicycle2(DynamicsSimulator):
         """
         state = self.validate_state(state)
         action = self.validate_action(action)
+        state_view = SE2PoseAndEuclidean2DState.from_array(state)
+        action_view = Euclidean2DAction.from_array(action)
         # limits action to valid range: 
-        action = np.clip(action, -self.max_action, self.max_action)
+        clipped_action = action_view.clipped(self.max_action)
 
-        x, y, theta, v, omega = state
-        a_v, a_omega = action
+        pose = state_view.pose
+        x = pose.translation[0]
+        y = pose.translation[1]
+        theta = pose.theta
+        v = state_view.v
+        omega = state_view.omega
+        a_v = clipped_action.first
+        a_omega = clipped_action.second
 
         x = x + v * np.cos(theta) * self.dt
         y = y + v * np.sin(theta) * self.dt
@@ -73,8 +86,10 @@ class Unicycle2(DynamicsSimulator):
         [goal_rel_x, goal_rel_y, rel_theta, velocity, angular velocity]
         """
         state = self.validate_state(state)
-        goal_rel_x, goal_rel_y, rel_theta = get_relative_position(pos=state[:3], goal_pos=self.goal[:3])
-        obs = np.array([goal_rel_x, goal_rel_y, rel_theta, state[3], state[4]])
+        state_view = SE2PoseAndEuclidean2DState.from_array(state)
+        rel_pos = self.goal[0:2] - state_view.pose.translation
+        rel_theta = wrap_angle(self.goal[2] - state_view.pose.theta)
+        obs = np.array([rel_pos[0], rel_pos[1], rel_theta, state_view.v, state_view.omega])
         return self.validate_observation(obs)
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
@@ -82,13 +97,14 @@ class Unicycle2(DynamicsSimulator):
         reconstructs absolute state from observation
         """
         obs = self.validate_observation(obs)
+        obs_view = SE2PoseAndEuclidean2DObservation.from_array(obs)
         return np.array(
             [
-                self.goal[0] - obs[0],
-                self.goal[1] - obs[1],
-                wrap_angle(self.goal[2] - obs[2]),
-                obs[3],
-                obs[4],
+                self.goal[0] - obs_view.exteroception[0],
+                self.goal[1] - obs_view.exteroception[1],
+                wrap_angle(self.goal[2] - obs_view.rel_theta),
+                obs_view.euclidean_2d[0],
+                obs_view.euclidean_2d[1],
             ]
         )
 
@@ -104,14 +120,15 @@ class Unicycle2(DynamicsSimulator):
         checks whether robot has successfully completed task
         """
         state = self.validate_state(state)
-        pos_error = np.linalg.norm(state[:2] - self.goal[:2])
-        theta_error = abs(wrap_angle(state[2] - self.goal[2]))
+        state_view = SE2PoseAndEuclidean2DState.from_array(state)
+        pos_error = np.linalg.norm(state_view.pose.translation - self.goal[0:2])
+        theta_error = abs(wrap_angle(state_view.pose.theta - self.goal[2]))
 
         return (
             pos_error < self.error_tolerance
             and theta_error < self.error_tolerance
-            and abs(state[3]) < self.error_tolerance # speed error
-            and abs(state[4]) < self.error_tolerance # omega error
+            and abs(state_view.v) < self.error_tolerance # speed error
+            and abs(state_view.omega) < self.error_tolerance # omega error
         )
 
     def casadi_dynamics(self, x: Any, u: Any):
@@ -210,18 +227,20 @@ class Unicycle2(DynamicsSimulator):
         """
         obs = self.validate_observation(obs)
         action = self.validate_action(action)
+        obs_view = SE2PoseAndEuclidean2DObservation.from_array(obs)
+        action_view = Euclidean2DAction.from_array(action)
 
         return {
             "observation.environment_state": torch.as_tensor(
-                obs[0:3],
+                obs_view.exteroception,
                 dtype=torch.float32,
             ),
             "observation.state": torch.as_tensor(
-                obs[3:5],
+                obs_view.euclidean_2d,
                 dtype=torch.float32,
             ),
             "action": torch.as_tensor(
-                action,
+                action_view.as_numpy(),
                 dtype=torch.float32,
             ),
         }

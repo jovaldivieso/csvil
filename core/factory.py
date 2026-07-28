@@ -1,23 +1,27 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Type
+from typing import Any, Callable, Mapping
 
 from planning.casadi_planner import CasadiPlanner
-from planning.planner import Planner
+from planning.planner import PlannerProtocol
 from systems.double_integrator import DoubleIntegrator
-from systems.dynamics import DynamicsSimulator
+from systems.dynamics import DynamicsProtocol
 from systems.single_integrator import SingleIntegrator
 from systems.unicycle1 import Unicycle1
 from systems.unicycle2 import Unicycle2
 
-SYSTEM_REGISTRY: dict[str, Type[DynamicsSimulator]] = {
+DynamicsBuilder = Callable[[Mapping[str, Any]], DynamicsProtocol]
+PlannerBuilder = Callable[[DynamicsProtocol, Mapping[str, Any]], PlannerProtocol]
+
+
+SYSTEM_REGISTRY: dict[str, DynamicsBuilder] = {
     "single_integrator": SingleIntegrator,
     "double_integrator": DoubleIntegrator,
     "unicycle1": Unicycle1,
     "unicycle2": Unicycle2,
 }
 
-PLANNER_REGISTRY: dict[str, Type[Planner]] = {
+PLANNER_REGISTRY: dict[str, PlannerBuilder] = {
     "casadi": CasadiPlanner,
 }
 
@@ -33,7 +37,7 @@ class DynamicsFactory:
         return tuple(SYSTEM_REGISTRY.keys())
 
     @staticmethod
-    def create(system_name: str, config: Mapping[str, Any]) -> DynamicsSimulator:
+    def create(system_name: str, config: Mapping[str, Any]) -> DynamicsProtocol:
         try:
             simulator_cls = SYSTEM_REGISTRY[system_name]
         except KeyError as exc:
@@ -47,7 +51,15 @@ class PlannerFactory:
     """Factory for planner instances."""
 
     @staticmethod
-    def create(planner_name: str, simulator: DynamicsSimulator, config: Mapping[str, Any]) -> Planner:
+    def names() -> tuple[str, ...]:
+        return tuple(PLANNER_REGISTRY.keys())
+
+    @staticmethod
+    def create(
+        planner_name: str,
+        simulator: DynamicsProtocol,
+        config: Mapping[str, Any],
+    ) -> PlannerProtocol:
         try:
             planner_cls = PLANNER_REGISTRY[planner_name]
         except KeyError as exc:

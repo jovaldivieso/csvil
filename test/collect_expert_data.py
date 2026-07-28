@@ -9,25 +9,27 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
-from core.factory import DynamicsFactory
-from utils import collect_casadi_expert_data
+from core.factory import DynamicsFactory, PlannerFactory
+from utils import collect_expert_data
 
 
 def run_collection(
     system: str,
+    planner_name: str,
     config: Mapping[str, Any],
     num_traj: int,
     num_steps: int,
     repo_id: str | None = None,
     local_dir: str | None = None,
 ):
-    repo_id = repo_id or f"local/{system}_casadi_expert"
-    local_dir = local_dir or f"data/lerobot_dataset_{system}_casadi"
+    repo_id = repo_id or f"local/{system}_{planner_name}_expert"
+    local_dir = local_dir or f"data/lerobot_dataset_{system}_{planner_name}"
 
     validated_config = validate_system_config(system_name=system, raw_config=config)
 
-    return collect_casadi_expert_data(
+    return collect_expert_data(
         simulator_name=system,
+        planner_name=planner_name,
         config=validated_config,
         repo_id=repo_id,
         local_dir=local_dir,
@@ -48,6 +50,12 @@ def main():
         type=str.lower,
         choices=DynamicsFactory.names(),
         help="name of system class, e.g. single_integrator, unicycle2, ...",
+    )
+    parser.add_argument(
+        "--planner",
+        type=str.lower,
+        choices=PlannerFactory.names(),
+        help="name of planner class in lower case, e.g. casadi",
     )
     parser.add_argument(
         "--config",
@@ -82,6 +90,7 @@ def main():
 
     run_collection(
         system=args.system,
+        planner_name=args.planner,
         config=cfg,
         repo_id=args.repo_id,
         local_dir=args.local_dir,

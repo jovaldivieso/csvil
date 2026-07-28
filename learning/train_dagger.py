@@ -23,6 +23,8 @@ from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.models.mlp import CustomMLPPolicy
 from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerProtocol
+from systems.dynamics import DynamicsProtocol
 
 
 def get_training_device() -> torch.device:
@@ -39,7 +41,7 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def observation_feature_names(simulator) -> list[str]:
+def observation_feature_names(simulator: DynamicsProtocol) -> list[str]:
     return [
         feature_name
         for feature_name in simulator.get_dataset_features().keys()
@@ -47,7 +49,7 @@ def observation_feature_names(simulator) -> list[str]:
     ]
 
 
-def observation_dim_from_features(simulator) -> int:
+def observation_dim_from_features(simulator: DynamicsProtocol) -> int:
     total_dim = 0
     for feature_name, feature_info in simulator.get_dataset_features().items():
         if feature_name.startswith("observation."):
@@ -55,9 +57,13 @@ def observation_dim_from_features(simulator) -> int:
     return total_dim
 
 
-def flatten_observation_for_policy(simulator, observation: np.ndarray, device: torch.device) -> torch.Tensor:
+def flatten_observation_for_policy(
+    simulator: DynamicsProtocol,
+    observation: np.ndarray,
+    device: torch.device,
+) -> torch.Tensor:
     """
-    Reproduces evaluate_lerobot dynamic slicing logic, then flattens for MLP.
+    Reproduces evaluate_policy dynamic slicing logic, then flattens for MLP.
     """
     features = simulator.get_dataset_features()
 
@@ -138,8 +144,8 @@ def train_policy_epoch(
 
 
 def collect_dagger_data(
-    simulator,
-    expert_planner,
+    simulator: DynamicsProtocol,
+    expert_planner: PlannerProtocol,
     policy: CustomMLPPolicy,
     dataset_writer: LeRobotDataset,
     trajectories_per_iteration: int,

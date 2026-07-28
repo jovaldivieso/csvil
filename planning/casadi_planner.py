@@ -3,6 +3,7 @@ import numpy as np
 from typing import Any, Mapping
 
 from .planner import Planner
+from systems.dynamics import DynamicsProtocol
 
 
 class PlannerSolveError(RuntimeError):
@@ -51,7 +52,7 @@ class CasadiPlanner(Planner):
         3. Actuator Limits:   -u_max <= u_k <= u_max     for k = 0, ..., N-1
     """
 
-    def __init__(self, simulator, config: Mapping[str, Any]):
+    def __init__(self, simulator: DynamicsProtocol, config: Mapping[str, Any]):
         self.sim = simulator
         self.N = config.get("horizon", 20)
         self.mode = config.get("mode", "mpc")  # Default to MPC

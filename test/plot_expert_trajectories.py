@@ -13,15 +13,21 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, SE2_SYSTEMS, PlannerFactory
+from planning.planner import PlannerProtocol
+from systems.dynamics import DynamicsProtocol
 
 
-def rollout_trajectory(simulator, planner, num_steps):
+def rollout_trajectory(
+    simulator: DynamicsProtocol,
+    planner: PlannerProtocol,
+    num_steps: int,
+) -> tuple[np.ndarray, bool]:
     """
-    simulates one trajectory controlled by a CasADi planner
+    simulates one trajectory controlled by a planner
 
     args:
         simulator: dynamics simulator used to generate states and observations
-        planner: CasADi planner that selects an action from each observation
+        planner: motion planner that selects an action from each observation
         num_steps: maximum number of simulation steps.
 
     returns:
@@ -54,6 +60,7 @@ def rollout_trajectory(simulator, planner, num_steps):
 
 def run_plotting(
     system: str,
+    planner_name: str,
     config: Mapping[str, Any],
     num_traj: int,
     num_steps: int,
@@ -62,11 +69,15 @@ def run_plotting(
     validated_config = validate_system_config(system_name=system, raw_config=config)
 
     simulator = DynamicsFactory.create(system_name=system, config=validated_config)
-    planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
+    planner = PlannerFactory.create(
+        planner_name=planner_name,
+        simulator=simulator,
+        config=validated_config,
+    )
 
     output_path = output_path or os.path.join(
         os.path.dirname(__file__),
-        f"{system}_casadi_paths.pdf",
+        f"{system}_{planner_name}_paths.pdf",
     )
 
     output_dir = os.path.dirname(output_path)
@@ -148,7 +159,9 @@ def run_plotting(
 
     system_title = system.replace("_", " ").title()
 
-    ax.set_title(f"CasADi optimal control paths ({system_title})")
+    ax.set_title(
+        f"{planner_name.replace('_', ' ').title()} optimal control paths ({system_title})"
+    )
     ax.set_xlabel("X position")
     ax.set_ylabel("Y position")
     ax.grid(True, linestyle="--", alpha=0.7)
@@ -164,7 +177,7 @@ def run_plotting(
 
 def main():
     """
-    plots CasADi controlled trajectories for a selected dynamics system
+    plots planner-controlled trajectories for a selected dynamics system
     """
 
     parser = argparse.ArgumentParser()
@@ -174,6 +187,12 @@ def main():
         type=str.lower,
         choices=DynamicsFactory.names(),
         help="name of system class in lower case, e.g. single_integrator, unicycle2, ...",
+    )
+    parser.add_argument(
+        "--planner",
+        type=str.lower,
+        choices=PlannerFactory.names(),
+        help="name of planner class in lower case, e.g. casadi",
     )
     parser.add_argument(
         "--config",
@@ -204,6 +223,7 @@ def main():
 
     run_plotting(
         system=args.system,
+        planner_name=args.planner,
         config=config,
         num_traj=args.num_traj,
         num_steps=args.num_steps,

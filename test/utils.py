@@ -7,8 +7,9 @@ import matplotlib.pyplot as plt
 from core.factory import DynamicsFactory, PlannerFactory
 from data.data_collection import DataCollector
 
-def collect_casadi_expert_data(
+def collect_expert_data(
     simulator_name: str,
+    planner_name: str,
     config: Mapping[str, Any],
     repo_id: str,
     local_dir: str,
@@ -18,11 +19,12 @@ def collect_casadi_expert_data(
     """
     generates and saves expert trajectories for a dynamics system
 
-    creates a simulator, CasADi planner and data collector, 
+    creates a simulator, planner and data collector,
     then stores generated expert trajectories as a local LeRobot dataset
 
     args:
         simulator_name: dynamics simulator key (e.g. unicycle2)
+        planner_name: planner key (e.g. casadi)
         config: configuration dictionary for simulator and planner
         repo_id: identifier stored in LeRobot dataset metadata
         local_dir: local directory where the generated dataset is saved
@@ -34,7 +36,11 @@ def collect_casadi_expert_data(
     """
     
     simulator = DynamicsFactory.create(system_name=simulator_name, config=config)
-    planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=config)
+    planner = PlannerFactory.create(
+        planner_name=planner_name,
+        simulator=simulator,
+        config=config,
+    )
 
     collector = DataCollector(
         simulator=simulator,

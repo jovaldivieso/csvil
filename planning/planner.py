@@ -1,6 +1,20 @@
 from abc import ABC, abstractmethod
+from typing import Protocol, runtime_checkable
 
 import numpy as np
+
+
+@runtime_checkable
+class PlannerProtocol(Protocol):
+    """Structural contract for planners used by simulation and data pipelines."""
+
+    def reset(self) -> None:
+        """Clear any episode-specific internal state."""
+        ...
+
+    def __call__(self, obs: np.ndarray) -> np.ndarray:
+        """Compute and return the action for the provided observation."""
+        ...
 
 
 class Planner(ABC):

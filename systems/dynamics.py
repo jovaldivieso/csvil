@@ -1,9 +1,63 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 import numpy as np
 
 from core.types import VectorSpec, as_vector
+
+
+@runtime_checkable
+class DynamicsProtocol(Protocol):
+    """Structural contract for pluggable dynamics simulators.
+
+    Any class with these attributes and methods is accepted by planners,
+    collectors, and training code without requiring inheritance from
+    DynamicsSimulator.
+    """
+
+    config: Mapping[str, Any]
+    state: np.ndarray | None
+    time: int
+    dt: float
+    nx: int
+    nu: int
+    max_action: float
+
+    def validate_state(self, state: np.ndarray) -> np.ndarray: ...
+
+    def validate_action(self, action: np.ndarray) -> np.ndarray: ...
+
+    def validate_observation(self, observation: np.ndarray) -> np.ndarray: ...
+
+    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray: ...
+
+    def observe(self, state: np.ndarray) -> np.ndarray: ...
+
+    def is_done(self, state: np.ndarray) -> bool: ...
+
+    def casadi_dynamics(self, x: Any, u: Any) -> Any: ...
+
+    def get_dataset_features(self) -> dict[str, Any]: ...
+
+    def reset_random(self) -> np.ndarray: ...
+
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, Any]: ...
+
+    def random_initial_state(self, rng: np.random.Generator) -> np.ndarray: ...
+
+    def invert_obs(self, obs: np.ndarray) -> np.ndarray: ...
+
+    @property
+    def goal_state(self) -> np.ndarray: ...
+
+    def reset(self, initial_state: np.ndarray) -> np.ndarray: ...
+
+    def simulate(
+        self,
+        initial_state: np.ndarray,
+        policy_fn: Callable[[np.ndarray], np.ndarray],
+        num_steps: int,
+    ) -> dict[str, np.ndarray]: ...
 
 
 class DynamicsSimulator(ABC):
