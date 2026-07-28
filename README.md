@@ -75,7 +75,10 @@ csvil/
 ├── learning/
 │   ├── config/
 │   │   └── double_integrator_casadi_diffusion_policy_config.yaml  # Example training config
-│   └── training.py
+│   ├── models/
+│   │   └── mlp.py             # Custom MLP policy used for BC/DAgger
+│   ├── train_dagger.py        # Standalone DAgger training loop for the MLP
+│   └── train_lerobot.py       # LeRobot training entrypoint (ACT / Diffusion)
 ├── planning/
 │   ├── planner.py            # Base class
 │   └── casadi_planner.py     # Example subclass
@@ -164,7 +167,7 @@ Train a diffusion policy using the matching YAML configuration:
 
 ```bash
 docker compose run --rm csvil \
-  python learning/training.py \
+  python learning/train_lerobot.py \
   --config learning/config/double_integrator_casadi_diffusion_policy_config.yaml
 ```
 
@@ -173,9 +176,47 @@ use in sweep/automation scripts while preserving the same CLI behavior.
 
 Training outputs and checkpoints are saved in the configured output directory.
 
+### Train a custom MLP policy with DAgger
+
+Train the custom MLP baseline using a standalone PyTorch implementation of DAgger
+(Ross et al., 2011). The script starts from an existing offline expert dataset,
+then iteratively rolls out the learner, queries the expert on visited states,
+and appends corrective labels to the same LeRobot dataset.
+
+```bash
+docker compose run --rm csvil \
+  python learning/train_dagger.py \
+  --system double_integrator \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --repo-id local/double_integrator_casadi_expert \
+  --dataset-root data/lerobot_dataset_double_integrator_casadi \
+  --dagger-iterations 5 \
+  --epochs-per-iteration 20 \
+  --trajectories-per-iteration 20 \
+  --steps-per-trajectory 150
+```
+
+The script writes checkpoints to `outputs/train_dagger/` after each DAgger
+iteration, including:
+
+- `mlp_dagger_checkpoint.pt` (latest)
+- `mlp_dagger_iter_XXX.pt` (per-iteration snapshots)
+
+These checkpoints store a dictionary containing `model_state_dict`, optimizer
+state, and metadata (`state_dim`, `action_dim`, feature names, iteration).
+
+If a DAgger run crashes mid-write and later reports parquet footer errors,
+recreate the dataset directory before restarting. The trainer now finalizes
+LeRobot writer state per iteration to keep appended parquet chunks readable.
+
 ### Evaluate the learned policy
 
-Evaluate a trained policy in the selected simulator independently of the training loop. Make sure to pass your latest timestamped output folder or Hugging Face Hub ID to the --model-dir argument:
+Evaluate a trained policy in the selected simulator independently of the
+training loop. `--policy-type` supports `diffusion`, `act`, and `mlp`.
+For `diffusion`/`act`, pass the checkpoint directory (or Hub model ID).
+For `mlp`, pass the `.pt` checkpoint file path.
+
+Diffusion example:
 
 ```bash
 docker compose run --rm csvil \
@@ -186,7 +227,106 @@ docker compose run --rm csvil \
   --model-dir outputs/train/<run-name>/checkpoints/<checkpoint-name>
 ```
 
+MLP (DAgger checkpoint) example:
+
+```bash
+docker compose run --rm csvil \
+  python test/evaluate_lerobot.py \
+  --system double_integrator \
+  --policy-type mlp \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --model-dir outputs/train_dagger/mlp_dagger_checkpoint.pt
+```
+
 The script runs a rollout using the trained policy and saves a trajectory plot.
+
+### Quickstart: BC vs DAgger vs ACT/Diffusion
+
+Use this block as a minimal comparison workflow for the same system.
+
+1. Generate an expert dataset once:
+
+```bash
+docker compose run --rm csvil \
+  python test/collect_casadi_expert_data.py \
+  --system double_integrator \
+  --config test/config/double_integrator_casadi_config.yaml
+```
+
+2. BC-style MLP warm start (offline fit only):
+   The current MLP pipeline is implemented through DAgger. Setting
+   `--dagger-iterations 1` trains on the pre-existing offline dataset first
+   (the parameter-free DAgger initialization stage).
+
+```bash
+docker compose run --rm csvil \
+  python learning/train_dagger.py \
+  --system double_integrator \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --repo-id local/double_integrator_casadi_expert \
+  --dataset-root data/lerobot_dataset_double_integrator_casadi \
+  --dagger-iterations 1 \
+  --epochs-per-iteration 20 \
+  --trajectories-per-iteration 1 \
+  --steps-per-trajectory 150
+```
+
+3. Full MLP + DAgger training (iterative aggregation):
+
+```bash
+docker compose run --rm csvil \
+  python learning/train_dagger.py \
+  --system double_integrator \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --repo-id local/double_integrator_casadi_expert \
+  --dataset-root data/lerobot_dataset_double_integrator_casadi \
+  --dagger-iterations 5 \
+  --epochs-per-iteration 20 \
+  --trajectories-per-iteration 20 \
+  --steps-per-trajectory 150
+```
+
+4. ACT / Diffusion baselines (LeRobot trainers):
+
+```bash
+# Diffusion
+docker compose run --rm csvil \
+  python learning/train_lerobot.py \
+  --config learning/config/double_integrator_casadi_diffusion_policy_config.yaml
+
+# ACT
+docker compose run --rm csvil \
+  python learning/train_lerobot.py \
+  --config learning/config/double_integrator_casadi_act_config.yaml
+```
+
+Evaluate commands:
+
+```bash
+# MLP
+docker compose run --rm csvil \
+  python test/evaluate_lerobot.py \
+  --system double_integrator \
+  --policy-type mlp \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --model-dir outputs/train_dagger/mlp_dagger_checkpoint.pt
+
+# Diffusion
+docker compose run --rm csvil \
+  python test/evaluate_lerobot.py \
+  --system double_integrator \
+  --policy-type diffusion \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --model-dir outputs/train/<run-name>/checkpoints/<checkpoint-name>
+
+# ACT
+docker compose run --rm csvil \
+  python test/evaluate_lerobot.py \
+  --system double_integrator \
+  --policy-type act \
+  --config test/config/double_integrator_casadi_config.yaml \
+  --model-dir outputs/train/<run-name>/checkpoints/<checkpoint-name>
+```
 
 The evaluation, plotting, and expert collection scripts also expose importable
 execution functions (`run_evaluation`, `run_plotting`, `run_collection`) so they

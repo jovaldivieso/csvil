@@ -13,6 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, SE2_SYSTEMS, PlannerFactory
 from planning.casadi_planner import PlannerSolveError
+from learning.models.mlp import CustomMLPPolicy
 
 # Import both policy types
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
@@ -155,8 +156,25 @@ def run_evaluation(
     elif policy_type == "act":
         policy = ACTPolicy.from_pretrained(model_dir)
         policy_display_name = "ACT"
+    elif policy_type == "mlp":
+        state_dim = sum(
+            int(feature_info["shape"][0])
+            for feature_name, feature_info in simulator.get_dataset_features().items()
+            if feature_name.startswith("observation.")
+        )
+        action_dim = int(simulator.nu)
+
+        policy = CustomMLPPolicy(state_dim=state_dim, action_dim=action_dim)
+
+        checkpoint = torch.load(model_dir, map_location=device)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            policy.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            policy.load_state_dict(checkpoint)
+
+        policy_display_name = "MLP"
     else:
-        raise ValueError("'policy_type' must be either 'diffusion' or 'act'.")
+        raise ValueError("'policy_type' must be one of {'diffusion', 'act', 'mlp'}.")
 
     policy.eval()
     policy.to(device)
@@ -184,10 +202,30 @@ def run_evaluation(
         num_steps=num_steps,
     )
 
+    policy_final_state = policy_trajectory[-1]
+    expert_final_state = expert_trajectory[-1]
+    goal_state = simulator.goal_state
+
+    policy_goal_error = float(np.linalg.norm(policy_final_state - goal_state))
+    expert_goal_error = float(np.linalg.norm(expert_final_state - goal_state))
+
     if reached_goal:
         print(f"Policy reached goal in {steps_taken} steps")
     else:
         print(f"Policy did not reach goal after {steps_taken} steps")
+
+    print("\n--- Evaluation Summary ---")
+    print(f"system: {system}")
+    print(f"policy_type: {policy_type}")
+    print(f"seed: {seed}")
+    print(f"device: {device}")
+    print(f"initial_state: {np.array2string(initial_state, precision=4)}")
+    print(f"goal_state: {np.array2string(goal_state, precision=4)}")
+    print(f"expert_steps: {max(len(expert_trajectory) - 1, 0)}")
+    print(f"policy_steps: {max(len(policy_trajectory) - 1, 0)}")
+    print(f"policy_reached_goal: {reached_goal}")
+    print(f"policy_goal_error_l2: {policy_goal_error:.6f}")
+    print(f"expert_goal_error_l2: {expert_goal_error:.6f}")
 
     # Dynamically set output names
     output_path = output_path or os.path.join(
@@ -208,7 +246,23 @@ def run_evaluation(
         marker="o",
     )
     print(f"Plot saved to {output_path}")
-    return output_path
+
+    metrics = {
+        "system": system,
+        "policy_type": policy_type,
+        "seed": seed,
+        "device": str(device),
+        "initial_state": initial_state,
+        "goal_state": goal_state,
+        "policy_reached_goal": reached_goal,
+        "policy_steps": max(len(policy_trajectory) - 1, 0),
+        "expert_steps": max(len(expert_trajectory) - 1, 0),
+        "policy_goal_error_l2": policy_goal_error,
+        "expert_goal_error_l2": expert_goal_error,
+        "plot_path": output_path,
+    }
+
+    return metrics
 
 
 def main():
@@ -227,7 +281,7 @@ def main():
     parser.add_argument(
         "--policy-type",
         type=str.lower,
-        choices=["diffusion", "act"],
+        choices=["diffusion", "act", "mlp"],
         required=True,
         help="the type of policy architecture to evaluate",
     )
