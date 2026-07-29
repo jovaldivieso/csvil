@@ -1,4 +1,5 @@
 import os
+from collections.abc import Sequence
 from typing import Any, Mapping
 
 import numpy as np
@@ -62,6 +63,7 @@ def plot_xy_trajectories(
     path_labels=None,
     show_heading=False,
     marker=None,
+    trajectory_colors: Sequence[str] | None = None,
 ):
     """
     plots and saves simulated trajectories
@@ -125,6 +127,9 @@ def plot_xy_trajectories(
         current_label = None
         if trajectory_index < len(path_labels):
             current_label = path_labels[trajectory_index]
+
+        if trajectory_colors is not None and trajectory_index < len(trajectory_colors):
+            line_kwargs["color"] = trajectory_colors[trajectory_index]
 
         line, = ax.plot(
             trajectory[:, 0],

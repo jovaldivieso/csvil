@@ -149,14 +149,11 @@ def run_evaluation(
     config: Mapping[str, Any],
     model_dir: str,
     num_steps: int = 150,
-    seed: int = 42,
+    seeds: list[int] | None = None,
     output_path: str | None = None,
 ):
     validated_config = validate_system_config(system_name=system, raw_config=config)
-
-    # Set seeds to ensure reproducibility of the random initial state
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    seeds = seeds or [42, 123, 13, 11, 40]
 
     simulator = DynamicsFactory.create(system_name=system, config=validated_config)
 
@@ -196,53 +193,87 @@ def run_evaluation(
     policy.eval()
     policy.to(device)
 
-    # 1. Sample a single initial state to be shared by both rollouts
-    initial_state = simulator.reset_random()
+    print(f"evaluating {len(seeds)} seeded trajectories")
 
-    # 2. Instantiate and rollout the expert planner
-    print("Rolling out expert planner...")
+    # Instantiate expert planner once and reset it for each rollout.
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
-    expert_trajectory = rollout_planner(
-        simulator=simulator,
-        planner=expert_planner,
-        initial_state=initial_state,
-        num_steps=num_steps,
-    )
-
-    # 3. Rollout the neural policy from the EXACT same initial state
-    print("Rolling out neural policy...")
-    policy_trajectory, reached_goal, steps_taken = rollout_policy(
-        simulator=simulator,
-        policy=policy,
-        device=device,
-        initial_state=initial_state,
-        num_steps=num_steps,
-    )
-
-    policy_final_state = policy_trajectory[-1]
-    expert_final_state = expert_trajectory[-1]
     goal_state = simulator.goal_state
 
-    policy_goal_error = float(np.linalg.norm(policy_final_state - goal_state))
-    expert_goal_error = float(np.linalg.norm(expert_final_state - goal_state))
+    expert_trajectories: list[np.ndarray] = []
+    policy_trajectories: list[np.ndarray] = []
+    per_seed_metrics: list[dict[str, Any]] = []
 
-    if reached_goal:
-        print(f"Policy reached goal in {steps_taken} steps")
-    else:
-        print(f"Policy did not reach goal after {steps_taken} steps")
+    for seed in seeds:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        initial_state = simulator.reset_random()
+
+        expert_trajectory = rollout_planner(
+            simulator=simulator,
+            planner=expert_planner,
+            initial_state=initial_state,
+            num_steps=num_steps,
+        )
+
+        policy_trajectory, reached_goal, steps_taken = rollout_policy(
+            simulator=simulator,
+            policy=policy,
+            device=device,
+            initial_state=initial_state,
+            num_steps=num_steps,
+        )
+
+        policy_final_state = policy_trajectory[-1]
+        expert_final_state = expert_trajectory[-1]
+        policy_goal_error = float(np.linalg.norm(policy_final_state - goal_state))
+        expert_goal_error = float(np.linalg.norm(expert_final_state - goal_state))
+
+        expert_trajectories.append(expert_trajectory)
+        policy_trajectories.append(policy_trajectory)
+        per_seed_metrics.append(
+            {
+                "seed": seed,
+                "initial_state": initial_state,
+                "policy_reached_goal": reached_goal,
+                "policy_steps": max(len(policy_trajectory) - 1, 0),
+                "expert_steps": max(len(expert_trajectory) - 1, 0),
+                "policy_goal_error_l2": policy_goal_error,
+                "expert_goal_error_l2": expert_goal_error,
+            }
+        )
+
+    total_runs = len(per_seed_metrics)
+    total_successes = sum(
+        1 for metric in per_seed_metrics if metric["policy_reached_goal"]
+    )
+    success_rate = (total_successes / total_runs) if total_runs > 0 else 0.0
+    mean_policy_error = float(
+        np.mean([metric["policy_goal_error_l2"] for metric in per_seed_metrics])
+    ) if total_runs > 0 else 0.0
+    mean_expert_error = float(
+        np.mean([metric["expert_goal_error_l2"] for metric in per_seed_metrics])
+    ) if total_runs > 0 else 0.0
+    mean_policy_steps = float(
+        np.mean([metric["policy_steps"] for metric in per_seed_metrics])
+    ) if total_runs > 0 else 0.0
+    mean_expert_steps = float(
+        np.mean([metric["expert_steps"] for metric in per_seed_metrics])
+    ) if total_runs > 0 else 0.0
 
     print("\n--- Evaluation Summary ---")
     print(f"system: {system}")
     print(f"policy_type: {policy_type}")
-    print(f"seed: {seed}")
+    print(f"seeds: {seeds}")
     print(f"device: {device}")
-    print(f"initial_state: {np.array2string(initial_state, precision=4)}")
     print(f"goal_state: {np.array2string(goal_state, precision=4)}")
-    print(f"expert_steps: {max(len(expert_trajectory) - 1, 0)}")
-    print(f"policy_steps: {max(len(policy_trajectory) - 1, 0)}")
-    print(f"policy_reached_goal: {reached_goal}")
-    print(f"policy_goal_error_l2: {policy_goal_error:.6f}")
-    print(f"expert_goal_error_l2: {expert_goal_error:.6f}")
+    print(f"num_trajectories: {total_runs}")
+    print(f"policy_successes: {total_successes}/{total_runs}")
+    print(f"success_rate: {success_rate:.4f}")
+    print(f"mean_policy_steps: {mean_policy_steps:.3f}")
+    print(f"mean_expert_steps: {mean_expert_steps:.3f}")
+    print(f"mean_policy_goal_error_l2: {mean_policy_error:.6f}")
+    print(f"mean_expert_goal_error_l2: {mean_expert_error:.6f}")
 
     # Dynamically set output names
     output_path = output_path or os.path.join(
@@ -252,30 +283,42 @@ def run_evaluation(
 
     system_title = system.replace("_", " ").title()
 
-    # 4. Plot both trajectories overlaying each other
+    all_trajectories = expert_trajectories + policy_trajectories
+    num_expert = len(expert_trajectories)
+    num_policy = len(policy_trajectories)
+    path_labels = [None] * (num_expert + num_policy)
+    if num_expert > 0:
+        path_labels[0] = "Expert"
+    if num_policy > 0:
+        path_labels[num_expert] = f"{policy_display_name} Policy"
+    trajectory_colors = ["tab:blue"] * num_expert + ["tab:orange"] * num_policy
+
     plot_xy_trajectories(
         simulator=simulator,
-        trajectories=[expert_trajectory, policy_trajectory],
+        trajectories=all_trajectories,
         path_to_output=output_path,
         title=f"{system_title} {policy_display_name} vs Expert",
-        path_labels=["Expert", f"{policy_display_name} Policy"],
+        path_labels=path_labels,
         show_heading=system in SE2_SYSTEMS,
         marker="o",
+        trajectory_colors=trajectory_colors,
     )
     print(f"Plot saved to {output_path}")
 
     metrics = {
         "system": system,
         "policy_type": policy_type,
-        "seed": seed,
+        "seeds": seeds,
         "device": str(device),
-        "initial_state": initial_state,
         "goal_state": goal_state,
-        "policy_reached_goal": reached_goal,
-        "policy_steps": max(len(policy_trajectory) - 1, 0),
-        "expert_steps": max(len(expert_trajectory) - 1, 0),
-        "policy_goal_error_l2": policy_goal_error,
-        "expert_goal_error_l2": expert_goal_error,
+        "num_trajectories": total_runs,
+        "policy_successes": total_successes,
+        "success_rate": success_rate,
+        "mean_policy_steps": mean_policy_steps,
+        "mean_expert_steps": mean_expert_steps,
+        "mean_policy_goal_error_l2": mean_policy_error,
+        "mean_expert_goal_error_l2": mean_expert_error,
+        "per_seed": per_seed_metrics,
         "plot_path": output_path,
     }
 
@@ -321,10 +364,11 @@ def main():
         help="maximum number of simulation steps",
     )
     parser.add_argument(
-        "--seed",
+        "--seeds",
         type=int,
-        default=42,
-        help="random seed for initial state and policy sampling",
+        nargs="+",
+        default=[42, 123, 13, 11, 40],
+        help="list of seeds for initial state and policy sampling",
     )
     parser.add_argument(
         "--output-path",
@@ -342,7 +386,7 @@ def main():
         config=config,
         model_dir=args.model_dir,
         num_steps=args.num_steps,
-        seed=args.seed,
+        seeds=args.seeds,
         output_path=args.output_path,
     )
 

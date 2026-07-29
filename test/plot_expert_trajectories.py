@@ -62,7 +62,7 @@ def run_plotting(
     system: str,
     planner_name: str,
     config: Mapping[str, Any],
-    num_traj: int,
+    seeds: list[int],
     num_steps: int,
     output_path: str | None = None,
 ) -> str:
@@ -113,10 +113,12 @@ def run_plotting(
             zorder=5,
         )
 
+    num_traj = len(seeds)
     print(f"simulating {num_traj} randomized trajectories...")
 
     goals_reached = 0
-    for _ in range(num_traj):
+    for seed in seeds:
+        np.random.seed(seed)
         trajectory, reached_goal = rollout_trajectory(
             simulator=simulator,
             planner=planner,
@@ -200,10 +202,11 @@ def main():
         help="path to yaml config file for experiment",
     )
     parser.add_argument(
-        "--num-traj",
+        "--seeds",
         type=int,
-        default=15,
-        help="number of randomized trajectories to plot",
+        nargs="+",
+        default=[42, 123, 13, 11, 40, 99, 100, 777, 2026, 1],
+        help="list of seeds used to sample randomized trajectories",
     )
     parser.add_argument(
         "--num-steps",
@@ -225,7 +228,7 @@ def main():
         system=args.system,
         planner_name=args.planner,
         config=config,
-        num_traj=args.num_traj,
+        seeds=args.seeds,
         num_steps=args.num_steps,
         output_path=args.output_path,
     )
