@@ -21,7 +21,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
-from learning.models.mlp import CustomMLPPolicy
+from learning.models.mlp import MLPPolicy
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
@@ -119,7 +119,7 @@ class DaggerConfig:
 
 
 def train_policy_epoch(
-    policy: CustomMLPPolicy,
+    policy: MLPPolicy,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -146,7 +146,7 @@ def train_policy_epoch(
 def collect_dagger_data(
     simulator: DynamicsProtocol,
     expert_planner: PlannerProtocol,
-    policy: CustomMLPPolicy,
+    policy: MLPPolicy,
     dataset_writer: LeRobotDataset,
     trajectories_per_iteration: int,
     steps_per_trajectory: int,
@@ -235,7 +235,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
     state_dim = observation_dim_from_features(simulator)
     action_dim = int(simulator.nu)
 
-    policy = CustomMLPPolicy(state_dim=state_dim, action_dim=action_dim).to(device)
+    policy = MLPPolicy(state_dim=state_dim, action_dim=action_dim).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate)
 
     cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)

@@ -13,7 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, SE2_SYSTEMS, PlannerFactory
 from planning.casadi_planner import PlannerSolveError
-from learning.models.mlp import CustomMLPPolicy
+from learning.models.mlp import MLPPolicy
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 
@@ -103,7 +103,7 @@ def rollout_planner(
 
 def rollout_policy(
     simulator: DynamicsProtocol,
-    policy: DiffusionPolicy | ACTPolicy | CustomMLPPolicy,
+    policy: DiffusionPolicy | ACTPolicy | MLPPolicy,
     device: torch.device,
     initial_state: np.ndarray,
     num_steps: int,
@@ -178,7 +178,7 @@ def run_evaluation(
         )
         action_dim = int(simulator.nu)
 
-        policy = CustomMLPPolicy(state_dim=state_dim, action_dim=action_dim)
+        policy = MLPPolicy(state_dim=state_dim, action_dim=action_dim)
 
         checkpoint = torch.load(model_dir, map_location=device)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:

@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 
-class CustomMLPPolicy(nn.Module):
+class MLPPolicy(nn.Module):
     """Simple feed-forward policy for continuous-action imitation learning."""
 
     def __init__(

@@ -16,6 +16,7 @@ data/__pycache__/
 data/lerobot_dataset*/
 
 learning/__pycache__/
+learning/models/__pycache__/
 
 test/*.pdf
 
