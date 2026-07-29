@@ -17,12 +17,12 @@ policy:
   
   # Inference Speed Optimizations
   noise_scheduler_type: DDIM    
-  num_inference_steps: 10       
+  num_inference_steps: 20       
   
   # Horizon & History adjustments
   horizon: 32
   n_action_steps: 16            # Execute 16 steps before re-sampling
-  n_obs_steps: 4                # Capture last 4 observation frames
+  n_obs_steps: 3                # Capture last 3 observation frames
   
   normalization_mapping:
     STATE: MIN_MAX
