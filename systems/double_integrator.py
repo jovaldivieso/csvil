@@ -95,8 +95,11 @@ class DoubleIntegrator(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        pos = rng.uniform(low=-5.0, high=5.0, size=2)
-        return np.array([pos[0], pos[1], 0.0, 0.0])
+        radius = rng.uniform(0.5, 5.0)
+        angle = rng.uniform(0.0, 2 * np.pi)
+        offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
+        start_pos = self.goal + offset
+        return np.array([start_pos[0], start_pos[1], 0.0, 0.0])
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)
@@ -115,7 +118,7 @@ class DoubleIntegrator(DynamicsSimulator):
             self.goal = np.random.uniform(low=-5.0, high=5.0, size=2)
 
         # Uniform polar sampling for the start position, relative to the goal
-        radius = np.random.uniform(0.5, 3.0)
+        radius = np.random.uniform(0.5, 5.0)
         angle = np.random.uniform(0, 2 * np.pi)
         offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
 

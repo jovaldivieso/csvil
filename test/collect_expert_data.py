@@ -19,6 +19,7 @@ def run_collection(
     config: Mapping[str, Any],
     num_traj: int,
     num_steps: int,
+    action_noise_std: float = 0.0,
     repo_id: str | None = None,
     local_dir: str | None = None,
 ):
@@ -35,6 +36,7 @@ def run_collection(
         local_dir=local_dir,
         num_traj=num_traj,
         num_steps=num_steps,
+        action_noise_std=action_noise_std,
     )
 
 
@@ -75,6 +77,12 @@ def main():
         help="maximum number of simulation steps per trajectory",
     )
     parser.add_argument(
+        "--action-noise-std",
+        type=float,
+        default=0.0,
+        help="std-dev of Gaussian action noise applied during simulator execution",
+    )
+    parser.add_argument(
         "--repo-id",
         type=str,
         help="identifier stored in LeRobot dataset metadata",
@@ -96,6 +104,7 @@ def main():
         local_dir=args.local_dir,
         num_traj=args.num_traj,
         num_steps=args.num_steps,
+        action_noise_std=args.action_noise_std,
     )
 
 

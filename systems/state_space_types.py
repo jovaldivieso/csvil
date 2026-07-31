@@ -8,17 +8,72 @@ import torch
 from core.types import VectorSpec, as_vector
 
 
-def _SE2_matrix(x: float, y: float, theta: float) -> np.ndarray:
+def _SO2_matrix(theta: float) -> np.ndarray:
     cos_theta = np.cos(theta)
     sin_theta = np.sin(theta)
     return np.array(
         [
-            [cos_theta, -sin_theta, x],
-            [sin_theta, cos_theta, y],
+            [cos_theta, -sin_theta],
+            [sin_theta, cos_theta],
+        ],
+        dtype=float,
+    )
+
+
+def _SE2_matrix(x: float, y: float, theta: float) -> np.ndarray:
+    rotation = _SO2_matrix(theta)
+    return np.array(
+        [
+            [rotation[0, 0], rotation[0, 1], x],
+            [rotation[1, 0], rotation[1, 1], y],
             [0.0, 0.0, 1.0],
         ],
         dtype=float,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SO2State:
+    """Immutable typed view over an SO(2) rotation matrix."""
+
+    values: np.ndarray
+
+    @classmethod
+    def from_angle(cls, theta: float) -> "SO2State":
+        return cls(values=_SO2_matrix(float(theta)))
+
+    @classmethod
+    def from_matrix(cls, matrix: np.ndarray) -> "SO2State":
+        matrix = np.asarray(matrix, dtype=float)
+        if matrix.shape != (2, 2):
+            raise ValueError(f"rotation matrix must have shape (2, 2), got {matrix.shape}.")
+        return cls(values=matrix)
+
+    @property
+    def angle(self) -> float:
+        return float(np.arctan2(self.values[1, 0], self.values[0, 0]))
+
+    def as_matrix(self) -> np.ndarray:
+        return self.values
+
+    def inverse(self) -> "SO2State":
+        return SO2State.from_matrix(self.values.T)
+
+    def compose(self, other: "SO2State") -> "SO2State":
+        return SO2State.from_matrix(self.values @ other.values)
+
+    def between(self, other: "SO2State") -> "SO2State":
+        return other.compose(self.inverse())
+
+    def log_vee(self) -> float:
+        return self.angle
+
+    def error_to(self, target: "SO2State") -> float:
+        return self.between(target).log_vee()
+
+    def act(self, vector: np.ndarray) -> np.ndarray:
+        vector = as_vector(vector, VectorSpec(name="vector", size=2))
+        return self.values @ vector
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +143,10 @@ class SE2PoseState:
         return self.values[0:2, 0:2]
 
     @property
+    def orientation(self) -> SO2State:
+        return SO2State.from_matrix(self.rotation)
+
+    @property
     def translation(self) -> np.ndarray:
         return self.values[0:2, 2]
 
@@ -97,6 +156,26 @@ class SE2PoseState:
 
     def as_matrix(self) -> np.ndarray:
         return self.values
+
+    def inverse(self) -> "SE2PoseState":
+        rotation_inv = self.rotation.T
+        translation_inv = -rotation_inv @ self.translation
+        return SE2PoseState.from_matrix(
+            np.array(
+                [
+                    [rotation_inv[0, 0], rotation_inv[0, 1], translation_inv[0]],
+                    [rotation_inv[1, 0], rotation_inv[1, 1], translation_inv[1]],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=float,
+            )
+        )
+
+    def compose(self, other: "SE2PoseState") -> "SE2PoseState":
+        return SE2PoseState.from_matrix(self.values @ other.values)
+
+    def between(self, other: "SE2PoseState") -> "SE2PoseState":
+        return other.compose(self.inverse())
 
     def as_vector(self) -> np.ndarray:
         return np.array([self.translation[0], self.translation[1], self.theta], dtype=float)

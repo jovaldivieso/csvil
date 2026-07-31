@@ -19,5 +19,6 @@ learning/__pycache__/
 learning/models/__pycache__/
 
 test/*.pdf
+test/*.mp4
 
 outputs/

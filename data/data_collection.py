@@ -1,6 +1,8 @@
 import shutil
 from pathlib import Path
 
+import numpy as np
+
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
@@ -24,6 +26,7 @@ class DataCollector:
         motion_planner: PlannerProtocol,
         num_trajectories: int,
         num_steps: int = 100,
+        action_noise_std: float = 0.0,
     ) -> LeRobotDataset:
         print(f"Collecting {num_trajectories} trajectories...")
 
@@ -76,12 +79,26 @@ class DataCollector:
                     planner_failed = True
                     break
 
+                if action_noise_std > 0.0:
+                    noise = np.random.normal(
+                        loc=0.0,
+                        scale=action_noise_std,
+                        size=action.shape,
+                    ).astype(action.dtype, copy=False)
+                    executed_action = np.clip(
+                        action + noise,
+                        -self.sim.max_action,
+                        self.sim.max_action,
+                    )
+                else:
+                    executed_action = action
+
                 # Ask the simulator to format the current frame
                 frame_data = self.sim.format_dataset_frame(obs, action)
                 frame_data["task"] = "reach target"
 
                 dataset.add_frame(frame_data)
-                state = self.sim.step(state, action)
+                state = self.sim.step(state, executed_action)
 
                 # Break so it learns to hold its position and stop
                 if self.sim.is_done(state):

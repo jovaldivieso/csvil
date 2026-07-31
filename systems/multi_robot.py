@@ -1,0 +1,376 @@
+from __future__ import annotations
+
+from typing import Any, Iterable, Mapping
+
+import casadi as ca
+import numpy as np
+import torch
+
+from core.types import VectorSpec, as_vector
+from systems.dynamics import DynamicsProtocol, DynamicsSimulator
+
+
+class MultiRobotSimulator(DynamicsSimulator):
+    """Composite simulator that aggregates multiple robot simulators.
+
+    The simulator exposes a flat global state/action/observation interface while
+    delegating per-robot dynamics and observation logic to each sub-simulator.
+
+        Contract invariants
+        -------------------
+        - ``num_robots == len(simulators)``.
+        - ``robot_state_slices`` and ``robot_action_slices`` partition global state
+            and action vectors into contiguous, non-overlapping per-robot segments.
+        - Global state/action ordering is the concatenation of robot-local vectors
+            in simulator list order.
+
+        Observation packing invariants
+        ------------------------------
+        For each robot, augmented observation ordering is:
+
+        ``[base_environment_features, relative_xy_to_other_robots..., base_state_features]``
+
+        The global observation is the concatenation of these per-robot augmented
+        observations in simulator list order.
+
+        Dataset schema invariants
+        -------------------------
+        ``get_dataset_features()`` and ``format_dataset_frame()`` expose unified
+        top-level keys:
+
+        - ``observation.environment_state``
+        - ``observation.state``
+        - ``action``
+
+        with dimensions equal to concatenated per-robot contributions.
+
+        Visibility-gated relative observation invariant
+        ----------------------------------------------
+        Relative x/y terms to other robots are included only when the other robot
+        lies within the observing robot's configured visibility radius. When out
+        of range, the corresponding relative term is set to zero.
+    """
+
+    def __init__(self, simulators: Iterable[DynamicsProtocol], config: Mapping[str, Any] | None = None):
+        self.simulators = list(simulators)
+        if len(self.simulators) == 0:
+            raise ValueError("MultiRobotSimulator requires at least one sub-simulator.")
+        self.num_robots = len(self.simulators)
+
+        merged_config: dict[str, Any] = dict(config or {})
+        merged_config.setdefault("dt", float(self.simulators[0].dt))
+        super().__init__(merged_config)
+
+        dt0 = float(self.simulators[0].dt)
+        for idx, sim in enumerate(self.simulators[1:], start=1):
+            if not np.isclose(float(sim.dt), dt0):
+                raise ValueError(
+                    "All sub-simulators in MultiRobotSimulator must share the same dt. "
+                    f"Robot 0 has dt={dt0}, robot {idx} has dt={sim.dt}."
+                )
+
+        self.dt = dt0
+
+        self.robot_state_slices: list[slice] = []
+        self.robot_action_slices: list[slice] = []
+        self.robot_observation_slices: list[slice] = []
+        self.robot_base_observation_dims: list[int] = []
+        self.robot_env_dims: list[int] = []
+        self.robot_proprio_dims: list[int] = []
+
+        state_start = 0
+        action_start = 0
+        obs_start = 0
+        for sim in self.simulators:
+            state_end = state_start + int(sim.nx)
+            action_end = action_start + int(sim.nu)
+            env_dim, proprio_dim = self._observation_feature_dims(sim)
+            base_obs_dim = env_dim + proprio_dim
+
+            # Each robot additionally observes relative x/y offsets to all other robots.
+            extra_rel_dim = 2 * (len(self.simulators) - 1)
+            obs_dim = base_obs_dim + extra_rel_dim
+            obs_end = obs_start + obs_dim
+
+            self.robot_state_slices.append(slice(state_start, state_end))
+            self.robot_action_slices.append(slice(action_start, action_end))
+            self.robot_observation_slices.append(slice(obs_start, obs_end))
+            self.robot_base_observation_dims.append(base_obs_dim)
+            self.robot_env_dims.append(env_dim)
+            self.robot_proprio_dims.append(proprio_dim)
+
+            state_start = state_end
+            action_start = action_end
+            obs_start = obs_end
+
+        self.nx = state_start
+        self.nu = action_start
+        self.obs_dim = obs_start
+
+        visibility_spec = merged_config.get("inter_robot_visibility_radius", np.inf)
+        if isinstance(visibility_spec, (int, float)):
+            self.robot_visibility_radii = np.full(
+                self.num_robots,
+                float(visibility_spec),
+                dtype=float,
+            )
+        elif isinstance(visibility_spec, list):
+            if len(visibility_spec) != self.num_robots:
+                raise ValueError(
+                    "When list-valued, 'inter_robot_visibility_radius' length must match number of robots "
+                    f"({self.num_robots}), got {len(visibility_spec)}."
+                )
+            self.robot_visibility_radii = np.asarray(visibility_spec, dtype=float)
+        else:
+            raise ValueError(
+                "'inter_robot_visibility_radius' must be either a number or a per-robot list of numbers."
+            )
+
+        if np.any(self.robot_visibility_radii < 0):
+            raise ValueError("Visibility radii must be non-negative.")
+
+        # Used by some planners as a symmetric control bound fallback.
+        self.max_action = float(max(float(sim.max_action) for sim in self.simulators))
+        self.d_safe = float(self.config.get("d_safe", 0.0))
+
+    @property
+    def has_heading(self) -> bool:
+        return any(bool(sub_sim.has_heading) for sub_sim in self.simulators)
+
+    @staticmethod
+    def _observation_feature_dims(simulator: DynamicsProtocol) -> tuple[int, int]:
+        env_dim = 0
+        proprio_dim = 0
+        for feature_name, feature_info in simulator.get_dataset_features().items():
+            if not feature_name.startswith("observation."):
+                continue
+
+            shape = feature_info.get("shape")
+            if not shape:
+                raise ValueError(f"Observation feature '{feature_name}' must define a non-empty shape.")
+
+            dim = int(shape[0])
+            if feature_name == "observation.environment_state":
+                env_dim += dim
+            elif feature_name == "observation.state":
+                proprio_dim += dim
+            else:
+                # Keep compatibility if additional observation fields are added in future.
+                env_dim += dim
+
+        if env_dim + proprio_dim == 0:
+            raise ValueError("Each robot simulator must expose observation features.")
+
+        return env_dim, proprio_dim
+
+    def _split_state(self, state: np.ndarray) -> list[np.ndarray]:
+        state = self.validate_state(state)
+        return [state[s].copy() for s in self.robot_state_slices]
+
+    def _split_action(self, action: np.ndarray) -> list[np.ndarray]:
+        action = self.validate_action(action)
+        return [action[s].copy() for s in self.robot_action_slices]
+
+    def _split_observation(self, observation: np.ndarray) -> list[np.ndarray]:
+        observation = self.validate_observation(observation)
+        return [observation[s].copy() for s in self.robot_observation_slices]
+
+    def _base_observation_from_augmented(self, robot_id: int, robot_obs: np.ndarray) -> np.ndarray:
+        """Drop relative-to-other-robot terms and reconstruct base per-robot observation.
+
+        Base ordering must match sub-simulator observe(): [environment_state, state].
+        """
+        base_env_dim = self.robot_env_dims[robot_id]
+        proprio_dim = self.robot_proprio_dims[robot_id]
+        rel_dim = 2 * (len(self.simulators) - 1)
+
+        aug_env_dim = base_env_dim + rel_dim
+
+        # Augmented layout per robot: [base_env, rel_terms, proprio]
+        base_env = robot_obs[:base_env_dim]
+        proprio_start = aug_env_dim
+        proprio_end = proprio_start + proprio_dim
+        proprio = robot_obs[proprio_start:proprio_end]
+        return np.concatenate([base_env, proprio])
+
+    def validate_observation(self, observation: np.ndarray) -> np.ndarray:
+        return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))
+
+    def reset(self, initial_state: np.ndarray) -> np.ndarray:
+        state = self.validate_state(initial_state)
+        split_state = self._split_state(state)
+        for sim, robot_state in zip(self.simulators, split_state):
+            sim.reset(robot_state)
+        self.state = state.copy()
+        self.time = 0
+        return self.state
+
+    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
+        split_state = self._split_state(state)
+        split_action = self._split_action(action)
+        next_parts = [
+            sim.step(robot_state, robot_action)
+            for sim, robot_state, robot_action in zip(self.simulators, split_state, split_action)
+        ]
+        next_state = np.concatenate(next_parts)
+        self.state = next_state.copy()
+        self.time += 1
+        return next_state
+
+    def observe(self, state: np.ndarray) -> np.ndarray:
+        split_state = self._split_state(state)
+        positions = []
+        for robot_idx, robot_state in enumerate(split_state):
+            if robot_state.shape[0] < 2:
+                raise ValueError(
+                    f"Robot {robot_idx} state must include x/y in first two entries for relative observations."
+                )
+            positions.append(robot_state[:2])
+
+        observations: list[np.ndarray] = []
+        for robot_idx, (sim, robot_state) in enumerate(zip(self.simulators, split_state)):
+            base_obs = sim.observe(robot_state)
+            env_dim = self.robot_env_dims[robot_idx]
+            base_env = base_obs[:env_dim]
+            base_proprio = base_obs[env_dim:]
+
+            rel_parts: list[np.ndarray] = []
+            for other_idx, other_pos in enumerate(positions):
+                if other_idx == robot_idx:
+                    continue
+                delta = other_pos - positions[robot_idx]
+                visibility_radius = float(self.robot_visibility_radii[robot_idx])
+                if np.isfinite(visibility_radius) and np.linalg.norm(delta) > visibility_radius:
+                    rel_parts.append(np.zeros(2, dtype=float))
+                else:
+                    rel_parts.append(delta)
+
+            if rel_parts:
+                rel_obs = np.concatenate(rel_parts)
+                observations.append(np.concatenate([base_env, rel_obs, base_proprio]))
+            else:
+                observations.append(np.concatenate([base_env, base_proprio]))
+
+        return self.validate_observation(np.concatenate(observations))
+
+    def is_done(self, state: np.ndarray) -> bool:
+        split_state = self._split_state(state)
+        return all(sim.is_done(robot_state) for sim, robot_state in zip(self.simulators, split_state))
+
+    def casadi_dynamics(self, x: Any, u: Any) -> Any:
+        next_parts = []
+        for sim, state_slice, action_slice in zip(
+            self.simulators,
+            self.robot_state_slices,
+            self.robot_action_slices,
+        ):
+            next_parts.append(sim.casadi_dynamics(x[state_slice], u[action_slice]))
+        if len(next_parts) == 1:
+            return next_parts[0]
+        return ca.vertcat(*next_parts)
+
+    def get_dataset_features(self) -> dict[str, Any]:
+        features: dict[str, Any] = {}
+        env_names: list[str] = []
+        state_names: list[str] = []
+        action_names: list[str] = []
+        env_dim = 0
+        state_dim = 0
+        action_dim = 0
+
+        for robot_id, sim in enumerate(self.simulators):
+            base_features = sim.get_dataset_features()
+
+            env_feature = base_features.get("observation.environment_state")
+            proprio_feature = base_features.get("observation.state")
+            action_feature = base_features.get("action")
+            if env_feature is None or proprio_feature is None or action_feature is None:
+                raise ValueError(
+                    "Each robot simulator must define observation.environment_state, "
+                    "observation.state, and action features."
+                )
+
+            robot_env_dim = int(env_feature["shape"][0]) + 2 * (len(self.simulators) - 1)
+            robot_state_dim = int(proprio_feature["shape"][0])
+            robot_action_dim = int(action_feature["shape"][0])
+
+            env_dim += robot_env_dim
+            state_dim += robot_state_dim
+            action_dim += robot_action_dim
+
+            env_names.extend([f"robot_{robot_id}.{name}" for name in env_feature.get("names", [])])
+            for other_id in range(len(self.simulators)):
+                if other_id == robot_id:
+                    continue
+                env_names.extend([
+                    f"robot_{robot_id}.rel_robot_{other_id}_x",
+                    f"robot_{robot_id}.rel_robot_{other_id}_y",
+                ])
+
+            state_names.extend([f"robot_{robot_id}.{name}" for name in proprio_feature.get("names", [])])
+            action_names.extend([f"robot_{robot_id}.{name}" for name in action_feature.get("names", [])])
+
+        features["observation.environment_state"] = {
+            "dtype": "float32",
+            "shape": (env_dim,),
+            "names": env_names,
+        }
+        features["observation.state"] = {
+            "dtype": "float32",
+            "shape": (state_dim,),
+            "names": state_names,
+        }
+        features["action"] = {
+            "dtype": "float32",
+            "shape": (action_dim,),
+            "names": action_names,
+        }
+        return features
+
+    def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
+        states = [sim.random_initial_state(rng) for sim in self.simulators]
+        return np.concatenate(states)
+
+    def reset_random(self) -> np.ndarray:
+        states = [sim.reset_random() for sim in self.simulators]
+        return self.reset(np.concatenate(states))
+
+    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
+        split_obs = self._split_observation(obs)
+        states = []
+        for robot_id, (sim, robot_obs) in enumerate(zip(self.simulators, split_obs)):
+            base_obs = self._base_observation_from_augmented(robot_id, robot_obs)
+            states.append(sim.invert_obs(base_obs))
+        return self.validate_state(np.concatenate(states))
+
+    @property
+    def goal_state(self) -> np.ndarray:
+        goals = [sim.goal_state for sim in self.simulators]
+        return self.validate_state(np.concatenate(goals))
+
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, Any]:
+        split_obs = self._split_observation(obs)
+        split_action = self._split_action(action)
+
+        env_tensors: list[torch.Tensor] = []
+        state_tensors: list[torch.Tensor] = []
+        action_tensors: list[torch.Tensor] = []
+        for robot_id, (sim, robot_obs, robot_action) in enumerate(
+            zip(self.simulators, split_obs, split_action)
+        ):
+            base_env_dim = self.robot_env_dims[robot_id]
+            proprio_dim = self.robot_proprio_dims[robot_id]
+            rel_dim = 2 * (len(self.simulators) - 1)
+            env_end = base_env_dim + rel_dim
+            proprio_start = env_end
+            proprio_end = proprio_start + proprio_dim
+
+            env_tensors.append(torch.as_tensor(robot_obs[:env_end], dtype=torch.float32))
+            state_tensors.append(torch.as_tensor(robot_obs[proprio_start:proprio_end], dtype=torch.float32))
+            action_tensors.append(torch.as_tensor(robot_action, dtype=torch.float32))
+
+        return {
+            "observation.environment_state": torch.cat(env_tensors),
+            "observation.state": torch.cat(state_tensors),
+            "action": torch.cat(action_tensors),
+        }

@@ -3,8 +3,8 @@ from .state_space_types import (
     Euclidean2DAction,
     SE2PoseAndEuclidean2DObservation,
     SE2PoseAndEuclidean2DState,
+    SO2State,
 )
-from .utils import wrap_angle
 from typing import Any, Mapping
 
 import casadi as ca
@@ -51,6 +51,10 @@ class Unicycle2(DynamicsSimulator):
             dtype=float,
         )
 
+    @property
+    def has_heading(self) -> bool:
+        return True
+
     def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
         """
         applies one simulation step
@@ -71,9 +75,10 @@ class Unicycle2(DynamicsSimulator):
         a_v = clipped_action.first
         a_omega = clipped_action.second
 
-        x = x + v * np.cos(theta) * self.dt
-        y = y + v * np.sin(theta) * self.dt
-        theta = wrap_angle(theta + omega * self.dt)
+        velocity_world = pose.orientation.act(np.array([v, 0.0], dtype=float))
+        x = x + velocity_world[0] * self.dt
+        y = y + velocity_world[1] * self.dt
+        theta = pose.orientation.compose(SO2State.from_angle(omega * self.dt)).angle
 
         v = np.clip(v + a_v * self.dt, -self.max_speed, self.max_speed)
         omega = np.clip(omega + a_omega * self.dt, -self.max_omega, self.max_omega)
@@ -88,7 +93,7 @@ class Unicycle2(DynamicsSimulator):
         state = self.validate_state(state)
         state_view = SE2PoseAndEuclidean2DState.from_array(state)
         rel_pos = self.goal[0:2] - state_view.pose.translation
-        rel_theta = wrap_angle(self.goal[2] - state_view.pose.theta)
+        rel_theta = state_view.pose.orientation.error_to(SO2State.from_angle(self.goal[2]))
         obs = np.array([rel_pos[0], rel_pos[1], rel_theta, state_view.v, state_view.omega])
         return self.validate_observation(obs)
 
@@ -102,7 +107,7 @@ class Unicycle2(DynamicsSimulator):
             [
                 self.goal[0] - obs_view.exteroception[0],
                 self.goal[1] - obs_view.exteroception[1],
-                wrap_angle(self.goal[2] - obs_view.rel_theta),
+                self.goal[2] - obs_view.rel_theta,
                 obs_view.euclidean_2d[0],
                 obs_view.euclidean_2d[1],
             ]
@@ -122,7 +127,7 @@ class Unicycle2(DynamicsSimulator):
         state = self.validate_state(state)
         state_view = SE2PoseAndEuclidean2DState.from_array(state)
         pos_error = np.linalg.norm(state_view.pose.translation - self.goal[0:2])
-        theta_error = abs(wrap_angle(state_view.pose.theta - self.goal[2]))
+        theta_error = abs(state_view.pose.orientation.error_to(SO2State.from_angle(self.goal[2])))
 
         return (
             pos_error < self.error_tolerance
@@ -188,7 +193,9 @@ class Unicycle2(DynamicsSimulator):
         """
         samples random state
         """
-        pos = rng.uniform(low=-5.0, high=5.0, size=2)
+        radius = rng.uniform(0.5, 3.0)
+        angle = rng.uniform(0.0, 2 * np.pi)
+        pos = self.goal[:2] + radius * np.array([np.cos(angle), np.sin(angle)])
         theta = rng.uniform(low=-np.pi, high=np.pi)
 
         v = 0.0

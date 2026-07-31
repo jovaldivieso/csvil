@@ -1,6 +1,7 @@
 import os
 import sys
 import torch
+import ast
 import argparse
 import numpy as np
 from typing import Any, Mapping
@@ -11,7 +12,7 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
-from core.factory import DynamicsFactory, SE2_SYSTEMS, PlannerFactory
+from core.factory import DynamicsFactory, PlannerFactory
 from planning.casadi_planner import PlannerSolveError
 from learning.models.mlp import MLPPolicy
 from planning.planner import PlannerProtocol
@@ -21,7 +22,99 @@ from systems.dynamics import DynamicsProtocol
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.act.modeling_act import ACTPolicy
 
-from utils import plot_xy_trajectories
+from utils import plot_xy_trajectories, save_xy_rollout_video
+
+
+def is_observation_feature(feature_name: str) -> bool:
+    return feature_name.startswith("observation.") or ".observation." in feature_name
+
+
+def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
+    if raw_seeds is None:
+        return [42]
+
+    text = raw_seeds.strip()
+    if text == "":
+        return [42]
+
+    try:
+        parsed = ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        parts = [chunk.strip() for chunk in text.split(",") if chunk.strip()]
+        if len(parts) > 1:
+            return [int(part) for part in parts]
+        return [int(text)]
+
+    if isinstance(parsed, int):
+        return [parsed]
+    if isinstance(parsed, list):
+        if len(parsed) == 0:
+            return [42]
+        if all(isinstance(x, int) for x in parsed):
+            return [int(x) for x in parsed]
+        if all(isinstance(x, list) for x in parsed):
+            nested: list[list[int]] = []
+            for robot_idx, robot_seeds in enumerate(parsed):
+                if not all(isinstance(seed, int) for seed in robot_seeds):
+                    raise ValueError(
+                        f"All nested seed entries must be integers. Invalid entry in robot {robot_idx}."
+                    )
+                nested.append([int(seed) for seed in robot_seeds])
+            return nested
+
+    raise ValueError(
+        "Unable to parse seeds. Use an int (e.g. '42'), a list (e.g. '[42, 7]'), "
+        "or nested per-robot lists (e.g. '[[10, 4], [21, 0]]')."
+    )
+
+
+def normalize_seed_specs(
+    simulator: DynamicsProtocol,
+    seeds: list[int] | list[list[int]] | None,
+) -> list[int | list[int]]:
+    if seeds is None:
+        return [42]
+
+    if len(seeds) == 0:
+        return [42]
+
+    if isinstance(seeds[0], list):
+        seed_lists = seeds  # type: ignore[assignment]
+        expected_len = len(seed_lists[0])
+        for robot_idx, robot_seeds in enumerate(seed_lists[1:], start=1):
+            if len(robot_seeds) != expected_len:
+                raise ValueError(
+                    "Seed list length mismatch across robots. "
+                    f"Robot 0 has {expected_len} seeds, but Robot {robot_idx} has {len(robot_seeds)} seeds. "
+                    "The number of seeds per robot must match to pair initial conditions into joint rollout scenarios."
+                )
+
+        return [list(seed_tuple) for seed_tuple in zip(*seed_lists)]
+
+    return [int(seed) for seed in seeds]  # type: ignore[arg-type]
+
+
+def sample_initial_state(
+    simulator: DynamicsProtocol,
+    seed_spec: int | list[int],
+) -> np.ndarray:
+    if isinstance(seed_spec, int):
+        rng = np.random.default_rng(seed_spec)
+        return simulator.random_initial_state(rng)
+
+    sub_states = []
+    sub_simulators = simulator.simulators
+    if len(seed_spec) != len(sub_simulators):
+        raise ValueError(
+            "Per-robot seed specification length must match robot count. "
+            f"Got {len(seed_spec)} seeds for {len(sub_simulators)} robots."
+        )
+
+    for robot_seed, sub_sim in zip(seed_spec, sub_simulators):
+        rng = np.random.default_rng(int(robot_seed))
+        sub_states.append(sub_sim.random_initial_state(rng))
+
+    return np.concatenate(sub_states)
 
 
 def get_inference_device():
@@ -48,26 +141,45 @@ def create_policy_input(
     policy_input = {}
     features = simulator.get_dataset_features()
 
-    current_idx = 0
-    for feature_name, feature_info in features.items():
-        if feature_name.startswith("observation."):
-            # Get the dimension of this specific observation feature
-            dim = feature_info["shape"][0]
+    # Reuse the simulator's dataset packing logic to avoid layout drift between
+    # runtime observations and the tensors seen during training.
+    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
+    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
 
-            # Slice the exact chunk of the observation array
-            sliced_obs = observation[current_idx: current_idx + dim]
-
-            # Convert to tensor, add batch dimension, and send to device
+    for feature_name in features.keys():
+        if is_observation_feature(feature_name):
+            if feature_name not in packed_frame:
+                raise KeyError(
+                    f"Missing observation feature '{feature_name}' in packed frame. "
+                    "Check simulator.format_dataset_frame() and dataset schema alignment."
+                )
             policy_input[feature_name] = torch.as_tensor(
-                sliced_obs,
+                packed_frame[feature_name],
                 dtype=torch.float32,
-                device=device
-            ).unsqueeze(0)
-
-            # Move the pointer forward for the next feature
-            current_idx += dim
+                device=device,
+            ).view(1, -1)
 
     return policy_input
+
+
+def apply_execution_noise(
+    simulator: DynamicsProtocol,
+    action: np.ndarray,
+    action_noise_std: float,
+) -> np.ndarray:
+    if action_noise_std <= 0.0:
+        return action
+
+    noise = np.random.normal(
+        loc=0.0,
+        scale=action_noise_std,
+        size=action.shape,
+    ).astype(action.dtype, copy=False)
+    return np.clip(
+        action + noise,
+        -simulator.max_action,
+        simulator.max_action,
+    )
 
 
 def rollout_planner(
@@ -75,6 +187,7 @@ def rollout_planner(
     planner: PlannerProtocol,
     initial_state: np.ndarray,
     num_steps: int,
+    action_noise_std: float = 0.0,
 ) -> np.ndarray:
     """
     Rolls out the expert planner from a given initial state.
@@ -94,8 +207,13 @@ def rollout_planner(
         except PlannerSolveError as exc:
             print(f"Expert planner failed to solve during evaluation: {exc}")
             break
-            
-        state = simulator.step(state, action)
+
+        executed_action = apply_execution_noise(
+            simulator=simulator,
+            action=action,
+            action_noise_std=action_noise_std,
+        )
+        state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
 
     return np.asarray(trajectory)
@@ -107,6 +225,7 @@ def rollout_policy(
     device: torch.device,
     initial_state: np.ndarray,
     num_steps: int,
+    action_noise_std: float = 0.0,
 ) -> tuple[np.ndarray, bool, int]:
     """
     Rolls out the neural policy from a given initial state.
@@ -133,8 +252,13 @@ def rollout_policy(
             action_tensor = policy.select_action(policy_input)
 
         action = action_tensor.squeeze(0).cpu().numpy()
+        executed_action = apply_execution_noise(
+            simulator=simulator,
+            action=action,
+            action_noise_std=action_noise_std,
+        )
 
-        state = simulator.step(state, action)
+        state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
 
         if simulator.is_done(state):
@@ -149,13 +273,14 @@ def run_evaluation(
     config: Mapping[str, Any],
     model_dir: str,
     num_steps: int = 150,
-    seeds: list[int] | None = None,
+    seeds: list[int] | list[list[int]] | None = None,
+    action_noise_std: float = 0.0,
     output_path: str | None = None,
 ):
     validated_config = validate_system_config(system_name=system, raw_config=config)
-    seeds = seeds or [42, 123, 13, 11, 40]
 
     simulator = DynamicsFactory.create(system_name=system, config=validated_config)
+    seed_specs = normalize_seed_specs(simulator=simulator, seeds=seeds)
 
     if not os.path.exists(model_dir):
         print(f"assuming '{model_dir}' is a Hugging Face Hub ID")
@@ -174,7 +299,7 @@ def run_evaluation(
         state_dim = sum(
             int(feature_info["shape"][0])
             for feature_name, feature_info in simulator.get_dataset_features().items()
-            if feature_name.startswith("observation.")
+            if is_observation_feature(feature_name)
         )
         action_dim = int(simulator.nu)
 
@@ -193,7 +318,7 @@ def run_evaluation(
     policy.eval()
     policy.to(device)
 
-    print(f"evaluating {len(seeds)} seeded trajectories")
+    print(f"evaluating {len(seed_specs)} seeded trajectories")
 
     # Instantiate expert planner once and reset it for each rollout.
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
@@ -203,17 +328,18 @@ def run_evaluation(
     policy_trajectories: list[np.ndarray] = []
     per_seed_metrics: list[dict[str, Any]] = []
 
-    for seed in seeds:
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+    for seed_spec in seed_specs:
+        torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
+        torch.manual_seed(torch_seed)
 
-        initial_state = simulator.reset_random()
+        initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
 
         expert_trajectory = rollout_planner(
             simulator=simulator,
             planner=expert_planner,
             initial_state=initial_state,
             num_steps=num_steps,
+            action_noise_std=action_noise_std,
         )
 
         policy_trajectory, reached_goal, steps_taken = rollout_policy(
@@ -222,6 +348,7 @@ def run_evaluation(
             device=device,
             initial_state=initial_state,
             num_steps=num_steps,
+            action_noise_std=action_noise_std,
         )
 
         policy_final_state = policy_trajectory[-1]
@@ -233,7 +360,7 @@ def run_evaluation(
         policy_trajectories.append(policy_trajectory)
         per_seed_metrics.append(
             {
-                "seed": seed,
+                "seed": seed_spec,
                 "initial_state": initial_state,
                 "policy_reached_goal": reached_goal,
                 "policy_steps": max(len(policy_trajectory) - 1, 0),
@@ -264,8 +391,9 @@ def run_evaluation(
     print("\n--- Evaluation Summary ---")
     print(f"system: {system}")
     print(f"policy_type: {policy_type}")
-    print(f"seeds: {seeds}")
+    print(f"seeds: {seed_specs}")
     print(f"device: {device}")
+    print(f"action_noise_std: {action_noise_std:.6f}")
     print(f"goal_state: {np.array2string(goal_state, precision=4)}")
     print(f"num_trajectories: {total_runs}")
     print(f"policy_successes: {total_successes}/{total_runs}")
@@ -292,6 +420,9 @@ def run_evaluation(
     if num_policy > 0:
         path_labels[num_expert] = f"{policy_display_name} Policy"
     trajectory_colors = ["tab:blue"] * num_expert + ["tab:orange"] * num_policy
+    trajectory_line_styles = ["--"] * num_expert + ["-"] * num_policy
+
+    show_heading = simulator.has_heading
 
     plot_xy_trajectories(
         simulator=simulator,
@@ -299,17 +430,33 @@ def run_evaluation(
         path_to_output=output_path,
         title=f"{system_title} {policy_display_name} vs Expert",
         path_labels=path_labels,
-        show_heading=system in SE2_SYSTEMS,
+        show_heading=show_heading,
         marker="o",
         trajectory_colors=trajectory_colors,
+        trajectory_line_styles=trajectory_line_styles,
     )
     print(f"Plot saved to {output_path}")
+
+    video_path = save_xy_rollout_video(
+        simulator=simulator,
+        trajectories=all_trajectories,
+        path_to_output=output_path,
+        title=f"{system_title} {policy_display_name} rollout vs Expert",
+        show_heading=show_heading,
+        fps=12,
+        path_labels=path_labels,
+        trajectory_colors=trajectory_colors,
+        trajectory_line_styles=trajectory_line_styles,
+    )
+    if video_path is not None:
+        print(f"Video saved to {video_path}")
 
     metrics = {
         "system": system,
         "policy_type": policy_type,
-        "seeds": seeds,
+        "seeds": seed_specs,
         "device": str(device),
+        "action_noise_std": action_noise_std,
         "goal_state": goal_state,
         "num_trajectories": total_runs,
         "policy_successes": total_successes,
@@ -320,6 +467,7 @@ def run_evaluation(
         "mean_expert_goal_error_l2": mean_expert_error,
         "per_seed": per_seed_metrics,
         "plot_path": output_path,
+        "video_path": video_path,
     }
 
     return metrics
@@ -365,10 +513,21 @@ def main():
     )
     parser.add_argument(
         "--seeds",
-        type=int,
-        nargs="+",
-        default=[42, 123, 13, 11, 40],
-        help="list of seeds for initial state and policy sampling",
+        type=str,
+        default="42",
+        help=(
+            "seed specification: int ('42'), list ('[42, 7]'), or nested per-robot lists "
+            "('[[10, 4, 2], [21, 0, 9]]')."
+        ),
+    )
+    parser.add_argument(
+        "--action-noise-std",
+        type=float,
+        default=0.0,
+        help=(
+            "std-dev of Gaussian action noise applied during expert and policy rollout execution; "
+            "default 0.0 keeps evaluation deterministic and clean"
+        ),
     )
     parser.add_argument(
         "--output-path",
@@ -386,7 +545,8 @@ def main():
         config=config,
         model_dir=args.model_dir,
         num_steps=args.num_steps,
-        seeds=args.seeds,
+        seeds=parse_seed_argument(args.seeds),
+        action_noise_std=args.action_noise_std,
         output_path=args.output_path,
     )
 

@@ -42,17 +42,34 @@ def set_seed(seed: int) -> None:
 
 
 def observation_feature_names(simulator: DynamicsProtocol) -> list[str]:
+    def is_observation_feature(name: str) -> bool:
+        return name.startswith("observation.") or ".observation." in name
+
     return [
         feature_name
         for feature_name in simulator.get_dataset_features().keys()
-        if feature_name.startswith("observation.")
+        if is_observation_feature(feature_name)
+    ]
+
+
+def action_feature_names(simulator: DynamicsProtocol) -> list[str]:
+    def is_action_feature(name: str) -> bool:
+        return name == "action" or name.endswith(".action")
+
+    return [
+        feature_name
+        for feature_name in simulator.get_dataset_features().keys()
+        if is_action_feature(feature_name)
     ]
 
 
 def observation_dim_from_features(simulator: DynamicsProtocol) -> int:
+    def is_observation_feature(name: str) -> bool:
+        return name.startswith("observation.") or ".observation." in name
+
     total_dim = 0
     for feature_name, feature_info in simulator.get_dataset_features().items():
-        if feature_name.startswith("observation."):
+        if is_observation_feature(feature_name):
             total_dim += int(feature_info["shape"][0])
     return total_dim
 
@@ -63,32 +80,39 @@ def flatten_observation_for_policy(
     device: torch.device,
 ) -> torch.Tensor:
     """
-    Reproduces evaluate_policy dynamic slicing logic, then flattens for MLP.
+    Pack runtime observation exactly like dataset frames, then flatten for MLP.
     """
     features = simulator.get_dataset_features()
 
-    current_idx = 0
-    chunks: list[torch.Tensor] = []
-    for feature_name, feature_info in features.items():
-        if feature_name.startswith("observation."):
-            dim = int(feature_info["shape"][0])
-            sliced_obs = observation[current_idx: current_idx + dim]
-            chunks.append(torch.as_tensor(sliced_obs, dtype=torch.float32, device=device))
-            current_idx += dim
+    def is_observation_feature(name: str) -> bool:
+        return name.startswith("observation.") or ".observation." in name
 
-    if current_idx != observation.shape[0]:
-        raise ValueError(
-            "Observation slicing mismatch. "
-            f"Consumed {current_idx} values but observation has length {observation.shape[0]}."
-        )
+    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
+    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
+
+    chunks: list[torch.Tensor] = []
+    for feature_name in features.keys():
+        if is_observation_feature(feature_name):
+            if feature_name not in packed_frame:
+                raise KeyError(
+                    f"Missing observation feature '{feature_name}' in packed frame. "
+                    "Check simulator.format_dataset_frame() and dataset schema alignment."
+                )
+            chunks.append(torch.as_tensor(packed_frame[feature_name], dtype=torch.float32, device=device).view(-1))
 
     return torch.cat(chunks, dim=0).unsqueeze(0)
 
 
 class LeRobotMLPDataset(Dataset):
-    def __init__(self, lerobot_dataset: LeRobotDataset, obs_feature_names: list[str]):
+    def __init__(
+        self,
+        lerobot_dataset: LeRobotDataset,
+        obs_feature_names: list[str],
+        action_feature_names: list[str],
+    ):
         self.dataset = lerobot_dataset
         self.obs_feature_names = obs_feature_names
+        self.action_feature_names = action_feature_names
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -97,7 +121,8 @@ class LeRobotMLPDataset(Dataset):
         sample = self.dataset[idx]
         obs_parts = [sample[name].float().view(-1) for name in self.obs_feature_names]
         observation = torch.cat(obs_parts, dim=0)
-        action = sample["action"].float().view(-1)
+        action_parts = [sample[name].float().view(-1) for name in self.action_feature_names]
+        action = torch.cat(action_parts, dim=0)
         return observation, action
 
 
@@ -116,6 +141,12 @@ class DaggerConfig:
     learning_rate: float
     checkpoint_dir: Path
     seed: int
+
+
+def default_checkpoint_dir_for_system(system: str) -> Path:
+    if system == "multi_robot":
+        return Path("outputs/train_dagger_multi_robot")
+    return Path("outputs/train_dagger")
 
 
 def train_policy_epoch(
@@ -212,8 +243,8 @@ def collect_dagger_data(
 def run_dagger(cfg: DaggerConfig) -> None:
     set_seed(cfg.seed)
 
-    if cfg.dagger_iterations <= 0:
-        raise ValueError("'dagger_iterations' must be positive.")
+    if cfg.dagger_iterations < 0:
+        raise ValueError("'dagger_iterations' must be non-negative.")
     if cfg.epochs_per_iteration <= 0:
         raise ValueError("'epochs_per_iteration' must be positive.")
     if cfg.trajectories_per_iteration <= 0:
@@ -232,6 +263,12 @@ def run_dagger(cfg: DaggerConfig) -> None:
     device = get_training_device()
 
     obs_feature_names = observation_feature_names(simulator)
+    act_feature_names = action_feature_names(simulator)
+    if len(obs_feature_names) == 0:
+        raise ValueError("No observation features found in simulator dataset schema.")
+    if len(act_feature_names) == 0:
+        raise ValueError("No action features found in simulator dataset schema.")
+
     state_dim = observation_dim_from_features(simulator)
     action_dim = int(simulator.nu)
 
@@ -243,18 +280,16 @@ def run_dagger(cfg: DaggerConfig) -> None:
     print("Starting DAgger training")
     print(f"Device: {device}")
     print(f"Initial dataset root: {cfg.dataset_root}")
-    print(
-        "DAgger iteration 1 starts from offline expert data "
-        "(parameter-free setup with beta_1 = 1)."
-    )
+    print("Initial offline training pass starts from the current expert dataset.")
 
-    for iteration in range(1, cfg.dagger_iterations + 1):
-        print(f"\n=== DAgger iteration {iteration}/{cfg.dagger_iterations} ===")
+    def train_on_aggregate(label: str) -> None:
+        print(f"\n=== {label} ===")
 
         aggregate_dataset = LeRobotDataset(repo_id=cfg.repo_id, root=cfg.dataset_root)
         train_dataset = LeRobotMLPDataset(
             lerobot_dataset=aggregate_dataset,
             obs_feature_names=obs_feature_names,
+            action_feature_names=act_feature_names,
         )
 
         train_loader = DataLoader(
@@ -273,6 +308,33 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 device=device,
             )
             print(f"  epoch {epoch:03d}/{cfg.epochs_per_iteration:03d} | mse={epoch_loss:.6f}")
+
+    def save_checkpoints(training_round: int) -> None:
+        checkpoint_data = {
+            "iteration": training_round,
+            "model_state_dict": policy.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "state_dim": state_dim,
+            "action_dim": action_dim,
+            "obs_feature_names": obs_feature_names,
+            "system": cfg.system,
+        }
+
+        latest_checkpoint = cfg.checkpoint_dir / "mlp_dagger_checkpoint.pt"
+        iteration_checkpoint = cfg.checkpoint_dir / f"mlp_dagger_iter_{training_round:03d}.pt"
+        torch.save(checkpoint_data, latest_checkpoint)
+        torch.save(checkpoint_data, iteration_checkpoint)
+        print(f"Saved checkpoints: {latest_checkpoint} and {iteration_checkpoint}")
+
+    train_on_aggregate("Initial offline training pass")
+    save_checkpoints(training_round=0)
+
+    if cfg.dagger_iterations == 0:
+        print("No DAgger refinements requested (--dagger-iterations 0).")
+        return
+
+    for refinement in range(1, cfg.dagger_iterations + 1):
+        print(f"\n=== DAgger refinement {refinement}/{cfg.dagger_iterations}: aggregate ===")
 
         simulator_for_rollout = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
         expert_planner = PlannerFactory.create(
@@ -300,22 +362,8 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
         print(f"Collected {collected_episodes} new DAgger episodes")
 
-        checkpoint_data = {
-            "iteration": iteration,
-            "model_state_dict": policy.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "state_dim": state_dim,
-            "action_dim": action_dim,
-            "obs_feature_names": obs_feature_names,
-            "system": cfg.system,
-        }
-
-        latest_checkpoint = cfg.checkpoint_dir / "mlp_dagger_checkpoint.pt"
-        iteration_checkpoint = cfg.checkpoint_dir / f"mlp_dagger_iter_{iteration:03d}.pt"
-        torch.save(checkpoint_data, latest_checkpoint)
-        torch.save(checkpoint_data, iteration_checkpoint)
-
-        print(f"Saved checkpoints: {latest_checkpoint} and {iteration_checkpoint}")
+        train_on_aggregate(f"DAgger refinement {refinement}/{cfg.dagger_iterations}: retrain")
+        save_checkpoints(training_round=refinement)
 
 
 def parse_args() -> argparse.Namespace:
@@ -355,8 +403,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dagger-iterations",
         type=int,
-        default=5,
-        help="number of outer DAgger iterations",
+        default=4,
+        help=(
+            "number of DAgger refinement rounds (aggregate then retrain). "
+            "Use 0 for pure offline training"
+        ),
     )
     parser.add_argument(
         "--epochs-per-iteration",
@@ -391,8 +442,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=Path("outputs/train_dagger"),
-        help="directory where DAgger checkpoints are written",
+        default=None,
+        help=(
+            "directory where DAgger checkpoints are written "
+            "(defaults to outputs/train_dagger for single-robot systems and "
+            "outputs/train_dagger_multi_robot for multi_robot)"
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -409,6 +464,9 @@ def main() -> None:
         system_name=args.system,
         config_path=args.config,
     )
+    checkpoint_dir = args.checkpoint_dir
+    if checkpoint_dir is None:
+        checkpoint_dir = default_checkpoint_dir_for_system(args.system)
 
     cfg = DaggerConfig(
         system=args.system,
@@ -422,7 +480,7 @@ def main() -> None:
         steps_per_trajectory=args.steps_per_trajectory,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
         seed=args.seed,
     )
 

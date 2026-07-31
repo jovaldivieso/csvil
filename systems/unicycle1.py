@@ -3,6 +3,7 @@ from .state_space_types import (
     Euclidean2DAction,
     SE2PoseAndEuclidean2DObservation,
     SE2PoseState,
+    SO2State,
 )
 from core.types import VectorSpec, as_vector
 import casadi as ca
@@ -33,6 +34,10 @@ class Unicycle1(DynamicsSimulator):
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
         return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))
 
+    @property
+    def has_heading(self) -> bool:
+        return True
+
     def reset(self, initial_state: np.ndarray) -> np.ndarray:
         state = super().reset(initial_state)
         self.current_action = np.zeros(self.nu, dtype=float)
@@ -47,19 +52,16 @@ class Unicycle1(DynamicsSimulator):
 
         v = action_view.first
         omega = action_view.second
-        next_pos = state_view.translation + np.array([
-            v * np.cos(state_view.theta),
-            v * np.sin(state_view.theta),
-        ]) * self.dt
-        next_theta = state_view.theta + omega * self.dt
-        return np.concatenate([next_pos, [next_theta]])
+        body_frame_velocity = np.array([v, 0.0], dtype=float)
+        next_pos = state_view.translation + state_view.orientation.act(body_frame_velocity) * self.dt
+        next_orientation = state_view.orientation.compose(SO2State.from_angle(omega * self.dt))
+        return np.concatenate([next_pos, [next_orientation.angle]])
 
     def observe(self, state: np.ndarray) -> np.ndarray:
         state = self.validate_state(state)
         state_view = SE2PoseState.from_array(state)
         rel_pos = self.goal[0:2] - state_view.translation
-        rel_theta = self.goal[2] - state_view.theta
-        rel_theta = (rel_theta + np.pi) % (2 * np.pi) - np.pi
+        rel_theta = state_view.orientation.error_to(SE2PoseState.from_array(self.goal).orientation)
         obs = np.concatenate([rel_pos, [rel_theta], self.current_action])
         return self.validate_observation(obs)
 
@@ -67,8 +69,7 @@ class Unicycle1(DynamicsSimulator):
         state = self.validate_state(state)
         state_view = SE2PoseState.from_array(state)
         pos_error = np.linalg.norm(state_view.translation - self.goal[0:2])
-        theta_error = abs((state_view.theta - self.goal[2] + np.pi) %
-                          (2 * np.pi) - np.pi)
+        theta_error = abs(state_view.orientation.error_to(SE2PoseState.from_array(self.goal).orientation))
         return (pos_error < self.error_tolerance and
                 theta_error < self.error_tolerance)
 
@@ -113,7 +114,9 @@ class Unicycle1(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        pos = rng.uniform(low=-5.0, high=5.0, size=2)
+        radius = rng.uniform(0.5, 3.0)
+        angle = rng.uniform(0.0, 2 * np.pi)
+        pos = self.goal[:2] + radius * np.array([np.cos(angle), np.sin(angle)])
         theta = rng.uniform(low=-np.pi, high=np.pi)
         return np.array([pos[0], pos[1], theta])
 
