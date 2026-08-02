@@ -147,10 +147,9 @@ def main():
     else:
         if args.system not in DBLACAM_SIMULATORS:
             raise ValueError(f"db-lacam does not support {args.system}")
-        with open(args.algorithm_config, "r", encoding="utf-8") as file:
-            algorithm_config = yaml.safe_load(file)
-        planner = DbLacamPlanner(simulator, config, algorithm_config)
-            
+        config.setdefault("db_lacam", {})
+        config["db_lacam"]["algorithm_config"] = args.algorithm_config
+        planner = DbLacamPlanner(simulator, config)
     output_path = args.output_path or os.path.join(
         os.path.dirname(__file__),
         "output",
