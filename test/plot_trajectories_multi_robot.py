@@ -89,7 +89,7 @@ def main():
     )
 
     for robot_index, reached_goal in enumerate(reached_goals):
-        print(f"robot {robot_index}: , goal reached = {reached_goal}")
+        print(f"robot {robot_index}: goal reached = {reached_goal}")
 
     print(f"plot saved to {output_path}")
 
