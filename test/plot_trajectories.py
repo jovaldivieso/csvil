@@ -181,7 +181,7 @@ def main():
         trajectories=trajectories,
         path_to_output=output_path,
         title=f"{planner_title} optimal control paths for {system_title}",
-        show_headings=[show_heading] * len(trajectories),
+        show_heading=show_heading,
     )
 
     print(f"goal reached in {goals_reached}/{args.num_traj} trajectories")
