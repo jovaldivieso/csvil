@@ -108,15 +108,6 @@ def plot_xy_trajectories(
 
     trajectories = [np.asarray(trajectory) for trajectory in trajectories]
 
-    if goals is None:
-        goals = [simulator.goal] * len(trajectories)
-
-    if show_headings is None:
-        show_headings = [False] * len(trajectories)
-        
-    if labels is None:
-        labels = [None] * len(trajectories)
-
     fig, ax = plt.subplots(figsize=(8, 8))
 
     robot_state_slices = simulator.robot_state_slices

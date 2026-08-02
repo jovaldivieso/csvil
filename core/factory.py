@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+from planning.dblacam_planner import DbLacamPlanner
 from planning.casadi_planner import CasadiPlanner
 from planning.planner import PlannerProtocol
 from systems.double_integrator import DoubleIntegrator
@@ -24,6 +25,7 @@ SYSTEM_REGISTRY: dict[str, DynamicsBuilder] = {
 
 PLANNER_REGISTRY: dict[str, PlannerBuilder] = {
     "casadi": CasadiPlanner,
+    "dblacam": DbLacamPlanner,
 }
 
 # SE(2) is the 2D rigid-body task space (x, y, theta), enabling orientation-aware arrow plotting.

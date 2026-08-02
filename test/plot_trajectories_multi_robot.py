@@ -1,6 +1,5 @@
 import os
 import sys
-import yaml
 import argparse
 
 import numpy as np
@@ -10,56 +9,44 @@ PROJECT_ROOT = os.path.dirname(
 )
 sys.path.insert(0, PROJECT_ROOT)
 
-from planning.dblacam_planner import DbLacamPlanner
-from collect_expert_data import create_multi_robot_simulator
 from utils import plot_xy_trajectories
+from core.config import load_yaml_config, validate_system_config
+from core.factory import DynamicsFactory, PlannerFactory
 
-HEADING_SYSTEMS = {
-    "unicycle1",
-    "unicycle2",
-}
-
-def rollout_multi_robot_trajectories(simulator, planner, initial_states, num_steps):
+def rollout_multi_robot_trajectories(simulator, planner, initial_state, num_steps):
     """
     simulates one joint trajectory and stores one path per robot
     """
-    states = simulator.reset(initial_states)
+
+    state = simulator.reset(initial_state)
     planner.reset()
 
-    trajectories = [[np.asarray(state, dtype=float).copy()] for state in states]
+    trajectory = [state]
 
     for _ in range(num_steps):
-        if simulator.is_done(states):
+        if simulator.is_done(state):
             break
 
-        observations = simulator.observe(states)
-        actions = planner(observations)
-        states = simulator.step(states, actions)
+        observation = simulator.observe(state)
+        action = planner(observation)
+        state = simulator.step(state, action)
 
-        for trajectory, state in zip(trajectories, states):
-            trajectory.append(np.asarray(state, dtype=float).copy())
+        trajectory.append(state.copy())
 
-    trajectories = [np.asarray(trajectory) for trajectory in trajectories]
+    reached_goals = [
+        robot.is_done(state[state_slice])
+        for robot, state_slice in zip(simulator.simulators,simulator.robot_state_slices)
+    ]
 
-    reached_goals = [robot.is_done(state) for robot, state in zip(simulator.robots, states)]
-
-    return trajectories, reached_goals
+    return np.asarray(trajectory), reached_goals
 
 
 def main():
-    """
-    visualizes one db-lacam trajectory per robot
-    """
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
         required=True,
-        help="path to multi robot experiment config",
-    )
-    parser.add_argument(
-        "--algorithm-config",
-        required=True,
-        help="path to db-lacam algorithm config",
+        help="path to multi-robot db-lacam config",
     )
     parser.add_argument(
         "--num-steps",
@@ -74,60 +61,35 @@ def main():
     )
     args = parser.parse_args()
 
-    with open(args.config, "r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
-        
-    with open(args.algorithm_config, "r", encoding="utf-8") as file:
-        algorithm_config = yaml.safe_load(file)
+    raw_config = load_yaml_config(args.config)
 
-    simulator = create_multi_robot_simulator(config)
-    planner = DbLacamPlanner(simulator, config, algorithm_config)
+    initial_state = np.concatenate([robot_config["start"] for robot_config in raw_config["robots"]])
 
-    initial_states = [
-        np.asarray(
-            robot_config["start"],
-            dtype=float,
-        )
-        for robot_config in config["robots"]
-    ]
+    config = validate_system_config(system_name="multi_robot", raw_config=raw_config)
 
-    trajectories, reached_goals = (
-        rollout_multi_robot_trajectories(
-            simulator=simulator,
-            planner=planner,
-            initial_states=initial_states,
-            num_steps=args.num_steps,
-        )
+    simulator = DynamicsFactory.create(system_name="multi_robot", config=config)
+    
+    planner = PlannerFactory.create(
+        planner_name="dblacam",
+        simulator=simulator,
+        config=config,
     )
 
-    output_path = args.output_path or os.path.join(
-        os.path.dirname(__file__),
-        "output",
-        f"dblacam_multi_robot.pdf"
-    )
+    trajectory, reached_goals = rollout_multi_robot_trajectories(simulator, planner, initial_state, args.num_steps)
 
-    labels = [
-        f"robot {robot_index}: {robot_config['system'].replace('_', ' ')}, {str(reached_goal).lower()}"    
-        for robot_index, (robot_config, reached_goal) in enumerate(zip(config["robots"], reached_goals))
-    ]
-
-    show_headings = [
-        robot_config["system"] in HEADING_SYSTEMS
-        for robot_config in config["robots"]
-    ]
+    output_path = args.output_path or os.path.join(os.path.dirname(__file__), "output", "dblacam_multi_robot.pdf")
 
     plot_xy_trajectories(
         simulator=simulator,
-        trajectories=trajectories,
+        trajectories=[trajectory],
         path_to_output=output_path,
-        title="db-LaCAM multi-robot trajectories",
-        goals=simulator.goal_states,
-        show_headings=show_headings,
-        labels=labels,
+        title="db-LaCAM multi-robot trajectory",
+        path_labels=["db-LaCAM"],
+        show_heading=simulator.has_heading,
     )
 
-    for robot_index, (trajectory, reached_goal) in enumerate(zip(trajectories, reached_goals)):
-        print(f"robot {robot_index}: {len(trajectory) - 1} steps, goal reached = {reached_goal}")
+    for robot_index, reached_goal in enumerate(reached_goals):
+        print(f"robot {robot_index}: , goal reached = {reached_goal}")
 
     print(f"plot saved to {output_path}")
 

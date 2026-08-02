@@ -21,20 +21,23 @@ class DbLacamPlanner(Planner):
         - SingleIntegrator
         - Unicycle1       
     """
-
-    def __init__(self, simulator, config, algorithm_config):
+    def __init__(self, simulator, config):
         self.sim = simulator
         self.config = config.get("db_lacam", config)
-        
+
+        self.robots = list(self.sim.simulators)
+
         # algorithm_config is a separate YAML file containing db-lacam’s internal planning parameters,
         # such as search resolution, heuristic settings, motion primitive counts, etc.
-        self.algorithm_config = algorithm_config
+        algorithm_config_path = self.config.get("algorithm_config")
+        if not algorithm_config_path:
+            raise ValueError("'db_lacam.algorithm_config' is required.")
 
-        self.multi_robot = hasattr(self.sim, "robots")
-        if self.multi_robot:
-            self.robots = list(self.sim.robots)
-        else:
-            self.robots = [self.sim]
+        with open(algorithm_config_path, "r", encoding="utf-8") as file:
+            self.algorithm_config = yaml.safe_load(file)
+
+        if not isinstance(self.algorithm_config, dict):
+            raise ValueError("db_lacam algorithm config must contain a YAML mapping")
 
         self.mode = self.config.get("mode", "replan")
         self.replan_freq = int(self.config.get("replan_freq", 5))
@@ -71,27 +74,23 @@ class DbLacamPlanner(Planner):
         self.cached_plans = None
         self.step_idx = 0
 
-    def _create_observations_list(self, obs):
-        if not self.multi_robot:
-            return [obs]
-        return list(obs)
-
-
+    def _create_states_list(self, obs):
+        global_state = self.sim.invert_obs(obs)
+        return [global_state[s] for s in self.sim.robot_state_slices]
+    
     def _define_dblacam_problem(self, obs):
         """
         converts csvil observations into one db-lacam problem dictionary for all robot
         """
-        
-        observations = self._create_observations_list(obs)
+
+        states = self._create_states_list(obs)
 
         robot_entries = []
-        for robot, robot_obs in zip(self.robots, observations):
-            
-            initial_state = robot.invert_obs(robot_obs)
+        for robot, state in zip(self.robots, states):
             robot_entries.append(
                 {
                     "type": robot.db_lacam_robot_type,
-                    "start": np.asarray(initial_state, dtype=float).tolist(),
+                    "start": np.asarray(state, dtype=float).tolist(),
                     "goal": np.asarray(robot.goal_state, dtype=float).tolist(),
                 }
             )
@@ -105,7 +104,7 @@ class DbLacamPlanner(Planner):
             },
             "robots": robot_entries,
         }
-
+     
     def _compute_plan(self, obs):
         
         problem = self._define_dblacam_problem(obs)
@@ -168,8 +167,9 @@ class DbLacamPlanner(Planner):
 
             actions.append(action)
 
-        return actions
-
+        joint_action = np.concatenate(actions)
+        return self.sim.validate_action(joint_action)
+    
     def __call__(self, obs):
         
         try:
@@ -186,10 +186,7 @@ class DbLacamPlanner(Planner):
 
             actions = self._get_current_actions()
             self.step_idx += 1
-
-            if self.multi_robot:
-                return actions
-            return actions[0]
+            return actions
 
         except RuntimeError as error:
             
@@ -198,7 +195,5 @@ class DbLacamPlanner(Planner):
             warnings.warn(f"db-lacam planning failed: {error}")
 
             # creates one zero-action vector per robot in case of failure:
-            actions = [np.zeros(robot.nu, dtype=float) for robot in self.robots]
-            if self.multi_robot:
-                return actions
-            return actions[0]
+            zero_action = np.concatenate([np.zeros(robot.nu, dtype=float) for robot in self.robots])
+            return self.sim.validate_action(zero_action)

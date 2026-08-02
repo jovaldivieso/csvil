@@ -12,12 +12,12 @@
             "stopOnEntry": false,
             "justMyCode": true,
             "args": [
+                "--system",
+                "multi_robot",
                 "--planner",
                 "dblacam",
                 "--config",
                 "test/config/multi_robot_dblacam_config.yaml",
-                "--algorithm-config",
-                "planning/dblacam_algorithm_default.yaml",
                 "--num-traj",
                 "10",
                 "--num-steps",
@@ -37,8 +37,6 @@
             "args": [
                 "--config",
                 "test/config/multi_robot_dblacam_config.yaml",
-                "--algorithm-config",
-                "planning/dblacam_algorithm_default.yaml",
                 "--num-steps",
                 "400"
             ]

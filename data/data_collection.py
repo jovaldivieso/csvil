@@ -34,12 +34,14 @@ class DataCollector:
             print(f"Cleaning up existing dataset at {self.local_dir}...")
             shutil.rmtree(self.local_dir)
 
-        # creates dataset using simulator specific features:
+        # Ask the simulator for its specific data schema
+        features = self.sim.get_dataset_features()
+
         dataset = LeRobotDataset.create(
             repo_id=self.repo_id,
             fps=self.fps,
             root=self.local_dir,
-            features=self.sim.get_dataset_features(),
+            features=features,
         )
 
         successful_trajectories = 0
@@ -91,34 +93,18 @@ class DataCollector:
                 else:
                     executed_action = action
 
-                    if multi_robot:
-                        local_observations = self.sim.create_local_observations(state)
-
-                        # Ask the simulator to format the current frame
-                        for robot_ind, (local_observation, robot_action) in enumerate(
-                            zip(local_observations, action)
-                        ):
-                            frame_data = self.sim.format_dataset_frame(
-                                robot_ind,
-                                local_observation,
-                                robot_action,
-                            )
-                            frame_data["task"] = "reach target"
-
-                            episode_frames[robot_ind].append(frame_data)
-                    else:
-                        # Ask the simulator to format the current frame
-                        frame_data = self.sim.format_dataset_frame(obs, action)
-                        frame_data["task"] = "reach target"
+                # Ask the simulator to format the current frame
+                frame_data = self.sim.format_dataset_frame(obs, action)
+                frame_data["task"] = "reach target"
 
                 dataset.add_frame(frame_data)
                 state = self.sim.step(state, executed_action)
 
-                    # Break so it learns to hold its position and stop
-                    if self.sim.is_done(state):
-                        done_counter += 1
-                        if done_counter >= 5:
-                            break
+                # Break so it learns to hold its position and stop
+                if self.sim.is_done(state):
+                    done_counter += 1
+                    if done_counter >= 5:
+                        break
 
             if planner_failed:
                 continue

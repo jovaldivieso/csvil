@@ -30,6 +30,8 @@ class Unicycle1(DynamicsSimulator):
         self.obs_dim = 5
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
+        
+        self.db_lacam_robot_type = "unicycle1_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
         return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))
@@ -56,21 +58,6 @@ class Unicycle1(DynamicsSimulator):
         next_pos = state_view.translation + state_view.orientation.act(body_frame_velocity) * self.dt
         next_orientation = state_view.orientation.compose(SO2State.from_angle(omega * self.dt))
         return np.concatenate([next_pos, [next_orientation.angle]])
-        
-        # db-lacam’s mapping from identifiers to motion-primitives is in src/run_dblacam.cpp:
-        self.db_lacam_robot_type = "unicycle1_v0"
-
-    def step(self, state, action):
-        action = np.clip(action, -self.max_action, self.max_action)
-
-        pos = state[:2]
-        theta = state[2]
-        v = action[0]
-        omega = action[1]
-        next_pos = pos + np.array([v * np.cos(theta),
-                                   v * np.sin(theta)]) * self.dt
-        next_theta = theta + omega * self.dt
-        return np.concatenate([next_pos, [next_theta]])
 
     def observe(self, state: np.ndarray) -> np.ndarray:
         state = self.validate_state(state)
@@ -128,8 +115,10 @@ class Unicycle1(DynamicsSimulator):
             },
         }
 
-    def random_initial_state(self, rng):
-        pos = rng.uniform(low=-5.0, high=5.0, size=2)
+    def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
+        radius = rng.uniform(0.5, 3.0)
+        angle = rng.uniform(0.0, 2 * np.pi)
+        pos = self.goal[:2] + radius * np.array([np.cos(angle), np.sin(angle)])
         theta = rng.uniform(low=-np.pi, high=np.pi)
         return np.array([pos[0], pos[1], theta])
 
