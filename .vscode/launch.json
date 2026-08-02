@@ -25,7 +25,7 @@
             ]
         },
         {
-            "name": "plot mutli robot db-lacam trajectories",
+            "name": "plot multi robot db-lacam trajectories",
             "type": "debugpy",
             "request": "launch",
             "python": "/opt/venv/bin/python",
