@@ -4,13 +4,21 @@ venv/
 .vscode/launch.json
 data/
 test/output
-test/__pycache__
+core/__pycache__/
+
 systems/__pycache__/
+
 planning/__pycache__/
+
+test/__pycache__/
 
 data/__pycache__/
 data/lerobot_dataset*/
 
+learning/__pycache__/
+learning/models/__pycache__/
+
 test/*.pdf
+test/*.mp4
 
 outputs/

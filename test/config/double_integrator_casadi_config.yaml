@@ -4,5 +4,6 @@ horizon: 20
 mode: mpc
 Q_diag: [10.0, 10.0, 1.0, 1.0]
 R_weight: 0.1
+terminal_cost_multiplier: 10.0
 goal: [0.0, 0.0]
 randomize_goal: false

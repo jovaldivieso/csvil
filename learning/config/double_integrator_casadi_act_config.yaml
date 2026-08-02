@@ -5,24 +5,23 @@ dataset:
 
 # Policy settings
 policy:
-  type: diffusion
+  type: act
   device: mps
   
-  repo_id: jovaldivieso/double_integrator_casadi_diffusion_policy
+  repo_id: jovaldivieso/double_integrator_casadi_act
   push_to_hub: true
-  
+
   # Neural network settings
-  down_dims: [32, 64]
-  diffusion_step_embed_dim: 16  
+  dim_model: 32
+  dim_feedforward: 128
+  n_heads: 4
+  n_encoder_layers: 2
+  n_decoder_layers: 1
   
-  # Inference Speed Optimizations
-  noise_scheduler_type: DDIM    
-  num_inference_steps: 20       
-  
-  # Horizon & History adjustments
-  horizon: 32
-  n_action_steps: 16            # Execute 16 steps before re-sampling
-  n_obs_steps: 3                # Capture last 3 observation frames
+  # Action chunking & History adjustments
+  chunk_size: 32
+  n_action_steps: 1
+  n_obs_steps: 1            # Must be 1 for LeRobot's ACT implementation
   
   normalization_mapping:
     STATE: MIN_MAX
@@ -41,8 +40,6 @@ policy:
     action:
       shape: [2]
       type: ACTION
-
-  drop_n_last_frames: 0
 
 # Training settings
 steps: 12500

@@ -1,12 +1,18 @@
 import casadi as ca
 import numpy as np
+from typing import Any, Mapping
+
 from .planner import Planner
+from systems.dynamics import DynamicsProtocol
+
+
+class PlannerSolveError(RuntimeError):
+    """Raised when the CasADi optimization problem cannot be solved."""
 
 
 class CasadiPlanner(Planner):
     """
-    This planner solves a discrete-time finite-horizon optimal control problem
-    with CasADi for dynamical systems.
+    CasADi-based finite-horizon optimal control for single-robot and multi-robot systems.
 
     Modes:
         - "mpc" (Receding Horizon): Solves the NLP at every step and executes
@@ -16,51 +22,182 @@ class CasadiPlanner(Planner):
 
     Mathematical Formulation
     ------------------------
-    Optimization Variables:
-        X : State trajectory over the horizon.
-            X = [x_0, x_1, ..., x_N]
-        U : Control (action) trajectory over the horizon.
-            U = [u_0, u_1, ..., u_{N-1}]
+    The planner treats any simulator as a fleet of robots. A standard simulator
+    is interpreted as a fleet of one. For each robot $i$ with state $x_i$ and
+    action $u_i$, and horizon $N$, the optimizer solves:
 
-    Runtime Parameters:
-        x_init : Current observed state of the robot.
-        x_goal : Target goal state.
-        Q      : State error penalty matrix (diagonal).
-        R      : Control effort penalty matrix.
-        u_max  : Maximum symmetric actuator limit.
+    J(X, U) = sum over k = 0..N-1, sum over robots i of:
+        state_cost(i, k) = (x_i[k] - x_goal_i)^T Q_i (x_i[k] - x_goal_i)
+        control_cost(i, k) = u_i[k]^T R_i u_i[k]
 
-    Objective (Cost Function to Minimize):
-        J(X, U) = sum_{k=0}^{N-1} [ (x_k - x_goal)^T * Q * (x_k - x_goal) +
-                                    u_k^T * R * u_k ]
-                  + (x_N - x_goal)^T * (10 * Q) * (x_N - x_goal)
+    plus terminal_cost = sum over robots i of:
+        terminal_cost(i) = (x_i[N] - x_goal_i)^T (alpha * Q_i) (x_i[N] - x_goal_i)
 
-        * The sum represents the "Running Cost": penalizing distance to the
-          goal and aggressive control efforts at each step.
-        * The final term is the "Terminal Cost": heavily penalizing the robot
-          if it misses the goal at the very last step of the horizon.
+    where alpha is ``terminal_cost_multiplier``.
 
-    Subject to Constraints:
-        1. Initial Condition: x_0 == x_init
-        2. System Dynamics:   x_{k+1} == f(x_k, u_k)     for k = 0, ..., N-1
-        3. Actuator Limits:   -u_max <= u_k <= u_max     for k = 0, ..., N-1
+    Subject to, for every k = 0..N-1:
+
+        x[k + 1] = f(x[k], u[k])
+
+    together with per-robot action limits, optional per-robot state bounds, and
+    the pairwise collision-avoidance constraints:
+
+        (x_i[k] - x_j[k])^2 + (y_i[k] - y_j[k])^2 >= d_safe^2   for all i < j
+
+    ``d_safe`` is read from planner config, falling back to simulator config.
+    For single-robot systems the pairwise collision constraints are inactive.
+
+    Decision variables:
+        X : Global state trajectory over the horizon.
+        U : Global control trajectory over the horizon.
+
+    Parameters:
+        x_init : Current observed global state.
+        x_goal : Global goal state assembled from all robot goals.
+        Q_i : Per-robot state penalty blocks extracted from ``Q_diag``.
+        R_i : Per-robot control penalty blocks.
+        d_safe : Minimum allowed planar distance between any robot pair.
+
+    The solver keeps the fleet jointly feasible by applying the shared dynamics,
+    per-robot action bounds, optional per-robot state bounds, and the pairwise
+    collision constraints above at every step in the horizon.
+
+    Control penalty configuration
+    -----------------------------
+    The action penalty matrix ``R`` is diagonal and can be configured in three
+    equivalent ways (highest priority first):
+
+    1. ``R_weight_per_robot`` (multi-robot only): list with one entry per robot.
+       Each entry can be a scalar (isotropic per robot) or a full per-action list.
+    2. ``R_diag``: full global diagonal list of length ``nu``.
+    3. ``R_weight``: positive scalar fallback applied to all action dimensions.
     """
 
-    def __init__(self, simulator, config):
+    def _resolve_r_diag(self, config: Mapping[str, Any]) -> np.ndarray:
+        raw_r_per_robot = config.get("R_weight_per_robot")
+        raw_r_diag = config.get("R_diag")
+
+        per_robot_diag: np.ndarray | None = None
+        explicit_diag: np.ndarray | None = None
+
+        if raw_r_per_robot is not None:
+            if not isinstance(raw_r_per_robot, list):
+                raise ValueError("'R_weight_per_robot' must be a list.")
+            if len(raw_r_per_robot) != len(self.robot_action_slices):
+                raise ValueError(
+                    "'R_weight_per_robot' length must match number of robots "
+                    f"({len(self.robot_action_slices)}), got {len(raw_r_per_robot)}."
+                )
+
+            diag_values: list[float] = []
+            for robot_idx, (entry, action_slice) in enumerate(zip(raw_r_per_robot, self.robot_action_slices)):
+                action_dim = int(action_slice.stop - action_slice.start)
+                if isinstance(entry, (int, float)):
+                    value = float(entry)
+                    if value <= 0:
+                        raise ValueError(
+                            f"'R_weight_per_robot[{robot_idx}]' must be positive."
+                        )
+                    diag_values.extend([value] * action_dim)
+                elif isinstance(entry, list):
+                    if len(entry) != action_dim:
+                        raise ValueError(
+                            f"'R_weight_per_robot[{robot_idx}]' must have length "
+                            f"{action_dim}, got {len(entry)}."
+                        )
+                    for weight_idx, value in enumerate(entry):
+                        if not isinstance(value, (int, float)):
+                            raise ValueError(
+                                f"'R_weight_per_robot[{robot_idx}][{weight_idx}]' must be numeric."
+                            )
+                        value_f = float(value)
+                        if value_f <= 0:
+                            raise ValueError(
+                                f"'R_weight_per_robot[{robot_idx}][{weight_idx}]' must be positive."
+                            )
+                        diag_values.append(value_f)
+                else:
+                    raise ValueError(
+                        f"'R_weight_per_robot[{robot_idx}]' must be numeric or a list of length {action_dim}."
+                    )
+
+            if len(diag_values) != self.sim.nu:
+                raise ValueError(
+                    "Expanded 'R_weight_per_robot' length must equal action dimension "
+                    f"nu={self.sim.nu}, got {len(diag_values)}."
+                )
+            per_robot_diag = np.asarray(diag_values, dtype=float)
+
+        if raw_r_diag is not None:
+            if not isinstance(raw_r_diag, list):
+                raise ValueError("'R_diag' must be a list.")
+            if len(raw_r_diag) != self.sim.nu:
+                raise ValueError(
+                    f"'R_diag' length must equal simulator action dimension nu={self.sim.nu}, got {len(raw_r_diag)}."
+                )
+            diag_values = []
+            for idx, value in enumerate(raw_r_diag):
+                if not isinstance(value, (int, float)):
+                    raise ValueError(f"'R_diag[{idx}]' must be numeric.")
+                value_f = float(value)
+                if value_f <= 0:
+                    raise ValueError(f"'R_diag[{idx}]' must be positive.")
+                diag_values.append(value_f)
+            explicit_diag = np.asarray(diag_values, dtype=float)
+
+        if per_robot_diag is not None and explicit_diag is not None:
+            if not np.allclose(per_robot_diag, explicit_diag, rtol=0.0, atol=0.0):
+                raise ValueError(
+                    "'R_weight_per_robot' and 'R_diag' are both provided but inconsistent."
+                )
+            return per_robot_diag
+
+        if per_robot_diag is not None:
+            return per_robot_diag
+
+        if explicit_diag is not None:
+            return explicit_diag
+
+        r_weight = config.get("R_weight", 0.1)
+        if not isinstance(r_weight, (int, float)):
+            raise ValueError("'R_weight' must be numeric.")
+        if float(r_weight) <= 0:
+            raise ValueError("'R_weight' must be positive.")
+        return np.asarray([float(r_weight)] * self.sim.nu, dtype=float)
+
+    def __init__(self, simulator: DynamicsProtocol, config: Mapping[str, Any]):
         self.sim = simulator
         self.N = config.get("horizon", 20)
         self.mode = config.get("mode", "mpc")  # Default to MPC
+        self.terminal_cost_multiplier = float(config.get("terminal_cost_multiplier", 10.0))
+
+        if self.N <= 0:
+            raise ValueError("'horizon' must be a positive integer.")
+        if self.mode not in {"mpc", "open_loop"}:
+            raise ValueError("'mode' must be one of {'mpc', 'open_loop'}.")
+        if self.terminal_cost_multiplier <= 0:
+            raise ValueError("'terminal_cost_multiplier' must be positive.")
+
+        self.sub_simulators = self.sim.simulators
+        self.robot_state_slices = self.sim.robot_state_slices
+        self.robot_action_slices = self.sim.robot_action_slices
+        self.d_safe = float(config.get("d_safe", getattr(self.sim, "d_safe", 0.0)))
+        if self.d_safe < 0:
+            raise ValueError("'d_safe' must be non-negative.")
 
         # State variables for open-loop planning
         self.cached_plan = None
         self.step_idx = 0
 
         # Cost matrices depending on system state
-        self.Q = np.diag(config.get("Q_diag", [10.0] * self.sim.nx))
-        self.R = np.eye(self.sim.nu) * config.get("R_weight", 0.1)
+        q_diag = config.get("Q_diag", [10.0] * self.sim.nx)
+        if len(q_diag) != self.sim.nx:
+            raise ValueError(
+                f"'Q_diag' length must equal simulator state dimension nx={self.sim.nx}, got {len(q_diag)}."
+            )
+        self.Q = np.diag(q_diag)
+        self.R = np.diag(self._resolve_r_diag(config))
         
-        state_lower_bounds = getattr(self.sim, "state_lower_bounds", None)
-        state_upper_bounds = getattr(self.sim, "state_upper_bounds", None)
-
         # Build the CasADi NLP graph
         self.opti = ca.Opti()
 
@@ -72,37 +209,105 @@ class CasadiPlanner(Planner):
 
         cost = 0
 
-        # Build constraints and costs
+        q_blocks: list[np.ndarray] = []
+        r_blocks: list[np.ndarray] = []
+        for state_slice, action_slice in zip(self.robot_state_slices, self.robot_action_slices):
+            q_blocks.append(self.Q[state_slice, state_slice])
+            r_blocks.append(self.R[action_slice, action_slice])
+
+        # Build dynamics constraints (kept in a loop because casadi_dynamics
+        # is not guaranteed to support batched matrix inputs).
         for k in range(self.N):
             self.opti.subject_to(self.X[:, k + 1] ==
                                  self.sim.casadi_dynamics(self.X[:, k],
                                                           self.U[:, k]))
 
-            for i in range(self.sim.nu):
-                self.opti.subject_to(self.U[i, k] >= -self.sim.max_action)
-                self.opti.subject_to(self.U[i, k] <= self.sim.max_action)
-            
-            # adds lower and upper bounds for state variables:    
-            if state_lower_bounds is not None:
-                for i in range(self.sim.nx):
-                    if np.isfinite(state_lower_bounds[i]):
-                        self.opti.subject_to(
-                            self.X[i, k + 1] >= state_lower_bounds[i]
-                        )
-            if state_upper_bounds is not None:
-                for i in range(self.sim.nx):
-                    if np.isfinite(state_upper_bounds[i]):
-                        self.opti.subject_to(
-                            self.X[i, k + 1] <= state_upper_bounds[i]
-                        )
+        # Vectorized actuator limits over all horizon steps.
+        for sub_sim, action_slice in zip(self.sub_simulators, self.robot_action_slices):
+            robot_max_action = float(getattr(sub_sim, "max_action", self.sim.max_action))
+            for action_dim in range(action_slice.start, action_slice.stop):
+                self.opti.subject_to(self.U[action_dim, :] >= -robot_max_action)
+                self.opti.subject_to(self.U[action_dim, :] <= robot_max_action)
 
-            error = self.X[:, k] - self.goal_param
-            cost += ca.mtimes(error.T, ca.mtimes(self.Q, error))
-            cost += ca.mtimes(self.U[:, k].T, ca.mtimes(self.R, self.U[:, k]))
+        # Vectorized optional per-robot state bounds over steps 1..N.
+        for sub_sim, state_slice in zip(self.sub_simulators, self.robot_state_slices):
+            sub_lower = getattr(sub_sim, "state_lower_bounds", None)
+            sub_upper = getattr(sub_sim, "state_upper_bounds", None)
 
-        terminal_error = self.X[:, self.N] - self.goal_param
-        cost += ca.mtimes(terminal_error.T, ca.mtimes(self.Q * 10,
-                                                      terminal_error))
+            if sub_lower is not None:
+                for local_dim, lower in enumerate(sub_lower):
+                    if np.isfinite(lower):
+                        global_dim = state_slice.start + local_dim
+                        self.opti.subject_to(self.X[global_dim, 1:] >= lower)
+            if sub_upper is not None:
+                for local_dim, upper in enumerate(sub_upper):
+                    if np.isfinite(upper):
+                        global_dim = state_slice.start + local_dim
+                        self.opti.subject_to(self.X[global_dim, 1:] <= upper)
+
+        # Vectorized running costs over all N steps.
+        for state_slice, action_slice, q_block, r_block in zip(
+            self.robot_state_slices,
+            self.robot_action_slices,
+            q_blocks,
+            r_blocks,
+        ):
+            goal_matrix = ca.repmat(self.goal_param[state_slice], 1, self.N)
+            error_matrix = self.X[state_slice, :-1] - goal_matrix
+            cost += ca.sum2(ca.sum1(ca.mtimes(q_block, error_matrix) * error_matrix))
+            cost += ca.sum2(
+                ca.sum1(ca.mtimes(r_block, self.U[action_slice, :]) * self.U[action_slice, :])
+            )
+
+        # Vectorized pairwise collision constraints for steps 0..N-1.
+        if self.d_safe > 0.0 and len(self.robot_state_slices) > 1:
+            for i in range(len(self.robot_state_slices)):
+                state_slice_i = self.robot_state_slices[i]
+                if state_slice_i.stop - state_slice_i.start < 2:
+                    raise ValueError(
+                        f"Robot {i} state must include at least x/y in first two entries."
+                    )
+                xi = self.X[state_slice_i.start, :-1]
+                yi = self.X[state_slice_i.start + 1, :-1]
+                for j in range(i + 1, len(self.robot_state_slices)):
+                    state_slice_j = self.robot_state_slices[j]
+                    if state_slice_j.stop - state_slice_j.start < 2:
+                        raise ValueError(
+                            f"Robot {j} state must include at least x/y in first two entries."
+                        )
+                    xj = self.X[state_slice_j.start, :-1]
+                    yj = self.X[state_slice_j.start + 1, :-1]
+                    self.opti.subject_to(
+                        (xi - xj) ** 2 + (yi - yj) ** 2 >= self.d_safe ** 2
+                    )
+
+        for state_slice, q_block in zip(self.robot_state_slices, q_blocks):
+            terminal_error = self.X[state_slice, self.N] - self.goal_param[state_slice]
+            cost += ca.mtimes(
+                terminal_error.T,
+                ca.mtimes(q_block * self.terminal_cost_multiplier, terminal_error),
+            )
+
+        if self.d_safe > 0.0 and len(self.robot_state_slices) > 1:
+            for i in range(len(self.robot_state_slices)):
+                state_slice_i = self.robot_state_slices[i]
+                if state_slice_i.stop - state_slice_i.start < 2:
+                    raise ValueError(
+                        f"Robot {i} state must include at least x/y in first two entries."
+                    )
+                xi = self.X[state_slice_i.start, self.N]
+                yi = self.X[state_slice_i.start + 1, self.N]
+                for j in range(i + 1, len(self.robot_state_slices)):
+                    state_slice_j = self.robot_state_slices[j]
+                    if state_slice_j.stop - state_slice_j.start < 2:
+                        raise ValueError(
+                            f"Robot {j} state must include at least x/y in first two entries."
+                        )
+                    xj = self.X[state_slice_j.start, self.N]
+                    yj = self.X[state_slice_j.start + 1, self.N]
+                    self.opti.subject_to(
+                        (xi - xj) ** 2 + (yi - yj) ** 2 >= self.d_safe ** 2
+                    )
 
         self.opti.minimize(cost)
         self.opti.subject_to(self.X[:, 0] == self.x0_param)
@@ -110,13 +315,13 @@ class CasadiPlanner(Planner):
         opts = {"ipopt.print_level": 0, "print_time": 0, "ipopt.sb": "yes"}
         self.opti.solver("ipopt", opts)
 
-    def reset(self):
+    def reset(self) -> None:
         """Signals the start of a new episode."""
         if self.mode == "open_loop":
             self.cached_plan = None
             self.step_idx = 0
 
-    def __call__(self, obs):
+    def __call__(self, obs: np.ndarray) -> np.ndarray:
         if self.mode == "mpc":
             x0 = self.sim.invert_obs(obs)
             self.opti.set_value(self.x0_param, x0)
@@ -125,8 +330,11 @@ class CasadiPlanner(Planner):
             try:
                 sol = self.opti.solve()
                 return sol.value(self.U[:, 0])
-            except RuntimeError:
-                return np.zeros(self.sim.nu)
+            except RuntimeError as exc:
+                raise PlannerSolveError(
+                    "CasADi planner solve failed in MPC mode. "
+                    f"Current state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
+                ) from exc
 
         elif self.mode == "open_loop":
             # Plan once on the first step
@@ -138,8 +346,11 @@ class CasadiPlanner(Planner):
                 try:
                     sol = self.opti.solve()
                     self.cached_plan = sol.value(self.U)
-                except RuntimeError:
-                    self.cached_plan = np.zeros((self.sim.nu, self.N))
+                except RuntimeError as exc:
+                    raise PlannerSolveError(
+                        "CasADi planner solve failed in open-loop mode. "
+                        f"Initial state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
+                    ) from exc
 
             # Iterate through the cached plan
             if self.step_idx < self.cached_plan.shape[1]:
