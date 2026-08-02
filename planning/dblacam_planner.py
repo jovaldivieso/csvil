@@ -140,10 +140,18 @@ class DbLacamPlanner(Planner):
 
             with open(result_yaml_path, "r", encoding="utf-8") as file:
                 result_data = yaml.safe_load(file)
-                
+
+        if not isinstance(result_data, dict):
+            raise RuntimeError(
+                f"db-lacam output yaml must be a mapping, got {type(result_data).__name__}"
+            )
+
         # extracts one action plan per robot from db-lacam result:
         trajectories = result_data.get("result")
-
+        if not isinstance(trajectories, list) or len(trajectories) != len(self.robots):
+            raise RuntimeError(
+                f"db-lacam output yaml must contain a 'result' list with {len(self.robots)} entries"
+            )
         self.cached_plans = []
         for robot, trajectory in zip(self.robots, trajectories):
             actions = np.asarray(trajectory.get("actions") or [], dtype=float)
