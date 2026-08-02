@@ -67,9 +67,15 @@ class DbLacamPlanner(Planner):
 
         # dynobench model and db-lacam motion primitives were generated with dt = 0.1:
         for robot in self.robots:
-            if robot.dt != 0.1:
-                raise ValueError(f"parameter mismatch: simulator dt is {self.sim.dt}, but {robot.db_lacam_robot_type} uses dt = 0.1")
-     
+            robot_type = getattr(robot, "db_lacam_robot_type", None)
+            if not robot_type:
+                raise ValueError(
+                    f"db-lacam does not support simulator type {type(robot).__name__} (missing 'db_lacam_robot_type')."
+                )
+            if float(robot.dt) != 0.1:
+                raise ValueError(
+                    f"parameter mismatch: robot dt is {float(robot.dt)}, but {robot_type} uses dt = 0.1"
+                )
     def reset(self):
         self.cached_plans = None
         self.step_idx = 0
