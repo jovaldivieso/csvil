@@ -182,8 +182,8 @@ class DbLacamPlanner(Planner):
                     self.mode == "replan"
                     and self.step_idx >= self.replan_freq
                 )
-            ):                self._compute_plan(obs)
-
+            ):
+                self._compute_plan(obs)
             actions = self._get_current_actions()
             self.step_idx += 1
             return actions
