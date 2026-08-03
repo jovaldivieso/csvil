@@ -31,6 +31,10 @@ class Unicycle1(DynamicsSimulator):
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
         
+        environment = config.get("environment", {})
+        self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
+        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]), dtype=float)
+        
         self.db_lacam_robot_type = "unicycle1_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
@@ -138,19 +142,19 @@ class Unicycle1(DynamicsSimulator):
     def reset_random(self) -> np.ndarray:
         """Randomize start position, and optionally the goal."""
         if self.randomize_goal:
-            goal_pos = np.random.uniform(low=-5.0, high=5.0, size=2)
-            goal_theta = np.random.uniform(low=-np.pi, high=np.pi)
+            goal_pos = np.random.uniform(low=self.environment_min, high=self.environment_max, size=2)
+            goal_theta = np.random.uniform(-np.pi, np.pi)
             self.goal = np.array([goal_pos[0], goal_pos[1], goal_theta])
 
-        radius = np.random.uniform(0.5, 3.0)
-        angle = np.random.uniform(0, 2 * np.pi)
-        offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
+        while True:
+            radius = np.random.uniform(0.5, 3.0)
+            angle = np.random.uniform(0, 2 * np.pi)
+            offset = radius * np.array([np.cos(angle), np.sin(angle)])
+            start_pos = self.goal[:2] + offset
 
-        start_pos = self.goal[:2] + offset
-        start_theta = np.random.uniform(low=-np.pi, high=np.pi)
-
-        initial_state = np.array([start_pos[0], start_pos[1], start_theta])
-        return self.reset(initial_state)
+            if np.all((start_pos >= self.environment_min) & (start_pos <= self.environment_max)):
+                start_theta = np.random.uniform(-np.pi, np.pi)
+                return self.reset(np.array([start_pos[0], start_pos[1], start_theta]))
 
     def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
         """Package the observation and action into a dictionary for LeRobot"""
