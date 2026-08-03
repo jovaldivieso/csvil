@@ -30,6 +30,8 @@ class Unicycle1(DynamicsSimulator):
         self.obs_dim = 5
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
+        
+        self.db_lacam_robot_type = "unicycle1_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
         return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))

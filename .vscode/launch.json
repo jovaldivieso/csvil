@@ -1,0 +1,45 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "collect multi robot db-lacam data",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/opt/venv/bin/python",
+            "program": "/workspace/test/collect_expert_data.py",
+            "cwd": "/workspace",
+            "console": "integratedTerminal",
+            "stopOnEntry": false,
+            "justMyCode": true,
+            "args": [
+                "--system",
+                "multi_robot",
+                "--planner",
+                "dblacam",
+                "--config",
+                "test/config/multi_robot_dblacam_config.yaml",
+                "--num-traj",
+                "10",
+                "--num-steps",
+                "400"
+            ]
+        },
+        {
+            "name": "plot multi robot db-lacam trajectories",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/opt/venv/bin/python",
+            "program": "/workspace/test/plot_trajectories_multi_robot.py",
+            "cwd": "/workspace",
+            "console": "integratedTerminal",
+            "stopOnEntry": false,
+            "justMyCode": true,
+            "args": [
+                "--config",
+                "test/config/multi_robot_dblacam_config.yaml",
+                "--num-steps",
+                "400"
+            ]
+        }
+    ]
+}

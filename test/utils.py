@@ -102,10 +102,11 @@ def plot_xy_trajectories(
         show_heading: whether to draw heading arrows for initial and goal states 
         (requires orientation as third state entry)
     """
-    
     output_dir = os.path.dirname(path_to_output)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
+
+    trajectories = [np.asarray(trajectory) for trajectory in trajectories]
 
     fig, ax = plt.subplots(figsize=(8, 8))
 

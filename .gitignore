@@ -1,9 +1,9 @@
 venv/
 
 .DS_Store
-
+.vscode/launch.json
 data/
-
+test/output
 core/__pycache__/
 
 systems/__pycache__/

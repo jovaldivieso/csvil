@@ -7,118 +7,134 @@ ENV DB_LACAM_ROOT=/opt/db-lacam
 ENV OMPL_PREFIX=/opt/ompl
 ENV CMAKE_PREFIX_PATH=/opt/ompl;/opt/openrobots
 ENV LD_LIBRARY_PATH=/opt/ompl/lib:/opt/openrobots/lib
+ENV VIRTUAL_ENV=/opt/venv  
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
 
-# dependencies needed to configure and build db-LaCAM:
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    cmake \
-    curl \
-    git \
-    gnupg \
-    libboost-all-dev \
-    libeigen3-dev \
-    libfcl-dev \
-    liblz4-dev \
-    libmsgpack-dev \
-    liboctomap-dev \
-    libyaml-cpp-dev \
-    lsb-release \
-    pkg-config \
-    python3 \
-    unzip \
-    wget \
+# installs build tools and libraries 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        ffmpeg \
+        git \
+        gnupg \
+        libboost-all-dev \
+        libeigen3-dev \
+        libfcl-dev \
+        libgl1 \
+        libglib2.0-0 \
+        liblz4-dev \
+        libmsgpack-dev \
+        liboctomap-dev \
+        libyaml-cpp-dev \
+        pkg-config \
+        software-properties-common \
+        unzip \
+        wget \
     && rm -rf /var/lib/apt/lists/*
 
-# dynoplan requires Crocoddyl during CMake configuration (even though standalone db-LaCAM build below does not compile its optimization target):
-RUN echo "deb [arch=amd64] http://robotpkg.openrobots.org/packages/debian/pub jammy robotpkg" \
+# installs python (lerobot 0.5.1 requires python 3.12 or newer):
+RUN add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3.12-dev \
+        python3.12-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# adds robotpkg repository and installs crocoddyl and ipopt (required by dynoplan requires during cmake configuration):
+RUN echo \
+        "deb [arch=amd64] http://robotpkg.openrobots.org/packages/debian/pub jammy robotpkg" \
         > /etc/apt/sources.list.d/robotpkg.list \
-    && curl http://robotpkg.openrobots.org/packages/debian/robotpkg.key \
+    && curl -fsSL \
+        http://robotpkg.openrobots.org/packages/debian/robotpkg.key \
         | apt-key add - \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        robotpkg-py310-crocoddyl \
         coinor-libipopt-dev \
+        robotpkg-py310-crocoddyl \
     && rm -rf /var/lib/apt/lists/*
 
-# db-LaCAM's CI uses OMPL revision:
-ARG OMPL_REF=e2994e5
+# creates python 3.12 virtual environment and installs dependencies:
+COPY requirements.txt /tmp/requirements.txt
+RUN python3.12 -m venv "${VIRTUAL_ENV}" \
+    && python -m pip install --upgrade pip \
+    && python -m pip install \
+        torch==2.7.1 \
+        torchvision==0.22.1 \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && python -m pip install \
+        PyYAML \
+        -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
 
+# builds OMPL revision used by db-lacam's CI:
+ARG OMPL_REF=e2994e5
 RUN git clone https://github.com/ompl/ompl.git /tmp/ompl \
     && cd /tmp/ompl \
     && git checkout "${OMPL_REF}" \
-    && cmake -S . -B build \
+    && /usr/bin/cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${OMPL_PREFIX}" \
         -DOMPL_BUILD_PYBIND11_BINDINGS=OFF \
         -DOMPL_BUILD_EXAMPLES=OFF \
         -DOMPL_BUILD_TESTS=OFF \
         -DOMPL_BUILD_CMAKE_CONFIG=ON \
-    && cmake --build build --parallel "$(nproc)" \
-    && cmake --install build \
+    && /usr/bin/cmake --build build --parallel "$(nproc)" \
+    && /usr/bin/cmake --install build \
     && rm -rf /tmp/ompl
 
+# clones db-lacam and nested submodules:
+# (from ChatGPT: public ssh-style github URLs are rewritten to HTTPS so that no SSH key is needed inside docker build)
 ARG DB_LACAM_REF=main
-
-# rewrites SSH GitHub submodule URLs to HTTPS so public submodules can be cloned without an SSH key inside the Docker build:
-RUN git config --global url."https://github.com/".insteadOf "git@github.com:" \
-    && git clone --recurse-submodules \
-        https://github.com/IMRCLab/db-lacam.git "${DB_LACAM_ROOT}" \
+RUN git config --global \
+        url."https://github.com/".insteadOf "git@github.com:" \
+    && git clone \
+        --recurse-submodules \
+        https://github.com/IMRCLab/db-lacam.git \
+        "${DB_LACAM_ROOT}" \
     && cd "${DB_LACAM_ROOT}" \
     && git checkout "${DB_LACAM_REF}" \
     && git submodule update --init --recursive
 
-# motion primitives required by db-LaCAM:
+# downloads pregenerated motion primitives used by db-lacam:
 RUN cd "${DB_LACAM_ROOT}" \
     && wget -O primitives.zip \
         https://tubcloud.tu-berlin.de/s/wezMej9ieNjwjz6/download \
     && unzip primitives.zip \
     && rm primitives.zip
 
-# (from ChatGPT: Dynoplan's optimization target is incompatible with the Crocoddyl version provided by Robotpkg - run_dblacam only needs tdbastar and dynobench)
-# builds only the standalone db-LaCAM executable:
+# run_dblacam doesn't actually use compute_heu, but linking it pulls incompatible dynoplan/crocoddyl components
+# - removes two unused compute_heu references:
+#     - idbastar::compute_heu from target_link_libraries() in CMakeLists.txt
+#     - include "dynoplan/tdbastar/compute_heu.hpp" from run_dblacam.cpp
+# - configures project and generates build files in buildRelease
+# - compiles build files, building run_dblacam
+# - final sanity check
+# (regular expressions in sed-commands were generated with ChatGPT)
+# (dynobench emits source-code warnings, can be ignored)
 ARG DB_LACAM_BUILD_JOBS=2
-
 RUN set -eux; \
-    echo "Relevant lines before patch"; \
-    grep -nE 'add_subdirectory|compute_heu' \
-        "${DB_LACAM_ROOT}/CMakeLists.txt" || true; \
-    grep -nF 'compute_heu.hpp' \
-        "${DB_LACAM_ROOT}/src/run_dblacam.cpp" || true; \
-    \
-    sed -Ei \
-        's|add_subdirectory[[:space:]]*\([[:space:]]*dynoplan[[:space:]]*\)|add_subdirectory(dynoplan EXCLUDE_FROM_ALL)|' \
-        "${DB_LACAM_ROOT}/CMakeLists.txt"; \
     sed -Ei \
         's|[[:space:]]*idbastar::compute_heu[[:space:]]*| |g' \
         "${DB_LACAM_ROOT}/CMakeLists.txt"; \
     sed -Ei \
         '/^[[:space:]]*#include[[:space:]]+"dynoplan\/tdbastar\/compute_heu\.hpp"/d' \
         "${DB_LACAM_ROOT}/src/run_dblacam.cpp"; \
-    \
-    echo "Relevant lines after patch"; \
-    grep -nE 'add_subdirectory|compute_heu' \
-        "${DB_LACAM_ROOT}/CMakeLists.txt" || true; \
-    grep -nF 'compute_heu.hpp' \
-        "${DB_LACAM_ROOT}/src/run_dblacam.cpp" || true; \
-    \
-    grep -Fq \
-        'add_subdirectory(dynoplan EXCLUDE_FROM_ALL)' \
-        "${DB_LACAM_ROOT}/CMakeLists.txt"; \
-    ! grep -Fq \
-        'idbastar::compute_heu' \
-        "${DB_LACAM_ROOT}/CMakeLists.txt"; \
-    ! grep -Fq \
-        'compute_heu.hpp' \
-        "${DB_LACAM_ROOT}/src/run_dblacam.cpp"; \
-    \
-    cmake -S "${DB_LACAM_ROOT}" \
+    /usr/bin/cmake \
+        -S "${DB_LACAM_ROOT}" \
         -B "${DB_LACAM_ROOT}/buildRelease" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}"; \
-    cmake --build "${DB_LACAM_ROOT}/buildRelease" \
+    /usr/bin/cmake --build "${DB_LACAM_ROOT}/buildRelease" \
         --target run_dblacam \
-        --parallel "${DB_LACAM_BUILD_JOBS}"
+        --parallel "${DB_LACAM_BUILD_JOBS}"; \
+    test -x "${DB_LACAM_ROOT}/buildRelease/run_dblacam"
 
 WORKDIR /workspace
 
