@@ -6,6 +6,9 @@ import numpy as np
 from core.types import VectorSpec, as_vector
 
 
+DEFAULT_DONE_HOLD_STEPS = 5
+
+
 @runtime_checkable
 class DynamicsProtocol(Protocol):
     """Structural contract for pluggable dynamics simulators.
@@ -80,9 +83,17 @@ class DynamicsProtocol(Protocol):
 
     def reset_random(self) -> np.ndarray: ...
 
+    def reset_rollout_termination(self) -> None: ...
+
+    def set_early_rollout_termination(self, enabled: bool) -> None: ...
+
+    def should_terminate_rollout(self, state: np.ndarray) -> bool: ...
+
     def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, Any]: ...
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray: ...
+
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None: ...
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray: ...
 
@@ -119,12 +130,56 @@ class DynamicsSimulator(ABC):
         self.state = None
         self.time = 0
         self.dt = config.get("dt", 0.05)
+        self._sampling_rng = np.random.default_rng(config.get("initial_state_seed"))
+        self._rollout_done_counter = 0
+        self._early_rollout_termination_enabled = True
 
         # Agnostic dimensions so planners can read them automatically
         self.nx = None
         self.nu = None
         self.obs_dim = getattr(self, "obs_dim", self.nx)
         self.max_action = None
+
+    def sample_planar_start_offset(
+        self,
+        rng: np.random.Generator,
+        radius_bounds: tuple[float, float],
+        min_goal_distance: float,
+    ) -> np.ndarray:
+        radius_min, radius_max = radius_bounds
+        effective_radius_min = max(radius_min, min_goal_distance)
+        if radius_max <= effective_radius_min:
+            raise RuntimeError(
+                "Initial-state sampling requires the maximum initial radius to exceed the minimum goal distance."
+            )
+
+        radius = rng.uniform(effective_radius_min, radius_max)
+        angle = rng.uniform(0.0, 2.0 * np.pi)
+        return np.array([radius * np.cos(angle), radius * np.sin(angle)], dtype=float)
+
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
+        del rng
+
+    def reset_rollout_termination(self) -> None:
+        self._rollout_done_counter = 0
+
+    def set_early_rollout_termination(self, enabled: bool) -> None:
+        self._early_rollout_termination_enabled = bool(enabled)
+
+    def should_terminate_rollout(self, state: np.ndarray) -> bool:
+        if not self._early_rollout_termination_enabled:
+            return False
+
+        hold_steps = int(self.config.get("done_hold_steps", DEFAULT_DONE_HOLD_STEPS))
+        if hold_steps <= 0:
+            raise ValueError("'done_hold_steps' must be a positive integer.")
+
+        if self.is_done(state):
+            self._rollout_done_counter += 1
+        else:
+            self._rollout_done_counter = 0
+
+        return self._rollout_done_counter >= hold_steps
 
     @property
     def has_heading(self) -> bool:
@@ -212,10 +267,10 @@ class DynamicsSimulator(ABC):
         """Return the LeRobot features dictionary for this specific robot"""
         pass
 
-    @abstractmethod
     def reset_random(self) -> np.ndarray:
         """Return a random, dynamically valid initial state"""
-        pass
+        self.randomize_goal_for_reset(self._sampling_rng)
+        return self.reset(self.random_initial_state(self._sampling_rng))
 
     @abstractmethod
     def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, Any]:
@@ -243,6 +298,7 @@ class DynamicsSimulator(ABC):
         state = self.validate_state(initial_state)
         self.state = state.copy()
         self.time = 0
+        self.reset_rollout_termination()
         return self.state
 
     def simulate(
@@ -259,10 +315,12 @@ class DynamicsSimulator(ABC):
             obs = self.observe(state)
             action = policy_fn(obs)  # Call your motion planner here
             state = self.step(state, action)
-
             states.append(state.copy())
             observations.append(obs)
             actions.append(action)
+
+            if self.should_terminate_rollout(state):
+                break
 
         return {
             "states": np.array(states),

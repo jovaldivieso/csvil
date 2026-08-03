@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import gc
+import math
 import os
 import random
 import sys
@@ -24,6 +25,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
+from learning.dagger_evaluation import DaggerEvalMetrics, evaluate_policy_rollouts
 from learning.train_lerobot import run_training
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
@@ -76,6 +78,26 @@ def create_policy_input(
             ).view(1, -1)
 
     return policy_input
+
+
+def apply_execution_noise(
+    simulator: DynamicsProtocol,
+    action: np.ndarray,
+    action_noise_std: float,
+) -> np.ndarray:
+    if action_noise_std <= 0.0:
+        return action
+
+    noise = np.random.normal(
+        loc=0.0,
+        scale=action_noise_std,
+        size=action.shape,
+    ).astype(action.dtype, copy=False)
+    return np.clip(
+        action + noise,
+        -simulator.max_action,
+        simulator.max_action,
+    )
 
 
 def load_lerobot_policy(
@@ -177,6 +199,7 @@ def build_iteration_training_config(
     repo_id: str,
     pretrained_path: Path | None,
     disable_push_to_hub: bool,
+    steps_override: int | None,
 ) -> dict[str, Any]:
     config = copy.deepcopy(dict(base_config))
 
@@ -197,6 +220,13 @@ def build_iteration_training_config(
 
     if disable_push_to_hub:
         policy_cfg["push_to_hub"] = False
+
+    if steps_override is not None:
+        config["steps"] = int(steps_override)
+        if "save_freq" in config:
+            save_freq = int(config["save_freq"])
+            if save_freq > int(steps_override):
+                config["save_freq"] = int(steps_override)
 
     return config
 
@@ -233,6 +263,7 @@ def run_training_round(
     pretrained_path: Path | None,
     disable_push_to_hub: bool,
     train_output_root: Path,
+    steps_override: int | None,
 ) -> Path:
     train_cfg = build_iteration_training_config(
         base_config=base_training_config,
@@ -240,6 +271,7 @@ def run_training_round(
         repo_id=repo_id,
         pretrained_path=pretrained_path,
         disable_push_to_hub=disable_push_to_hub,
+        steps_override=steps_override,
     )
 
     temp_train_cfg_path = write_training_config(train_cfg)
@@ -248,6 +280,8 @@ def run_training_round(
         print("Fine-tuning starts from scratch for this round.")
     else:
         print(f"Fine-tuning warm-start path: {pretrained_path}")
+    if steps_override is not None:
+        print(f"Training steps for this round: {steps_override}")
 
     before_paths = list_pretrained_model_dirs(train_output_root)
     try:
@@ -271,13 +305,16 @@ def collect_lerobot_dagger_data(
     trajectories_per_iteration: int,
     steps_per_trajectory: int,
     device: torch.device,
-) -> int:
+    action_noise_std: float,
+) -> DaggerEvalMetrics:
     """
     Roll out LeRobot policy, query expert at visited states, append corrective labels.
     """
     successful_episodes = 0
     attempted_episodes = 0
     max_attempts = max(trajectories_per_iteration * 3, trajectories_per_iteration)
+    reached_goal_count = 0
+    steps_taken: list[int] = []
 
     while successful_episodes < trajectories_per_iteration:
         attempted_episodes += 1
@@ -288,7 +325,6 @@ def collect_lerobot_dagger_data(
             )
 
         state = simulator.reset_random()
-        done_counter = 0
         planner_failed = False
 
         if hasattr(policy, "reset"):
@@ -296,7 +332,10 @@ def collect_lerobot_dagger_data(
         if hasattr(expert_planner, "reset"):
             expert_planner.reset()
 
-        for _ in range(steps_per_trajectory):
+        reached_goal = False
+        rollout_steps = steps_per_trajectory
+
+        for step in range(1, steps_per_trajectory + 1):
             observation = simulator.observe(state)
 
             policy_input = create_policy_input(
@@ -320,21 +359,40 @@ def collect_lerobot_dagger_data(
             frame_data["task"] = "reach target"
             dataset_writer.add_frame(frame_data)
 
-            # Environment advances with learner action; labels come from expert correction.
-            state = simulator.step(state, policy_action)
+            # Environment advances with noisy learner action; labels remain clean expert corrections.
+            executed_action = apply_execution_noise(
+                simulator=simulator,
+                action=policy_action,
+                action_noise_std=action_noise_std,
+            )
+            state = simulator.step(state, executed_action)
 
-            if simulator.is_done(state):
-                done_counter += 1
-                if done_counter >= 5:
-                    break
+            if simulator.should_terminate_rollout(state):
+                reached_goal = True
+                rollout_steps = step
+                break
 
         if planner_failed:
             continue
 
         dataset_writer.save_episode()
         successful_episodes += 1
+        reached_goal_count += int(reached_goal)
+        steps_taken.append(int(rollout_steps))
 
-    return successful_episodes
+        if successful_episodes % 10 == 0:
+            print(
+                "Collected "
+                f"{successful_episodes}/{trajectories_per_iteration} trajectories"
+            )
+
+    return DaggerEvalMetrics(
+        success_rate=float(reached_goal_count) / float(successful_episodes),
+        mean_steps=float(np.mean(np.asarray(steps_taken, dtype=float))),
+        min_steps=min(steps_taken),
+        max_steps=max(steps_taken),
+        num_episodes=successful_episodes,
+    )
 
 
 @dataclass(frozen=True)
@@ -348,11 +406,46 @@ class LeRobotDaggerConfig:
     dagger_iterations: int
     trajectories_per_iteration: int
     steps_per_trajectory: int
+    action_noise_std: float
     train_output_root: Path
     seed: int
     policy_type: str | None
     initial_pretrained_path: Path | None
     disable_push_to_hub: bool
+    target_epochs_per_round: float
+    eval_episodes: int
+    eval_steps: int | None
+    eval_seed_start: int
+    eval_action_noise_std: float
+    max_train_steps: int | None
+
+
+def resolve_round_steps(
+    num_frames: int,
+    batch_size: int,
+    target_epochs_per_round: float,
+    max_train_steps: int | None,
+) -> tuple[int, float]:
+    if num_frames <= 0:
+        raise ValueError("Training dataset must contain at least one frame.")
+    if batch_size <= 0:
+        raise ValueError("'batch_size' must be positive.")
+    if target_epochs_per_round <= 0:
+        raise ValueError("'target_epochs_per_round' must be positive.")
+
+    steps = math.ceil(float(target_epochs_per_round) * float(num_frames) / float(batch_size))
+    if max_train_steps is not None:
+        steps = min(steps, int(max_train_steps))
+
+    if steps <= 0:
+        raise ValueError("Per-round training steps must remain positive.")
+    approx_epochs = float(steps) * float(batch_size) / float(num_frames)
+    return steps, approx_epochs
+
+
+def dataset_frame_count(repo_id: str, dataset_root: Path) -> int:
+    dataset = LeRobotDataset(repo_id=repo_id, root=dataset_root)
+    return len(dataset)
 
 
 def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
@@ -362,6 +455,18 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         raise ValueError("'trajectories_per_iteration' must be positive.")
     if cfg.steps_per_trajectory <= 0:
         raise ValueError("'steps_per_trajectory' must be positive.")
+    if cfg.action_noise_std < 0:
+        raise ValueError("'action_noise_std' must be non-negative.")
+    if cfg.target_epochs_per_round <= 0:
+        raise ValueError("'target_epochs_per_round' must be positive.")
+    if cfg.eval_episodes < 0:
+        raise ValueError("'eval_episodes' must be non-negative.")
+    if cfg.eval_steps is not None and cfg.eval_steps <= 0:
+        raise ValueError("'eval_steps' must be positive when provided.")
+    if cfg.eval_action_noise_std < 0:
+        raise ValueError("'eval_action_noise_std' must be non-negative.")
+    if cfg.max_train_steps is not None and cfg.max_train_steps <= 0:
+        raise ValueError("'max_train_steps' must be positive when provided.")
 
     if not cfg.dataset_root.exists():
         raise FileNotFoundError(f"Dataset root does not exist: {cfg.dataset_root}")
@@ -369,6 +474,8 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
     set_seed(cfg.seed)
     device = get_inference_device()
     print(f"Running LeRobot DAgger on device: {device}")
+    print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
+    print(f"Evaluation action noise std: {cfg.eval_action_noise_std:.6f}")
 
     validated_experiment_config = load_and_validate_system_config(
         system_name=cfg.system,
@@ -376,7 +483,78 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
     )
 
     base_training_config = read_training_config(cfg.lerobot_training_config_path)
+    base_batch_size = int(base_training_config.get("batch_size", 64))
+    if base_batch_size <= 0:
+        raise ValueError("LeRobot training config must define a positive 'batch_size'.")
+
+    initial_round_steps = int(base_training_config.get("steps", 0))
+    if initial_round_steps <= 0:
+        raise ValueError(
+            "LeRobot training config must define a positive 'steps' value for round-0 training."
+        )
+
+    print(
+        "Epoch-target schedule: "
+        f"target_epochs={cfg.target_epochs_per_round:.2f}, "
+        f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
+    )
+    print(
+        "Initial round schedule: "
+        f"fixed optimizer_steps from config={initial_round_steps}"
+    )
+
     policy_type = infer_policy_type(cfg.policy_type, base_training_config)
+
+    initial_num_frames = dataset_frame_count(repo_id=cfg.repo_id, dataset_root=cfg.dataset_root)
+    initial_epochs = (
+        float(initial_round_steps) * float(base_batch_size) / float(initial_num_frames)
+    )
+    print(
+        "Initial round dataset schedule: "
+        f"frames={initial_num_frames}, optimizer_steps={initial_round_steps}, "
+        f"approx_epochs={initial_epochs:.2f}"
+    )
+
+    def evaluate_trained_policy(
+        label: str,
+        model_dir: Path,
+    ) -> None:
+        if cfg.eval_episodes == 0:
+            return
+
+        eval_simulator = DynamicsFactory.create(system_name=cfg.system, config=validated_experiment_config)
+        eval_steps = cfg.eval_steps if cfg.eval_steps is not None else cfg.steps_per_trajectory
+        eval_policy = load_lerobot_policy(
+            policy_type=policy_type,
+            model_dir=model_dir,
+            device=device,
+        )
+
+        def action_fn(observation: np.ndarray) -> np.ndarray:
+            policy_input = create_policy_input(
+                simulator=eval_simulator,
+                observation=observation,
+                device=device,
+            )
+            with torch.inference_mode():
+                action_tensor = eval_policy.select_action(policy_input)
+            return action_tensor.squeeze(0).cpu().numpy()
+
+        reset_fn = eval_policy.reset if hasattr(eval_policy, "reset") else None
+        metrics = evaluate_policy_rollouts(
+            simulator=eval_simulator,
+            num_episodes=cfg.eval_episodes,
+            num_steps=eval_steps,
+            seed_start=cfg.eval_seed_start,
+            action_fn=action_fn,
+            reset_fn=reset_fn,
+            action_noise_std=cfg.eval_action_noise_std,
+        )
+        if metrics is None:
+            return
+        print_rollout_metrics(label=label, prefix="eval", metrics=metrics)
+        del eval_policy
+        gc.collect()
 
     print("\n=== Initial LeRobot training pass (no aggregation) ===")
     previous_pretrained_path = run_training_round(
@@ -386,6 +564,11 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         pretrained_path=cfg.initial_pretrained_path,
         disable_push_to_hub=cfg.disable_push_to_hub,
         train_output_root=cfg.train_output_root,
+        steps_override=initial_round_steps,
+    )
+    evaluate_trained_policy(
+        label="Round 0 evaluation",
+        model_dir=previous_pretrained_path,
     )
 
     if cfg.dagger_iterations == 0:
@@ -410,7 +593,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
 
         dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
         try:
-            collected_episodes = collect_lerobot_dagger_data(
+            aggregation_metrics = collect_lerobot_dagger_data(
                 simulator=simulator,
                 expert_planner=expert_planner,
                 policy=policy,
@@ -418,6 +601,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 trajectories_per_iteration=cfg.trajectories_per_iteration,
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 device=device,
+                action_noise_std=cfg.action_noise_std,
             )
         finally:
             dataset_writer.finalize()
@@ -425,7 +609,24 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             del policy
             gc.collect()
 
-        print(f"Collected {collected_episodes} new DAgger episodes")
+        print_rollout_metrics(
+            label=f"Refinement {refinement} aggregation",
+            prefix="aggregation",
+            metrics=aggregation_metrics,
+        )
+
+        refinement_num_frames = dataset_frame_count(repo_id=cfg.repo_id, dataset_root=cfg.dataset_root)
+        refinement_steps, refinement_epochs = resolve_round_steps(
+            num_frames=refinement_num_frames,
+            batch_size=base_batch_size,
+            target_epochs_per_round=cfg.target_epochs_per_round,
+            max_train_steps=cfg.max_train_steps,
+        )
+        print(
+            "Refinement dataset schedule: "
+            f"frames={refinement_num_frames}, optimizer_steps={refinement_steps}, "
+            f"approx_epochs={refinement_epochs:.2f}"
+        )
 
         previous_pretrained_path = run_training_round(
             base_training_config=base_training_config,
@@ -434,9 +635,23 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             pretrained_path=previous_pretrained_path,
             disable_push_to_hub=cfg.disable_push_to_hub,
             train_output_root=cfg.train_output_root,
+            steps_override=refinement_steps,
+        )
+        evaluate_trained_policy(
+            label=f"Refinement {refinement} evaluation",
+            model_dir=previous_pretrained_path,
         )
 
     print("\nLeRobot DAgger loop complete.")
+
+
+def print_rollout_metrics(label: str, prefix: str, metrics: DaggerEvalMetrics) -> None:
+    print(
+        f"{label}: {prefix}_success_rate={100.0 * metrics.success_rate:.1f}% "
+        f"{prefix}_mean_steps={metrics.mean_steps:.2f} "
+        f"{prefix}_min_steps={metrics.min_steps} {prefix}_max_steps={metrics.max_steps} "
+        f"episodes={metrics.num_episodes}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -510,6 +725,15 @@ def parse_args() -> argparse.Namespace:
         help="maximum rollout steps per learner trajectory",
     )
     parser.add_argument(
+        "--action-noise-std",
+        type=float,
+        default=0.0,
+        help=(
+            "std-dev of Gaussian action noise applied during DAgger rollout execution; "
+            "expert labels remain noise-free"
+        ),
+    )
+    parser.add_argument(
         "--train-output-root",
         type=Path,
         default=Path("outputs/train"),
@@ -527,8 +751,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=99,
         help="random seed",
+    )
+    parser.add_argument(
+        "--target-epochs-per-round",
+        type=float,
+        default=30.0,
+        help="target number of dataset epochs to train per round",
+    )
+    parser.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=10,
+        help="number of seeded rollouts used for in-loop policy evaluation after each retrain",
+    )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=None,
+        help="maximum rollout steps used for in-loop evaluation (defaults to --steps-per-trajectory)",
+    )
+    parser.add_argument(
+        "--eval-seed-start",
+        type=int,
+        default=10000,
+        help="first deterministic seed used to generate evaluation initial states",
+    )
+    parser.add_argument(
+        "--eval-action-noise-std",
+        type=float,
+        default=0.0,
+        help="std-dev of Gaussian action noise applied during in-loop evaluation rollouts",
+    )
+    parser.add_argument(
+        "--max-train-steps",
+        type=int,
+        default=None,
+        help=(
+            "optional upper bound on per-round training steps"
+        ),
     )
     parser.add_argument(
         "--allow-push-to-hub",
@@ -551,11 +813,18 @@ def main() -> None:
         dagger_iterations=args.dagger_iterations,
         trajectories_per_iteration=args.trajectories_per_iteration,
         steps_per_trajectory=args.steps_per_trajectory,
+        action_noise_std=args.action_noise_std,
         train_output_root=args.train_output_root,
         seed=args.seed,
         policy_type=args.policy_type,
         initial_pretrained_path=args.initial_pretrained_path,
         disable_push_to_hub=not args.allow_push_to_hub,
+        target_epochs_per_round=args.target_epochs_per_round,
+        eval_episodes=args.eval_episodes,
+        eval_steps=args.eval_steps,
+        eval_seed_start=args.eval_seed_start,
+        eval_action_noise_std=args.eval_action_noise_std,
+        max_train_steps=args.max_train_steps,
     )
 
     run_lerobot_dagger(cfg)

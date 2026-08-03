@@ -203,6 +203,7 @@ class MultiRobotSimulator(DynamicsSimulator):
             sim.reset(robot_state)
         self.state = state.copy()
         self.time = 0
+        self.reset_rollout_termination()
         return self.state
 
     def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
@@ -332,7 +333,10 @@ class MultiRobotSimulator(DynamicsSimulator):
         return np.concatenate(states)
 
     def reset_random(self) -> np.ndarray:
-        states = [sim.reset_random() for sim in self.simulators]
+        states = []
+        for sim in self.simulators:
+            sim.randomize_goal_for_reset(self._sampling_rng)
+            states.append(sim.random_initial_state(self._sampling_rng))
         return self.reset(np.concatenate(states))
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:

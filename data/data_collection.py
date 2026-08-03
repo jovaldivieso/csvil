@@ -58,7 +58,6 @@ class DataCollector:
 
             # Ask the simulator to initialize itself in a random, valid way
             state = self.sim.reset_random()
-            done_counter = 0
             planner_failed = False
 
             # Tell the planner a new episode is starting!
@@ -100,11 +99,8 @@ class DataCollector:
                 dataset.add_frame(frame_data)
                 state = self.sim.step(state, executed_action)
 
-                # Break so it learns to hold its position and stop
-                if self.sim.is_done(state):
-                    done_counter += 1
-                    if done_counter >= 5:
-                        break
+                if self.sim.should_terminate_rollout(state):
+                    break
 
             if planner_failed:
                 continue

@@ -18,6 +18,21 @@ from systems.dynamics import DynamicsProtocol
 from utils import plot_xy_trajectories, save_xy_rollout_video
 
 
+DEFAULT_SINGLE_ROBOT_SEED = 1
+DEFAULT_MULTI_ROBOT_SEED_BASE = 1
+DEFAULT_MULTI_ROBOT_SEED_STRIDE = 100
+
+
+def default_seed_argument_for_simulator(simulator: DynamicsProtocol) -> list[int] | list[list[int]]:
+    if simulator.num_robots <= 1:
+        return [DEFAULT_SINGLE_ROBOT_SEED]
+    return [[DEFAULT_MULTI_ROBOT_SEED_BASE + DEFAULT_MULTI_ROBOT_SEED_STRIDE * robot_idx] for robot_idx in range(simulator.num_robots)]
+
+
+def default_plot_output_path(system: str, planner_name: str) -> str:
+    return os.path.join("outputs", "plots", f"{system}_{planner_name}_expert_rollouts.pdf")
+
+
 def pairwise_distance_report(
     simulator: DynamicsProtocol,
     trajectories: list[np.ndarray],
@@ -60,11 +75,11 @@ def pairwise_distance_report(
 
 def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
     if raw_seeds is None:
-        return [42]
+        return []
 
     text = raw_seeds.strip()
     if text == "":
-        return [42]
+        return []
 
     try:
         parsed = ast.literal_eval(text)
@@ -78,7 +93,7 @@ def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
         return [parsed]
     if isinstance(parsed, list):
         if len(parsed) == 0:
-            return [42]
+            return []
         if all(isinstance(x, int) for x in parsed):
             return [int(x) for x in parsed]
         if all(isinstance(x, list) for x in parsed):
@@ -102,7 +117,7 @@ def normalize_seed_specs(
     seeds: list[int] | list[list[int]],
 ) -> list[int | list[int]]:
     if len(seeds) == 0:
-        return [42]
+        return default_seed_argument_for_simulator(simulator)
 
     if isinstance(seeds[0], list):
         seed_lists = seeds  # type: ignore[assignment]
@@ -166,10 +181,6 @@ def rollout_trajectory(
     reached_goal = False
 
     for _ in range(num_steps):
-        if simulator.is_done(state):
-            reached_goal = True
-            break
-
         observation = simulator.observe(state)
         action = planner(observation)
 
@@ -189,6 +200,9 @@ def rollout_trajectory(
 
         state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
+        if simulator.should_terminate_rollout(state):
+            reached_goal = True
+            break
 
     if simulator.is_done(state):
         reached_goal = True
@@ -216,8 +230,7 @@ def run_plotting(
     )
 
     output_path = output_path or os.path.join(
-        os.path.dirname(__file__),
-        f"{system}_{planner_name}_paths.pdf",
+        default_plot_output_path(system=system, planner_name=planner_name),
     )
 
     output_dir = os.path.dirname(output_path)
@@ -309,9 +322,9 @@ def main():
     parser.add_argument(
         "--seeds",
         type=str,
-        default="42",
+        default=None,
         help=(
-            "seed specification: int ('42'), list ('[42, 7]'), or nested per-robot lists "
+            "seed specification: int ('1'), list ('[1, 7]'), or nested per-robot lists "
             "('[[10, 4, 2], [21, 0, 9]]')."
         ),
     )

@@ -47,6 +47,7 @@ def _build_simulators() -> dict[str, DynamicsProtocol]:
         config={
             "dt": 0.05,
             "goal": [0.0, 0.0, 0.0],
+            "randomize_goal": False,
             "randomize_initial_velocity": False,
         },
     )
@@ -220,6 +221,168 @@ class SimulatorContractTests(unittest.TestCase):
 
             if state.shape[0] > 3:
                 np.testing.assert_allclose(recovered_state[3:], state[3:], atol=1e-9)
+
+    def test_randomize_goal_hook_is_formalized_across_simulators(self) -> None:
+        simulators = _build_simulators()
+
+        for name, simulator in simulators.items():
+            self.assertTrue(
+                hasattr(simulator, "randomize_goal_for_reset"),
+                f"{name}: simulator is missing randomize_goal_for_reset()",
+            )
+
+    def test_rollout_termination_api_is_formalized_across_simulators(self) -> None:
+        simulators = _build_simulators()
+
+        for name, simulator in simulators.items():
+            self.assertTrue(
+                hasattr(simulator, "reset_rollout_termination"),
+                f"{name}: simulator is missing reset_rollout_termination()",
+            )
+            self.assertTrue(
+                hasattr(simulator, "set_early_rollout_termination"),
+                f"{name}: simulator is missing set_early_rollout_termination()",
+            )
+            self.assertTrue(
+                hasattr(simulator, "should_terminate_rollout"),
+                f"{name}: simulator is missing should_terminate_rollout()",
+            )
+
+    def test_rollout_termination_state_resets_and_honors_hold_steps(self) -> None:
+        simulators = _build_simulators()
+
+        for name, simulator in simulators.items():
+            goal_state = simulator.goal_state
+            self.assertTrue(simulator.is_done(goal_state), f"{name}: goal state should satisfy is_done()")
+
+            hold_steps = int(simulator.config.get("done_hold_steps", 5))
+            self.assertGreaterEqual(hold_steps, 1)
+
+            simulator.reset(goal_state)
+            for step_idx in range(hold_steps - 1):
+                self.assertFalse(
+                    simulator.should_terminate_rollout(goal_state),
+                    f"{name}: termination triggered too early on step {step_idx + 1}",
+                )
+
+            self.assertTrue(
+                simulator.should_terminate_rollout(goal_state),
+                f"{name}: termination did not trigger on hold step {hold_steps}",
+            )
+
+            simulator.reset(goal_state)
+            self.assertFalse(
+                simulator.should_terminate_rollout(goal_state),
+                f"{name}: termination counter was not reset by reset()",
+            )
+
+    def test_unicycle2_randomized_goal_uses_normalized_bounds(self) -> None:
+        validated = validate_system_config(
+            system_name="unicycle2",
+            raw_config={
+                "dt": 0.05,
+                "randomize_goal": True,
+                "randomize_initial_velocity": False,
+                "max_accel": 0.25,
+                "max_speed": 0.5,
+                "max_omega": 0.5,
+            },
+        )
+
+        simulator = DynamicsFactory.create(system_name="unicycle2", config=validated)
+        simulator.reset_random()
+
+        self.assertEqual(validated["goal_position_bounds"], [-1.0, 1.0])
+        self.assertTrue(np.all(simulator.goal[:2] >= -1.0))
+        self.assertTrue(np.all(simulator.goal[:2] <= 1.0))
+
+    def test_seeded_reset_random_respects_configured_start_region(self) -> None:
+        def position_distance_to_goal(simulator: DynamicsProtocol, state: np.ndarray) -> float:
+            if simulator.num_robots == 1:
+                return float(np.linalg.norm(state[:2] - simulator.goal_state[:2]))
+
+            distances = []
+            for sub_sim, state_slice in zip(simulator.simulators, simulator.robot_state_slices):
+                robot_state = state[state_slice]
+                distances.append(float(np.linalg.norm(robot_state[:2] - sub_sim.goal_state[:2])))
+            return min(distances)
+
+        configs = {
+            "single_integrator": {
+                "dt": 0.05,
+                "goal": [0.0, 0.0],
+                "randomize_goal": False,
+                "initial_position_radius_bounds": [0.0, 1.0],
+                "initial_position_min_goal_distance": 0.25,
+                "initial_state_seed": 13,
+            },
+            "double_integrator": {
+                "dt": 0.05,
+                "goal": [0.0, 0.0],
+                "randomize_goal": False,
+                "initial_position_radius_bounds": [0.0, 1.0],
+                "initial_position_min_goal_distance": 0.25,
+                "initial_state_seed": 13,
+            },
+            "unicycle1": {
+                "dt": 0.05,
+                "goal": [0.0, 0.0, 0.0],
+                "randomize_goal": False,
+                "initial_position_radius_bounds": [0.0, 1.0],
+                "initial_position_min_goal_distance": 0.25,
+                "initial_state_seed": 13,
+            },
+            "unicycle2": {
+                "dt": 0.05,
+                "goal": [0.0, 0.0, 0.0],
+                "randomize_initial_velocity": False,
+                "initial_position_radius_bounds": [0.0, 1.0],
+                "initial_position_min_goal_distance": 0.25,
+                "initial_state_seed": 13,
+            },
+            "multi_robot": {
+                "dt": 0.05,
+                "d_safe": 0.1,
+                "initial_state_seed": 13,
+                "robots": [
+                    {
+                        "system": "double_integrator",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [0.0, 0.0],
+                            "randomize_goal": False,
+                            "initial_position_radius_bounds": [0.0, 1.0],
+                            "initial_position_min_goal_distance": 0.25,
+                        },
+                    },
+                    {
+                        "system": "double_integrator",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [2.0, -1.0],
+                            "randomize_goal": False,
+                            "initial_position_radius_bounds": [0.0, 1.0],
+                            "initial_position_min_goal_distance": 0.25,
+                        },
+                    },
+                ],
+            },
+        }
+
+        for name, raw_config in configs.items():
+            validated = validate_system_config(system_name=name, raw_config=raw_config)
+            simulator_a = DynamicsFactory.create(system_name=name, config=validated)
+            simulator_b = DynamicsFactory.create(system_name=name, config=validated)
+
+            state_a = simulator_a.reset_random()
+            state_b = simulator_b.reset_random()
+
+            np.testing.assert_allclose(state_a, state_b, atol=1e-9)
+            self.assertGreater(
+                position_distance_to_goal(simulator_a, state_a),
+                0.25,
+                f"{name}: reset_random sampled inside the configured minimum goal distance",
+            )
 
     def test_multi_robot_per_robot_r_weights(self) -> None:
         raw_config = {
