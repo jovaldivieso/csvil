@@ -99,10 +99,14 @@ class SingleIntegrator(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        radius = rng.uniform(0.5, 3.0)
-        angle = rng.uniform(0.0, 2 * np.pi)
-        offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
-        return self.goal + offset
+        while True:
+            radius = rng.uniform(0.5, 3.0)
+            angle = rng.uniform(0.0, 2 * np.pi)
+            offset = radius * np.array([np.cos(angle), np.sin(angle)])
+            initial_state = self.goal + offset
+
+            if np.all((initial_state >= self.environment_min) & (initial_state <= self.environment_max)):
+                return initial_state
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)

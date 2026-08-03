@@ -120,11 +120,14 @@ class Unicycle1(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        radius = rng.uniform(0.5, 3.0)
-        angle = rng.uniform(0.0, 2 * np.pi)
-        pos = self.goal[:2] + radius * np.array([np.cos(angle), np.sin(angle)])
-        theta = rng.uniform(low=-np.pi, high=np.pi)
-        return np.array([pos[0], pos[1], theta])
+        while True:
+            radius = rng.uniform(0.5, 3.0)
+            angle = rng.uniform(0.0, 2 * np.pi)
+            pos = self.goal[:2] + radius * np.array([np.cos(angle), np.sin(angle)])
+
+            if np.all((pos >= self.environment_min) & (pos <= self.environment_max)):
+                theta = rng.uniform(-np.pi, np.pi)
+                return np.array([pos[0], pos[1], theta])
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)
