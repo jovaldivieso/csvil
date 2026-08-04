@@ -239,6 +239,7 @@ python test/collect_expert_data.py \
 --system multi_robot \
 --planner casadi \
 --config test/config/multi_double_integrator_casadi_config.yaml \
+--action-noise-std 0.03 \
 --initial-states '[
   [[ 0.0, 1.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]],
   [[ 0.0, 1.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]],
@@ -251,7 +252,6 @@ python test/collect_expert_data.py \
   [[ 0.0, 1.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]],
   [[ 0.0, 1.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]]
 ]'
---action-noise-std 0.03
 ```
 
 ### Visualize expert trajectories
@@ -281,14 +281,14 @@ Collision-avoidance-focused multi-robot example with an explicit start configura
 
 ```bash
 python test/plot_expert_trajectories.py \
-  --system multi_robot \
-  --planner casadi \
-  --config test/config/multi_double_integrator_casadi_config.yaml \
-  --num-steps 150 \
-  --output-path outputs/plots/multi_robot_collision_focus.pdf \
-  --initial-states '[
-    [[ 0.0, 1.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]]
-  ]'
+--system multi_robot \
+--planner casadi \
+--config test/config/multi_double_integrator_casadi_config.yaml \
+--num-steps 150 \
+--output-path outputs/plots/multi_robot_collision_focus.pdf \
+--initial-states '[
+  [[ 0.0, 1.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]]
+]'
 ```
 
 The plotter also supports the same execution-time action noise used in data
@@ -386,7 +386,7 @@ docker compose run --rm csvil \
 python learning/train_lerobot_dagger.py \
 --system double_integrator \
 --experiment-config test/config/double_integrator_casadi_config.yaml \
---lerobot-train-config learning/config/double_integrator_casadi_<act|diffusion_policy>_config.yaml \
+--lerobot-train-config learning/config/double_integrator_casadi_act_config.yaml \
 --repo-id local/double_integrator_casadi_expert \
 --dataset-root data/lerobot_dataset_double_integrator_casadi \
 --dagger-iterations 1 \

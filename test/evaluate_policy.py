@@ -204,7 +204,7 @@ def rollout_planner(
     planner.reset()
     trajectory = [state.copy()]
 
-    if simulator.should_terminate_rollout(state):
+    if simulator.is_done(state):
         return np.asarray(trajectory)
 
     for _ in range(num_steps):
@@ -347,15 +347,14 @@ def run_evaluation(
             f"{total_rollouts} trajectories "
             f"({len(initial_state_specs)} explicit initial states + RNG fallback)"
         )
-        rollout_plan: list[tuple[np.ndarray, np.ndarray, Any, str, int]] = []
+        rollout_plan: list[tuple[Any, str, int, Any]] = []
         for rollout_idx in range(total_rollouts):
             if rollout_idx < len(initial_state_specs):
-                initial_state = simulator.validate_state(initial_state_specs[rollout_idx])
+                initial_state_spec: Any = simulator.validate_state(initial_state_specs[rollout_idx]).copy()
                 initial_state_source = "provided"
             else:
-                initial_state = simulator.reset_random().copy()
+                initial_state_spec = None
                 initial_state_source = "rng_fallback"
-            goal_state = simulator.goal_state.copy()
 
             if rollout_idx < len(seed_specs):
                 seed_spec = seed_specs[rollout_idx]
@@ -365,26 +364,33 @@ def run_evaluation(
                 torch_seed = rollout_idx + 1
                 seed_value = None
 
-            rollout_plan.append((initial_state, goal_state, seed_value, initial_state_source, torch_seed))
+            rollout_plan.append((initial_state_spec, initial_state_source, torch_seed, seed_value))
     else:
         print(f"evaluating {len(seed_specs)} seeded trajectories")
-        rollout_plan: list[tuple[np.ndarray, np.ndarray, Any, str, int]] = []
+        rollout_plan = []
         for seed_spec in seed_specs:
             torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
-            initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
-            goal_state = simulator.goal_state.copy()
             rollout_plan.append(
                 (
-                    initial_state,
-                    goal_state,
                     seed_spec,
                     "seeded",
                     torch_seed,
+                    seed_spec,
                 )
             )
 
-    for initial_state, goal_state, seed_value, initial_state_source, torch_seed in rollout_plan:
+    for rollout_spec, initial_state_source, torch_seed, seed_value in rollout_plan:
         torch.manual_seed(torch_seed)
+
+        if initial_state_source == "seeded":
+            seed_spec = rollout_spec
+            initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+        elif initial_state_source == "provided":
+            initial_state = simulator.validate_state(rollout_spec).copy()
+        else:
+            initial_state = simulator.reset_random().copy()
+
+        goal_state = simulator.goal_state.copy()
 
         expert_trajectory = rollout_planner(
             simulator=simulator,

@@ -174,7 +174,7 @@ def rollout_trajectory(
     planner.reset()
 
     trajectory = [state.copy()]
-    reached_goal = simulator.should_terminate_rollout(state)
+    reached_goal = simulator.is_done(state)
     if reached_goal:
         return np.asarray(trajectory), reached_goal
 
@@ -247,21 +247,31 @@ def run_plotting(
             f"{num_traj} trajectories "
             f"({len(initial_state_specs)} explicit initial states + RNG fallback)..."
         )
-        initial_state_plan = [
-            simulator.validate_state(initial_state_specs[idx]).copy()
+        initial_state_plan: list[tuple[Any, str]] = [
+            (
+                simulator.validate_state(initial_state_specs[idx]).copy(),
+                "provided",
+            )
             if idx < len(initial_state_specs)
-            else simulator.reset_random().copy()
+            else (None, "rng_fallback")
             for idx in range(num_traj)
         ]
     else:
         num_traj = len(seed_specs)
         print(f"simulating {num_traj} randomized trajectories...")
         initial_state_plan = [
-            sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+            (seed_spec, "seeded")
             for seed_spec in seed_specs
         ]
 
-    for initial_state in initial_state_plan:
+    for initial_state_spec, initial_state_source in initial_state_plan:
+        if initial_state_source == "seeded":
+            initial_state = sample_initial_state(simulator=simulator, seed_spec=initial_state_spec)
+        elif initial_state_source == "provided":
+            initial_state = simulator.validate_state(initial_state_spec).copy()
+        else:
+            initial_state = simulator.reset_random().copy()
+
         trajectory, reached_goal = rollout_trajectory(
             simulator=simulator,
             planner=planner,
