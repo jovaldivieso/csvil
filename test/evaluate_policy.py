@@ -482,8 +482,10 @@ def run_evaluation(
         tuple(np.asarray(metric["goal_state"], dtype=float).tolist())
         for metric in per_seed_metrics
     }
+    summary_goal_state: list[float] | None = None
     if len(unique_goal_states) == 1:
         only_goal_state = np.asarray(next(iter(unique_goal_states)), dtype=float)
+        summary_goal_state = only_goal_state.tolist()
         print(f"goal_state: {np.array2string(only_goal_state, precision=4)}")
     else:
         print("goal_state: varies per seed (goal randomization enabled)")
@@ -496,8 +498,9 @@ def run_evaluation(
     print(f"mean_expert_goal_error_l2: {mean_expert_error:.6f}")
 
     # Dynamically set output names
-    output_path = output_path or os.path.join(
-        default_evaluation_output_path(system=system, policy_type=policy_type),
+    output_path = output_path or default_evaluation_output_path(
+        system=system,
+        policy_type=policy_type,
     )
 
     system_title = system.replace("_", " ").title()
@@ -548,7 +551,8 @@ def run_evaluation(
         "seeds": seed_specs,
         "device": str(device),
         "action_noise_std": action_noise_std,
-        "goal_state": goal_state,
+        "goal_state": summary_goal_state,
+        "goal_state_varies_by_seed": len(unique_goal_states) > 1,
         "num_trajectories": total_runs,
         "policy_successes": total_successes,
         "success_rate": success_rate,

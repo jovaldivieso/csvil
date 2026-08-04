@@ -252,8 +252,9 @@ def run_plotting(
         config=validated_config,
     )
 
-    output_path = output_path or os.path.join(
-        default_plot_output_path(system=system, planner_name=planner_name),
+    output_path = output_path or default_plot_output_path(
+        system=system,
+        planner_name=planner_name,
     )
 
     output_dir = os.path.dirname(output_path)
