@@ -69,11 +69,15 @@ def apply_execution_noise(
     simulator: DynamicsProtocol,
     action: np.ndarray,
     action_noise_std: float,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     if action_noise_std <= 0.0:
         return action
 
-    noise = np.random.normal(
+    if rng is None:
+        rng = np.random.default_rng()
+
+    noise = rng.normal(
         loc=0.0,
         scale=action_noise_std,
         size=action.shape,
@@ -92,6 +96,7 @@ def rollout_policy_with_action_fn(
     action_fn: Callable[[np.ndarray], np.ndarray],
     reset_fn: Callable[[], None] | None = None,
     action_noise_std: float = 0.0,
+    action_noise_rng: np.random.Generator | None = None,
 ) -> tuple[bool, int]:
     state = simulator.reset(initial_state)
     if reset_fn is not None:
@@ -104,6 +109,7 @@ def rollout_policy_with_action_fn(
             simulator=simulator,
             action=action,
             action_noise_std=action_noise_std,
+            rng=action_noise_rng,
         )
         state = simulator.step(state, executed_action)
 
@@ -111,6 +117,15 @@ def rollout_policy_with_action_fn(
             return True, step
 
     return False, num_steps
+
+
+def action_noise_rng_from_seed_spec(seed_spec: int | list[int]) -> np.random.Generator:
+    if isinstance(seed_spec, int):
+        return np.random.default_rng(np.random.SeedSequence([int(seed_spec), 1]))
+
+    return np.random.default_rng(
+        np.random.SeedSequence([int(seed) for seed in seed_spec] + [1])
+    )
 
 
 def evaluate_policy_rollouts(
@@ -137,6 +152,7 @@ def evaluate_policy_rollouts(
     steps_taken: list[int] = []
     for seed_spec in seed_specs:
         initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+        action_noise_rng = action_noise_rng_from_seed_spec(seed_spec)
         reached_goal, rollout_steps = rollout_policy_with_action_fn(
             simulator=simulator,
             initial_state=initial_state,
@@ -144,6 +160,7 @@ def evaluate_policy_rollouts(
             action_fn=action_fn,
             reset_fn=reset_fn,
             action_noise_std=action_noise_std,
+            action_noise_rng=action_noise_rng,
         )
         successes += int(reached_goal)
         steps_taken.append(int(rollout_steps))
