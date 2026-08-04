@@ -117,7 +117,7 @@ def normalize_seed_specs(
     seeds: list[int] | list[list[int]],
 ) -> list[int | list[int]]:
     if len(seeds) == 0:
-        return default_seed_argument_for_simulator(simulator)
+        seeds = default_seed_argument_for_simulator(simulator)
 
     if isinstance(seeds[0], list):
         seed_lists = seeds  # type: ignore[assignment]

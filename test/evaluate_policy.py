@@ -87,11 +87,8 @@ def normalize_seed_specs(
     simulator: DynamicsProtocol,
     seeds: list[int] | list[list[int]] | None,
 ) -> list[int | list[int]]:
-    if seeds is None:
-        return default_seed_argument_for_simulator(simulator)
-
-    if len(seeds) == 0:
-        return default_seed_argument_for_simulator(simulator)
+    if seeds is None or len(seeds) == 0:
+        seeds = default_seed_argument_for_simulator(simulator)
 
     if isinstance(seeds[0], list):
         seed_lists = seeds  # type: ignore[assignment]

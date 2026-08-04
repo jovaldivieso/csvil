@@ -22,7 +22,7 @@ policy:
   # Horizon & History adjustments
   horizon: 16
   n_action_steps: 4             # Execute 4 steps before re-sampling
-  n_obs_steps: 3                # Capture last observation frame
+  n_obs_steps: 3                # Capture observation history
   
   normalization_mapping:
     STATE: MIN_MAX
