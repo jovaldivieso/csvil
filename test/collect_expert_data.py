@@ -10,7 +10,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
-from core.initial_state_utils import parse_initial_states_argument
+from systems.initial_state_utils import parse_initial_states_argument
 from utils import collect_expert_data
 
 

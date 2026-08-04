@@ -61,8 +61,11 @@ class DataCollector:
             # Use provided initial states first; then fall back to simulator RNG.
             if attempted_trajectories <= len(provided_initial_states):
                 state = self.sim.reset(provided_initial_states[attempted_trajectories - 1])
+                initial_state_source = "provided"
             else:
                 state = self.sim.reset_random()
+                initial_state_source = "rng_fallback"
+            episode_initial_state = state.copy()
             planner_failed = False
 
             # Tell the planner a new episode is starting!
@@ -77,9 +80,17 @@ class DataCollector:
                     action = motion_planner(obs)
                 except PlannerSolveError as exc:
                     print(
-                        "Skipping trajectory due to planner failure: "
-                        f"{exc}"
+                        "Skipping trajectory due to planner failure "
+                        f"(attempt={attempted_trajectories}, source={initial_state_source}, "
+                        f"action_noise_std={action_noise_std:.6f})."
                     )
+                    print(
+                        "Planner failure context: "
+                        f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
+                        f"current_state={np.array2string(np.asarray(state), precision=6)}, "
+                        f"goal_state={np.array2string(np.asarray(self.sim.goal_state), precision=6)}"
+                    )
+                    print(f"Underlying solver error: {exc}")
                     planner_failed = True
                     break
 

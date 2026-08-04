@@ -13,11 +13,12 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
-from core.initial_state_utils import (
+from systems.initial_state_utils import (
     normalize_initial_state_specs,
     parse_initial_states_argument,
 )
-from core.seed_utils import default_seed_argument_for_simulator
+from systems.seed_utils import default_seed_argument_for_simulator
+from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from utils import plot_xy_trajectories, save_xy_rollout_video
@@ -156,7 +157,10 @@ def rollout_trajectory(
     initial_state: np.ndarray,
     num_steps: int,
     action_noise_std: float = 0.0,
-) -> tuple[np.ndarray, bool]:
+    rollout_id: int | None = None,
+    seed_value: Any | None = None,
+    initial_state_source: str | None = None,
+) -> tuple[np.ndarray, bool, bool]:
     """
     simulates one trajectory controlled by a planner
 
@@ -176,11 +180,30 @@ def rollout_trajectory(
     trajectory = [state.copy()]
     reached_goal = simulator.is_done(state)
     if reached_goal:
-        return np.asarray(trajectory), reached_goal
+        return np.asarray(trajectory), reached_goal, False
+
+    planner_failed = False
 
     for _ in range(num_steps):
         observation = simulator.observe(state)
-        action = planner(observation)
+        try:
+            action = planner(observation)
+        except PlannerSolveError as exc:
+            rollout_label = "?" if rollout_id is None else str(rollout_id)
+            print(
+                "Skipping trajectory due to planner failure "
+                f"(rollout={rollout_label}, source={initial_state_source}, seed={seed_value}, "
+                f"action_noise_std={action_noise_std:.6f})."
+            )
+            print(
+                "Planner failure context: "
+                f"initial_state={np.array2string(np.asarray(initial_state), precision=6)}, "
+                f"current_state={np.array2string(np.asarray(state), precision=6)}, "
+                f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
+            )
+            print(f"Underlying solver error: {exc}")
+            planner_failed = True
+            break
 
         if action_noise_std > 0.0:
             noise = np.random.normal(
@@ -202,7 +225,7 @@ def rollout_trajectory(
             reached_goal = True
             break
 
-    return np.asarray(trajectory), reached_goal
+    return np.asarray(trajectory), reached_goal, planner_failed
 
 
 def run_plotting(
@@ -238,6 +261,7 @@ def run_plotting(
         os.makedirs(output_dir, exist_ok=True)
 
     goals_reached = 0
+    failed_trajectories = 0
     trajectories: list[np.ndarray] = []
 
     if len(initial_state_specs) > 0:
@@ -264,21 +288,31 @@ def run_plotting(
             for seed_spec in seed_specs
         ]
 
-    for initial_state_spec, initial_state_source in initial_state_plan:
+    for rollout_idx, (initial_state_spec, initial_state_source) in enumerate(initial_state_plan, start=1):
         if initial_state_source == "seeded":
             initial_state = sample_initial_state(simulator=simulator, seed_spec=initial_state_spec)
+            seed_value = initial_state_spec
         elif initial_state_source == "provided":
             initial_state = simulator.validate_state(initial_state_spec).copy()
+            seed_value = None
         else:
             initial_state = simulator.reset_random().copy()
+            seed_value = None
 
-        trajectory, reached_goal = rollout_trajectory(
+        trajectory, reached_goal, planner_failed = rollout_trajectory(
             simulator=simulator,
             planner=planner,
             initial_state=initial_state,
             num_steps=num_steps,
             action_noise_std=action_noise_std,
+            rollout_id=rollout_idx,
+            seed_value=seed_value,
+            initial_state_source=initial_state_source,
         )
+
+        if planner_failed:
+            failed_trajectories += 1
+            continue
 
         trajectories.append(trajectory)
 
@@ -286,6 +320,12 @@ def run_plotting(
             goals_reached += 1
 
     system_title = system.replace("_", " ").title()
+
+    if len(trajectories) == 0:
+        raise RuntimeError(
+            "All trajectories failed due to planner infeasibility. "
+            "Try lowering action noise, relaxing d_safe, or providing less adversarial initial states."
+        )
 
     show_heading = simulator.has_heading
 
@@ -314,7 +354,9 @@ def run_plotting(
         d_safe=d_safe,
     )
 
-    print(f"goal reached in {goals_reached}/{num_traj} trajectories")
+    print(f"goal reached in {goals_reached}/{len(trajectories)} successful trajectories")
+    if failed_trajectories > 0:
+        print(f"skipped {failed_trajectories}/{num_traj} trajectories due to planner failure")
     print(f"plot saved to {output_path}")
     if video_path is not None:
         print(f"video saved to {video_path}")

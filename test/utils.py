@@ -8,7 +8,7 @@ from matplotlib import animation
 from matplotlib import colors as mcolors
 
 from core.factory import DynamicsFactory, PlannerFactory
-from core.initial_state_utils import normalize_initial_state_specs
+from systems.initial_state_utils import normalize_initial_state_specs
 from data.data_collection import DataCollector
 
 

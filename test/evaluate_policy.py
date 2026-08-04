@@ -13,11 +13,11 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
-from core.initial_state_utils import (
+from systems.initial_state_utils import (
     normalize_initial_state_specs,
     parse_initial_states_argument,
 )
-from core.seed_utils import default_seed_argument_for_simulator
+from systems.seed_utils import default_seed_argument_for_simulator
 from planning.casadi_planner import PlannerSolveError
 from learning.models.mlp import MLPPolicy
 from planning.planner import PlannerProtocol
@@ -196,6 +196,9 @@ def rollout_planner(
     initial_state: np.ndarray,
     num_steps: int,
     action_noise_std: float = 0.0,
+    rollout_id: int | None = None,
+    seed_value: Any | None = None,
+    initial_state_source: str | None = None,
 ) -> np.ndarray:
     """
     Rolls out the expert planner from a given initial state.
@@ -213,7 +216,19 @@ def rollout_planner(
         try:
             action = planner(obs)
         except PlannerSolveError as exc:
-            print(f"Expert planner failed to solve during evaluation: {exc}")
+            rollout_label = "?" if rollout_id is None else str(rollout_id)
+            print(
+                "Expert planner failed during evaluation "
+                f"(rollout={rollout_label}, source={initial_state_source}, seed={seed_value}, "
+                f"action_noise_std={action_noise_std:.6f})."
+            )
+            print(
+                "Planner failure context: "
+                f"initial_state={np.array2string(np.asarray(initial_state), precision=6)}, "
+                f"current_state={np.array2string(np.asarray(state), precision=6)}, "
+                f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
+            )
+            print(f"Underlying solver error: {exc}")
             break
 
         executed_action = apply_execution_noise(
@@ -385,7 +400,7 @@ def run_evaluation(
                 )
             )
 
-    for rollout_spec, initial_state_source, torch_seed, seed_value in rollout_plan:
+    for rollout_idx, (rollout_spec, initial_state_source, torch_seed, seed_value) in enumerate(rollout_plan, start=1):
         torch.manual_seed(torch_seed)
 
         if initial_state_source == "seeded":
@@ -404,6 +419,9 @@ def run_evaluation(
             initial_state=initial_state,
             num_steps=num_steps,
             action_noise_std=action_noise_std,
+            rollout_id=rollout_idx,
+            seed_value=seed_value,
+            initial_state_source=initial_state_source,
         )
 
         policy_trajectory, reached_goal, steps_taken = rollout_policy(

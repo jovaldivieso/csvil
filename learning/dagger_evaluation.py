@@ -5,7 +5,7 @@ from typing import Callable
 
 import numpy as np
 
-from core.seed_utils import DEFAULT_MULTI_ROBOT_SEED_STRIDE
+from systems.seed_utils import DEFAULT_MULTI_ROBOT_SEED_STRIDE
 from systems.dynamics import DynamicsProtocol
 
 

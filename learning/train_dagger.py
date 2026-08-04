@@ -280,6 +280,9 @@ def collect_dagger_data(
             )
 
         state = simulator.reset_random()
+        episode_initial_state = state.copy()
+        episode_noise_seed = int(action_noise_rng.integers(0, 2**63 - 1))
+        episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
         planner_failed = False
         expert_planner.reset()
 
@@ -296,7 +299,18 @@ def collect_dagger_data(
             try:
                 expert_action = expert_planner(observation)
             except PlannerSolveError as exc:
-                print(f"Skipping episode due to planner failure: {exc}")
+                print(
+                    "Skipping episode due to planner failure "
+                    f"(attempt={attempted_episodes}, step={step}, action_noise_std={action_noise_std:.6f}, "
+                    f"noise_seed={episode_noise_seed})."
+                )
+                print(
+                    "Planner failure context: "
+                    f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
+                    f"current_state={np.array2string(np.asarray(state), precision=6)}, "
+                    f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
+                )
+                print(f"Underlying solver error: {exc}")
                 planner_failed = True
                 break
 
@@ -309,7 +323,7 @@ def collect_dagger_data(
                 simulator=simulator,
                 action=policy_action,
                 action_noise_std=action_noise_std,
-                rng=action_noise_rng,
+                rng=episode_action_noise_rng,
             )
             state = simulator.step(state, executed_action)
 

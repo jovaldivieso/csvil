@@ -146,6 +146,15 @@ def _optional_int(config: Mapping[str, Any], key: str) -> int | None:
     return int(value)
 
 
+def _optional_positive_int(config: Mapping[str, Any], key: str) -> int | None:
+    value = _optional_int(config, key)
+    if value is None:
+        return None
+    if value <= 0:
+        raise ConfigurationError(f"'{key}' must be positive when provided.")
+    return value
+
+
 def _bool(config: Mapping[str, Any], key: str, default: bool) -> bool:
     value = config.get(key, default)
     if not isinstance(value, bool):
@@ -443,6 +452,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             error_tolerance=error_tolerance,
             initial_state_seed=_optional_int(raw_config, "initial_state_seed"),
         )
+        done_hold_steps = _optional_positive_int(raw_config, "done_hold_steps")
 
         config_out: dict[str, Any] = {
             "dt": fleet_cfg.dt,
@@ -463,6 +473,8 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         }
         if fleet_cfg.initial_state_seed is not None:
             config_out["initial_state_seed"] = fleet_cfg.initial_state_seed
+        if done_hold_steps is not None:
+            config_out["done_hold_steps"] = done_hold_steps
 
         planner_cfg = _validate_planner(
             raw_config,
@@ -494,6 +506,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
     error_tolerance = _float(raw_config, "error_tolerance", 0.05)
     if error_tolerance <= 0:
         raise ConfigurationError("'error_tolerance' must be positive.")
+    done_hold_steps = _optional_positive_int(raw_config, "done_hold_steps")
 
     config_out: dict[str, Any]
     nx: int
@@ -647,4 +660,6 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         }
     )
     _preserve_db_lacam_config(raw_config, config_out)
+    if done_hold_steps is not None:
+        config_out["done_hold_steps"] = done_hold_steps
     return config_out
