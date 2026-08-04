@@ -206,7 +206,7 @@ def rollout_planner(
     planner.reset()
     trajectory = [state.copy()]
 
-    if simulator.is_done(state):
+    if simulator.should_terminate_rollout(state):
         return np.asarray(trajectory)
 
     for _ in range(num_steps):

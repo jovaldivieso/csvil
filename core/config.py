@@ -155,6 +155,15 @@ def _optional_positive_int(config: Mapping[str, Any], key: str) -> int | None:
     return value
 
 
+def _optional_non_negative_int(config: Mapping[str, Any], key: str) -> int | None:
+    value = _optional_int(config, key)
+    if value is None:
+        return None
+    if value < 0:
+        raise ConfigurationError(f"'{key}' must be non-negative when provided.")
+    return value
+
+
 def _bool(config: Mapping[str, Any], key: str, default: bool) -> bool:
     value = config.get(key, default)
     if not isinstance(value, bool):
@@ -226,7 +235,7 @@ def _initial_state_sampling(
     return InitialStateSamplingConfig(
         position_radius_bounds=(effective_radius_min, radius_max),
         min_goal_distance=min_goal_distance,
-        seed=_optional_int(raw_config, "initial_state_seed"),
+        seed=_optional_non_negative_int(raw_config, "initial_state_seed"),
     )
 
 
@@ -450,7 +459,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             robots=tuple(members),
             inter_robot_visibility_radius=visibility_radius,
             error_tolerance=error_tolerance,
-            initial_state_seed=_optional_int(raw_config, "initial_state_seed"),
+            initial_state_seed=_optional_non_negative_int(raw_config, "initial_state_seed"),
         )
         done_hold_steps = _optional_positive_int(raw_config, "done_hold_steps")
 

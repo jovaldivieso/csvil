@@ -177,7 +177,7 @@ def rollout_trajectory(
     planner.reset()
 
     trajectory = [state.copy()]
-    reached_goal = simulator.is_done(state)
+    reached_goal = simulator.should_terminate_rollout(state)
     if reached_goal:
         return np.asarray(trajectory), reached_goal, False
 
