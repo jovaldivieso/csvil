@@ -322,6 +322,7 @@ def collect_lerobot_dagger_data(
 
         reached_goal = False
         rollout_steps = steps_per_trajectory
+        episode_frames: list[dict[str, object]] = []
 
         for step in range(1, steps_per_trajectory + 1):
             observation = simulator.observe(state)
@@ -356,7 +357,7 @@ def collect_lerobot_dagger_data(
 
             frame_data = simulator.format_dataset_frame(observation, expert_action)
             frame_data["task"] = "reach target"
-            dataset_writer.add_frame(frame_data)
+            episode_frames.append(frame_data)
 
             # Environment advances with noisy learner action; labels remain clean expert corrections.
             executed_action = apply_execution_noise(
@@ -375,6 +376,8 @@ def collect_lerobot_dagger_data(
         if planner_failed:
             continue
 
+        for frame_data in episode_frames:
+            dataset_writer.add_frame(frame_data)
         dataset_writer.save_episode()
         successful_episodes += 1
         reached_goal_count += int(reached_goal)
