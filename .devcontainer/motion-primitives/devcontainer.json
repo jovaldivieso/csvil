@@ -1,0 +1,19 @@
+{
+    "name": "motion-primitives",
+    "dockerComposeFile": "../../compose.yaml",
+    "service": "motion-primitives",
+    "workspaceFolder": "/workspace",
+    "overrideCommand": true,
+    "remoteUser": "mambauser",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/opt/conda/bin/python"
+            },
+            "extensions": [
+                "ms-python.python",
+                "ms-python.debugpy"
+            ]
+        }
+    }
+}

@@ -47,6 +47,20 @@
                 "400",
                 "--use-config-start"
             ]
+        },
+        {
+            "name": "motion primitives",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/planning/generate_motion_primitives.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config",
+                "unicycle1_v0.yaml",
+                "--num-primitives",
+                "10"
+            ]
         }
     ]
 }

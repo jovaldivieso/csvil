@@ -1,11 +1,14 @@
 {
     "name": "db-lacam",
-    "dockerComposeFile": "../compose.yaml",
+    "dockerComposeFile": "../../compose.yaml",
     "service": "db-lacam",
     "workspaceFolder": "/workspace",
     "overrideCommand": true,
     "customizations": {
         "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/opt/venv/bin/python"
+            },
             "extensions": [
                 "ms-python.python",
                 "ms-python.debugpy"
