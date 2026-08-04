@@ -345,22 +345,28 @@ def run_evaluation(
         print(
             "evaluating "
             f"{total_rollouts} trajectories "
-            f"({len(initial_state_specs)} explicit initial states + RNG fallback)"
+            f"({len(initial_state_specs)} explicit initial states + seeded/RNG fallback)"
         )
         rollout_plan: list[tuple[Any, str, int, Any]] = []
         for rollout_idx in range(total_rollouts):
             if rollout_idx < len(initial_state_specs):
                 initial_state_spec: Any = simulator.validate_state(initial_state_specs[rollout_idx]).copy()
                 initial_state_source = "provided"
+                seed_value: Any = None
+                if rollout_idx < len(seed_specs):
+                    seed_spec = seed_specs[rollout_idx]
+                    torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
+                else:
+                    torch_seed = rollout_idx + 1
+            elif rollout_idx < len(seed_specs):
+                initial_state_spec = seed_specs[rollout_idx]
+                initial_state_source = "seeded"
+                seed_spec = seed_specs[rollout_idx]
+                torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
+                seed_value = seed_spec
             else:
                 initial_state_spec = None
                 initial_state_source = "rng_fallback"
-
-            if rollout_idx < len(seed_specs):
-                seed_spec = seed_specs[rollout_idx]
-                torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
-                seed_value: Any = seed_spec
-            else:
                 torch_seed = rollout_idx + 1
                 seed_value = None
 

@@ -100,6 +100,9 @@ def rollout_policy_with_action_fn(
     if reset_fn is not None:
         reset_fn()
 
+    if simulator.is_done(state):
+        return True, 0
+
     for step in range(1, num_steps + 1):
         observation = simulator.observe(state)
         action = action_fn(observation)

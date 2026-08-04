@@ -245,7 +245,7 @@ def run_plotting(
         print(
             "simulating "
             f"{num_traj} trajectories "
-            f"({len(initial_state_specs)} explicit initial states + RNG fallback)..."
+            f"({len(initial_state_specs)} explicit initial states + seeded/RNG fallback)..."
         )
         initial_state_plan: list[tuple[Any, str]] = [
             (
@@ -253,7 +253,7 @@ def run_plotting(
                 "provided",
             )
             if idx < len(initial_state_specs)
-            else (None, "rng_fallback")
+            else ((seed_specs[idx], "seeded") if idx < len(seed_specs) else (None, "rng_fallback"))
             for idx in range(num_traj)
         ]
     else:
