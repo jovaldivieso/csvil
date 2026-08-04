@@ -258,6 +258,7 @@ def collect_dagger_data(
     steps_per_trajectory: int,
     device: torch.device,
     action_noise_std: float,
+    action_noise_rng: np.random.Generator,
 ) -> DaggerEvalMetrics:
     """
     Roll out learner policy, query expert at visited states, aggregate labels.
@@ -308,6 +309,7 @@ def collect_dagger_data(
                 simulator=simulator,
                 action=policy_action,
                 action_noise_std=action_noise_std,
+                rng=action_noise_rng,
             )
             state = simulator.step(state, executed_action)
 
@@ -370,6 +372,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
     simulator = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
     device = get_training_device()
+    action_noise_rng = np.random.default_rng(cfg.seed)
 
     obs_feature_names = observation_feature_names(simulator)
     act_feature_names = action_feature_names(simulator)
@@ -508,6 +511,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 device=device,
                 action_noise_std=cfg.action_noise_std,
+                action_noise_rng=action_noise_rng,
             )
         finally:
             # LeRobot writes parquet chunks lazily; finalize guarantees readable footers.

@@ -206,9 +206,6 @@ def rollout_trajectory(
             reached_goal = True
             break
 
-    if simulator.is_done(state):
-        reached_goal = True
-
     return np.asarray(trajectory), reached_goal
 
 

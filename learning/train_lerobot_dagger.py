@@ -290,6 +290,7 @@ def collect_lerobot_dagger_data(
     steps_per_trajectory: int,
     device: torch.device,
     action_noise_std: float,
+    action_noise_rng: np.random.Generator,
 ) -> DaggerEvalMetrics:
     """
     Roll out LeRobot policy, query expert at visited states, append corrective labels.
@@ -348,6 +349,7 @@ def collect_lerobot_dagger_data(
                 simulator=simulator,
                 action=policy_action,
                 action_noise_std=action_noise_std,
+                rng=action_noise_rng,
             )
             state = simulator.step(state, executed_action)
 
@@ -456,6 +458,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         raise FileNotFoundError(f"Dataset root does not exist: {cfg.dataset_root}")
 
     set_seed(cfg.seed)
+    action_noise_rng = np.random.default_rng(cfg.seed)
     device = get_inference_device()
     print(f"Running LeRobot DAgger on device: {device}")
     print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
@@ -586,6 +589,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 device=device,
                 action_noise_std=cfg.action_noise_std,
+                action_noise_rng=action_noise_rng,
             )
         finally:
             dataset_writer.finalize()
