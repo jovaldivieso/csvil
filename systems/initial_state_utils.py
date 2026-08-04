@@ -29,7 +29,10 @@ def parse_initial_states_argument(raw_initial_states: str | None) -> Any | None:
 
 
 def _is_numeric_sequence(value: Any) -> bool:
-    return isinstance(value, (list, tuple)) and all(isinstance(x, Real) for x in value)
+    return isinstance(value, (list, tuple)) and all(
+        isinstance(x, Real) and not isinstance(x, bool)
+        for x in value
+    )
 
 
 def _as_state_vector(values: list[Any], expected_dim: int, context: str) -> np.ndarray:
@@ -62,7 +65,7 @@ def normalize_initial_state_specs(
     ]
 
     # Case 1: one global rollout state, e.g. [x, y, vx, vy]
-    if all(isinstance(x, Real) for x in values):
+    if all(isinstance(x, Real) and not isinstance(x, bool) for x in values):
         return [_as_state_vector(values, expected_dim=nx, context="Initial state")]
 
     if not all(isinstance(item, (list, tuple)) for item in values):

@@ -227,7 +227,7 @@ class SimulatorContractTests(unittest.TestCase):
 
         for name, simulator in simulators.items():
             self.assertTrue(
-                hasattr(simulator, "randomize_goal_for_reset"),
+                callable(getattr(simulator, "randomize_goal_for_reset", None)),
                 f"{name}: simulator is missing randomize_goal_for_reset()",
             )
 
@@ -236,15 +236,15 @@ class SimulatorContractTests(unittest.TestCase):
 
         for name, simulator in simulators.items():
             self.assertTrue(
-                hasattr(simulator, "reset_rollout_termination"),
+                callable(getattr(simulator, "reset_rollout_termination", None)),
                 f"{name}: simulator is missing reset_rollout_termination()",
             )
             self.assertTrue(
-                hasattr(simulator, "set_early_rollout_termination"),
+                callable(getattr(simulator, "set_early_rollout_termination", None)),
                 f"{name}: simulator is missing set_early_rollout_termination()",
             )
             self.assertTrue(
-                hasattr(simulator, "should_terminate_rollout"),
+                callable(getattr(simulator, "should_terminate_rollout", None)),
                 f"{name}: simulator is missing should_terminate_rollout()",
             )
 

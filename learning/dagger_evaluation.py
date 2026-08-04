@@ -47,7 +47,6 @@ def sample_initial_state(
         simulator.randomize_goal_for_reset(rng)
         return simulator.random_initial_state(rng)
 
-    sub_states = []
     sub_simulators = simulator.simulators
     if len(seed_spec) != len(sub_simulators):
         raise ValueError(
@@ -55,12 +54,12 @@ def sample_initial_state(
             f"Got {len(seed_spec)} seeds for {len(sub_simulators)} robots."
         )
 
-    for robot_seed, sub_sim in zip(seed_spec, sub_simulators):
-        rng = np.random.default_rng(int(robot_seed))
+    joint_seed_seq = np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec])
+    rng = np.random.default_rng(joint_seed_seq)
+    for sub_sim in sub_simulators:
         sub_sim.randomize_goal_for_reset(rng)
-        sub_states.append(sub_sim.random_initial_state(rng))
 
-    return np.concatenate(sub_states)
+    return simulator.random_initial_state(rng)
 
 
 def apply_execution_noise(
