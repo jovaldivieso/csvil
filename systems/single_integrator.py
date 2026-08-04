@@ -24,13 +24,25 @@ class SingleIntegrator(DynamicsSimulator):
         # Determine if we should randomize the goal based on config
         self.randomize_goal = config.get("randomize_goal",
                                          "goal" not in config)
+        self.goal_position_bounds = tuple(
+            float(value) for value in config.get("goal_position_bounds", [-1.0, 1.0])
+        )
         self.max_action = config.get("max_vel", 1.0)
         self.nx = 2
         self.nu = 2
         self.obs_dim = 4
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
-        
+        self.initial_position_min_goal_distance = float(
+            config.get("initial_position_min_goal_distance", self.error_tolerance)
+        )
+        self.initial_position_radius_bounds = tuple(
+            float(value)
+            for value in config.get(
+                "initial_position_radius_bounds",
+                [self.initial_position_min_goal_distance, 1.0],
+            )
+        )
         self.db_lacam_robot_type = "integrator1_2d_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
@@ -96,9 +108,11 @@ class SingleIntegrator(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        radius = rng.uniform(0.5, 3.0)
-        angle = rng.uniform(0.0, 2 * np.pi)
-        offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
+        offset = self.sample_planar_start_offset(
+            rng,
+            radius_bounds=self.initial_position_radius_bounds,
+            min_goal_distance=self.initial_position_min_goal_distance,
+        )
         return self.goal + offset
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
@@ -110,17 +124,13 @@ class SingleIntegrator(DynamicsSimulator):
     def goal_state(self) -> np.ndarray:
         return np.array([self.goal[0], self.goal[1]])
 
-    def reset_random(self) -> np.ndarray:
-        """Randomize start position, and optionally the goal."""
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         if self.randomize_goal:
-            self.goal = np.random.uniform(low=-5.0, high=5.0, size=2)
-
-        radius = np.random.uniform(0.5, 3.0)
-        angle = np.random.uniform(0, 2 * np.pi)
-        offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
-
-        start_pos = self.goal + offset
-        return self.reset(start_pos)
+            self.goal = rng.uniform(
+                low=self.goal_position_bounds[0],
+                high=self.goal_position_bounds[1],
+                size=self.goal.shape[0],
+            )
 
     def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
         """Package the observation and action into a dictionary for LeRobot"""
