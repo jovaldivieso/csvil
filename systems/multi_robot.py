@@ -334,6 +334,10 @@ class MultiRobotSimulator(DynamicsSimulator):
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
         return self._sample_safe_initial_state(rng=rng, randomize_goals=False)
 
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
+        for sim in self.simulators:
+            sim.randomize_goal_for_reset(rng)
+
     def reset_random(self) -> np.ndarray:
         return self.reset(
             self._sample_safe_initial_state(rng=self._sampling_rng, randomize_goals=True)
