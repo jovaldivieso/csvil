@@ -25,7 +25,11 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
-from learning.dagger_evaluation import DaggerEvalMetrics, evaluate_policy_rollouts
+from learning.dagger_evaluation import (
+    DaggerEvalMetrics,
+    apply_execution_noise,
+    evaluate_policy_rollouts,
+)
 from learning.train_lerobot import run_training
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
@@ -78,26 +82,6 @@ def create_policy_input(
             ).view(1, -1)
 
     return policy_input
-
-
-def apply_execution_noise(
-    simulator: DynamicsProtocol,
-    action: np.ndarray,
-    action_noise_std: float,
-) -> np.ndarray:
-    if action_noise_std <= 0.0:
-        return action
-
-    noise = np.random.normal(
-        loc=0.0,
-        scale=action_noise_std,
-        size=action.shape,
-    ).astype(action.dtype, copy=False)
-    return np.clip(
-        action + noise,
-        -simulator.max_action,
-        simulator.max_action,
-    )
 
 
 def load_lerobot_policy(

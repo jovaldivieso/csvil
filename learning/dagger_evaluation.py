@@ -45,7 +45,8 @@ def sample_initial_state(
     seed_spec: int | list[int],
 ) -> np.ndarray:
     if isinstance(seed_spec, int):
-        rng = np.random.default_rng(seed_spec)
+        rng = np.random.default_rng(int(seed_spec))
+        simulator.randomize_goal_for_reset(rng)
         return simulator.random_initial_state(rng)
 
     sub_states = []
@@ -58,6 +59,7 @@ def sample_initial_state(
 
     for robot_seed, sub_sim in zip(seed_spec, sub_simulators):
         rng = np.random.default_rng(int(robot_seed))
+        sub_sim.randomize_goal_for_reset(rng)
         sub_states.append(sub_sim.random_initial_state(rng))
 
     return np.concatenate(sub_states)

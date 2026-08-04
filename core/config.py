@@ -141,7 +141,7 @@ def _optional_int(config: Mapping[str, Any], key: str) -> int | None:
     value = config.get(key)
     if value is None:
         return None
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigurationError(f"'{key}' must be int when provided, got {type(value).__name__}.")
     return int(value)
 
