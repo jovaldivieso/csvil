@@ -164,7 +164,10 @@ class DynamicsSimulator(ABC):
         self._rollout_done_counter = 0
 
     def set_early_rollout_termination(self, enabled: bool) -> None:
-        self._early_rollout_termination_enabled = bool(enabled)
+        enabled_flag = bool(enabled)
+        if enabled_flag != self._early_rollout_termination_enabled:
+            self._rollout_done_counter = 0
+        self._early_rollout_termination_enabled = enabled_flag
 
     def should_terminate_rollout(self, state: np.ndarray) -> bool:
         if not self._early_rollout_termination_enabled:

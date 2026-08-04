@@ -13,6 +13,10 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
+from core.initial_state_utils import (
+    normalize_initial_state_specs,
+    parse_initial_states_argument,
+)
 from core.seed_utils import default_seed_argument_for_simulator
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
@@ -170,7 +174,9 @@ def rollout_trajectory(
     planner.reset()
 
     trajectory = [state.copy()]
-    reached_goal = False
+    reached_goal = simulator.should_terminate_rollout(state)
+    if reached_goal:
+        return np.asarray(trajectory), reached_goal
 
     for _ in range(num_steps):
         observation = simulator.observe(state)
@@ -205,6 +211,7 @@ def run_plotting(
     config: Mapping[str, Any],
     seeds: list[int] | list[list[int]],
     num_steps: int,
+    initial_states: Any | None = None,
     action_noise_std: float = 0.0,
     output_path: str | None = None,
 ) -> str:
@@ -212,6 +219,10 @@ def run_plotting(
 
     simulator = DynamicsFactory.create(system_name=system, config=validated_config)
     seed_specs = normalize_seed_specs(simulator=simulator, seeds=seeds)
+    initial_state_specs = normalize_initial_state_specs(
+        simulator=simulator,
+        initial_states=initial_states,
+    )
     planner = PlannerFactory.create(
         planner_name=planner_name,
         simulator=simulator,
@@ -226,13 +237,31 @@ def run_plotting(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    num_traj = len(seed_specs)
-    print(f"simulating {num_traj} randomized trajectories...")
-
     goals_reached = 0
     trajectories: list[np.ndarray] = []
-    for seed_spec in seed_specs:
-        initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+
+    if len(initial_state_specs) > 0:
+        num_traj = max(len(seed_specs), len(initial_state_specs))
+        print(
+            "simulating "
+            f"{num_traj} trajectories "
+            f"({len(initial_state_specs)} explicit initial states + RNG fallback)..."
+        )
+        initial_state_plan = [
+            simulator.validate_state(initial_state_specs[idx]).copy()
+            if idx < len(initial_state_specs)
+            else simulator.reset_random().copy()
+            for idx in range(num_traj)
+        ]
+    else:
+        num_traj = len(seed_specs)
+        print(f"simulating {num_traj} randomized trajectories...")
+        initial_state_plan = [
+            sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+            for seed_spec in seed_specs
+        ]
+
+    for initial_state in initial_state_plan:
         trajectory, reached_goal = rollout_trajectory(
             simulator=simulator,
             planner=planner,
@@ -318,6 +347,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--initial-states",
+        type=str,
+        default=None,
+        help=(
+            "explicit initial state specs. Examples: '[x, y, ...]' for one rollout, "
+            "'[[...], [...]]' for multiple global states, or "
+            "'[[[robot1...], [robot2...]], ...]' for multi-robot rollouts. "
+            "When exhausted, plotting falls back to simulator RNG sampling."
+        ),
+    )
+    parser.add_argument(
         "--num-steps",
         type=int,
         default=150,
@@ -347,6 +387,7 @@ def main():
         planner_name=args.planner,
         config=config,
         seeds=parse_seed_argument(args.seeds),
+        initial_states=parse_initial_states_argument(args.initial_states),
         num_steps=args.num_steps,
         action_noise_std=args.action_noise_std,
         output_path=args.output_path,

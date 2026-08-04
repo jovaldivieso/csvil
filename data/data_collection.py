@@ -27,8 +27,10 @@ class DataCollector:
         num_trajectories: int,
         num_steps: int = 100,
         action_noise_std: float = 0.0,
+        initial_states: list[np.ndarray] | None = None,
     ) -> LeRobotDataset:
         print(f"Collecting {num_trajectories} trajectories...")
+        provided_initial_states = initial_states or []
 
         if self.local_dir.exists():
             print(f"Cleaning up existing dataset at {self.local_dir}...")
@@ -56,8 +58,11 @@ class DataCollector:
                     f"Collected {successful_trajectories}/{num_trajectories} successful trajectories."
                 )
 
-            # Ask the simulator to initialize itself in a random, valid way
-            state = self.sim.reset_random()
+            # Use provided initial states first; then fall back to simulator RNG.
+            if attempted_trajectories <= len(provided_initial_states):
+                state = self.sim.reset(provided_initial_states[attempted_trajectories - 1])
+            else:
+                state = self.sim.reset_random()
             planner_failed = False
 
             # Tell the planner a new episode is starting!

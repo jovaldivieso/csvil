@@ -13,6 +13,10 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
+from core.initial_state_utils import (
+    normalize_initial_state_specs,
+    parse_initial_states_argument,
+)
 from core.seed_utils import default_seed_argument_for_simulator
 from planning.casadi_planner import PlannerSolveError
 from learning.models.mlp import MLPPolicy
@@ -200,6 +204,9 @@ def rollout_planner(
     planner.reset()
     trajectory = [state.copy()]
 
+    if simulator.should_terminate_rollout(state):
+        return np.asarray(trajectory)
+
     for _ in range(num_steps):
         obs = simulator.observe(state)
         
@@ -278,6 +285,7 @@ def run_evaluation(
     model_dir: str,
     num_steps: int = 150,
     seeds: list[int] | list[list[int]] | None = None,
+    initial_states: Any | None = None,
     action_noise_std: float = 0.0,
     output_path: str | None = None,
 ):
@@ -285,6 +293,10 @@ def run_evaluation(
 
     simulator = DynamicsFactory.create(system_name=system, config=validated_config)
     seed_specs = normalize_seed_specs(simulator=simulator, seeds=seeds)
+    initial_state_specs = normalize_initial_state_specs(
+        simulator=simulator,
+        initial_states=initial_states,
+    )
 
     if not os.path.exists(model_dir):
         print(f"assuming '{model_dir}' is a Hugging Face Hub ID")
@@ -322,20 +334,57 @@ def run_evaluation(
     policy.eval()
     policy.to(device)
 
-    print(f"evaluating {len(seed_specs)} seeded trajectories")
-
     # Instantiate expert planner once and reset it for each rollout.
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
     expert_trajectories: list[np.ndarray] = []
     policy_trajectories: list[np.ndarray] = []
     per_seed_metrics: list[dict[str, Any]] = []
 
-    for seed_spec in seed_specs:
-        torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
-        torch.manual_seed(torch_seed)
+    if len(initial_state_specs) > 0:
+        total_rollouts = max(len(seed_specs), len(initial_state_specs))
+        print(
+            "evaluating "
+            f"{total_rollouts} trajectories "
+            f"({len(initial_state_specs)} explicit initial states + RNG fallback)"
+        )
+        rollout_plan: list[tuple[np.ndarray, np.ndarray, Any, str, int]] = []
+        for rollout_idx in range(total_rollouts):
+            if rollout_idx < len(initial_state_specs):
+                initial_state = simulator.validate_state(initial_state_specs[rollout_idx])
+                initial_state_source = "provided"
+            else:
+                initial_state = simulator.reset_random().copy()
+                initial_state_source = "rng_fallback"
+            goal_state = simulator.goal_state.copy()
 
-        initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
-        goal_state = simulator.goal_state.copy()
+            if rollout_idx < len(seed_specs):
+                seed_spec = seed_specs[rollout_idx]
+                torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
+                seed_value: Any = seed_spec
+            else:
+                torch_seed = rollout_idx + 1
+                seed_value = None
+
+            rollout_plan.append((initial_state, goal_state, seed_value, initial_state_source, torch_seed))
+    else:
+        print(f"evaluating {len(seed_specs)} seeded trajectories")
+        rollout_plan: list[tuple[np.ndarray, np.ndarray, Any, str, int]] = []
+        for seed_spec in seed_specs:
+            torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
+            initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+            goal_state = simulator.goal_state.copy()
+            rollout_plan.append(
+                (
+                    initial_state,
+                    goal_state,
+                    seed_spec,
+                    "seeded",
+                    torch_seed,
+                )
+            )
+
+    for initial_state, goal_state, seed_value, initial_state_source, torch_seed in rollout_plan:
+        torch.manual_seed(torch_seed)
 
         expert_trajectory = rollout_planner(
             simulator=simulator,
@@ -363,7 +412,8 @@ def run_evaluation(
         policy_trajectories.append(policy_trajectory)
         per_seed_metrics.append(
             {
-                "seed": seed_spec,
+                "seed": seed_value,
+                "initial_state_source": initial_state_source,
                 "goal_state": goal_state,
                 "initial_state": initial_state,
                 "policy_reached_goal": reached_goal,
@@ -532,6 +582,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--initial-states",
+        type=str,
+        default=None,
+        help=(
+            "explicit initial state specs. Examples: '[x, y, ...]' for one rollout, "
+            "'[[...], [...]]' for multiple global states, or "
+            "'[[[robot1...], [robot2...]], ...]' for multi-robot rollouts. "
+            "When exhausted, evaluation falls back to simulator RNG sampling."
+        ),
+    )
+    parser.add_argument(
         "--action-noise-std",
         type=float,
         default=0.0,
@@ -557,6 +618,7 @@ def main():
         model_dir=args.model_dir,
         num_steps=args.num_steps,
         seeds=parse_seed_argument(args.seeds),
+        initial_states=parse_initial_states_argument(args.initial_states),
         action_noise_std=args.action_noise_std,
         output_path=args.output_path,
     )

@@ -8,6 +8,7 @@ from matplotlib import animation
 from matplotlib import colors as mcolors
 
 from core.factory import DynamicsFactory, PlannerFactory
+from core.initial_state_utils import normalize_initial_state_specs
 from data.data_collection import DataCollector
 
 
@@ -39,6 +40,7 @@ def collect_expert_data(
     num_traj: int,
     num_steps: int,
     action_noise_std: float = 0.0,
+    initial_states: Any | None = None,
 ):
     """
     generates and saves expert trajectories for a dynamics system
@@ -73,11 +75,17 @@ def collect_expert_data(
         local_dir=local_dir,
     )
 
+    normalized_initial_states = normalize_initial_state_specs(
+        simulator=simulator,
+        initial_states=initial_states,
+    )
+
     return collector.collect_trajectories(
         motion_planner=planner,
         num_trajectories=num_traj,
         num_steps=num_steps,
         action_noise_std=action_noise_std,
+        initial_states=normalized_initial_states,
     )
  
 def plot_xy_trajectories(
