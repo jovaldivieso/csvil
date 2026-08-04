@@ -326,7 +326,18 @@ def _validate_planner(
         raise ConfigurationError("'terminal_cost_multiplier' must be positive.")
     return planner
 
+def _preserve_db_lacam_config(raw_config: Mapping[str, Any], config_out: dict[str, Any]) -> None:
+    
+    db_lacam_config = raw_config.get("db_lacam")
 
+    if db_lacam_config is None:
+        return
+
+    if not isinstance(db_lacam_config, Mapping):
+        raise ConfigurationError("'db_lacam' must be a mapping.")
+
+    config_out["db_lacam"] = dict(db_lacam_config)
+    
 def load_and_validate_system_config(system_name: str, config_path: str | Path) -> dict[str, Any]:
     """Load YAML config and return a validated config dictionary for a system."""
     raw = load_yaml_config(config_path)
@@ -471,6 +482,9 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         )
         if len(planner_cfg.r_weight_per_robot) > 0:
             config_out["R_weight_per_robot"] = [list(values) for values in planner_cfg.r_weight_per_robot]
+            
+        _preserve_db_lacam_config(raw_config, config_out)
+        
         return config_out
 
     dt = _float(raw_config, "dt", 0.05)
@@ -632,4 +646,5 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
         }
     )
+    _preserve_db_lacam_config(raw_config, config_out)
     return config_out

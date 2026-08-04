@@ -43,6 +43,7 @@ class Unicycle1(DynamicsSimulator):
                 [self.initial_position_min_goal_distance, 1.0],
             )
         )
+        self.db_lacam_robot_type = "unicycle1_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
         return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))
