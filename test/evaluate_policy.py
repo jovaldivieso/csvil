@@ -13,6 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
+from core.seed_utils import default_seed_argument_for_simulator
 from planning.casadi_planner import PlannerSolveError
 from learning.models.mlp import MLPPolicy
 from planning.planner import PlannerProtocol
@@ -23,17 +24,6 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.act.modeling_act import ACTPolicy
 
 from utils import plot_xy_trajectories, save_xy_rollout_video
-
-
-DEFAULT_SINGLE_ROBOT_SEED = 1
-DEFAULT_MULTI_ROBOT_SEED_BASE = 1
-DEFAULT_MULTI_ROBOT_SEED_STRIDE = 100
-
-
-def default_seed_argument_for_simulator(simulator: DynamicsProtocol) -> list[int] | list[list[int]]:
-    if simulator.num_robots <= 1:
-        return [DEFAULT_SINGLE_ROBOT_SEED]
-    return [[DEFAULT_MULTI_ROBOT_SEED_BASE + DEFAULT_MULTI_ROBOT_SEED_STRIDE * robot_idx] for robot_idx in range(simulator.num_robots)]
 
 
 def default_evaluation_output_path(system: str, policy_type: str) -> str:
@@ -336,8 +326,6 @@ def run_evaluation(
 
     # Instantiate expert planner once and reset it for each rollout.
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
-    goal_state = simulator.goal_state
-
     expert_trajectories: list[np.ndarray] = []
     policy_trajectories: list[np.ndarray] = []
     per_seed_metrics: list[dict[str, Any]] = []
@@ -347,6 +335,7 @@ def run_evaluation(
         torch.manual_seed(torch_seed)
 
         initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+        goal_state = simulator.goal_state.copy()
 
         expert_trajectory = rollout_planner(
             simulator=simulator,
@@ -375,6 +364,7 @@ def run_evaluation(
         per_seed_metrics.append(
             {
                 "seed": seed_spec,
+                "goal_state": goal_state,
                 "initial_state": initial_state,
                 "policy_reached_goal": reached_goal,
                 "policy_steps": max(len(policy_trajectory) - 1, 0),
@@ -408,7 +398,15 @@ def run_evaluation(
     print(f"seeds: {seed_specs}")
     print(f"device: {device}")
     print(f"action_noise_std: {action_noise_std:.6f}")
-    print(f"goal_state: {np.array2string(goal_state, precision=4)}")
+    unique_goal_states = {
+        tuple(np.asarray(metric["goal_state"], dtype=float).tolist())
+        for metric in per_seed_metrics
+    }
+    if len(unique_goal_states) == 1:
+        only_goal_state = np.asarray(next(iter(unique_goal_states)), dtype=float)
+        print(f"goal_state: {np.array2string(only_goal_state, precision=4)}")
+    else:
+        print("goal_state: varies per seed (goal randomization enabled)")
     print(f"num_trajectories: {total_runs}")
     print(f"policy_successes: {total_successes}/{total_runs}")
     print(f"success_rate: {success_rate:.4f}")

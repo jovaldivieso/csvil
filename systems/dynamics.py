@@ -149,7 +149,7 @@ class DynamicsSimulator(ABC):
         radius_min, radius_max = radius_bounds
         effective_radius_min = max(radius_min, min_goal_distance)
         if radius_max <= effective_radius_min:
-            raise RuntimeError(
+            raise ValueError(
                 "Initial-state sampling requires the maximum initial radius to exceed the minimum goal distance."
             )
 
