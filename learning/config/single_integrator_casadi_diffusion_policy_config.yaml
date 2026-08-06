@@ -36,7 +36,7 @@ policy:
       type: ACTION
 
 # Training settings
-steps: 10000
+steps: 12000
 save_freq: 10000
 batch_size: 64
 num_workers: 0

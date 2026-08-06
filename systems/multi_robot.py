@@ -10,6 +10,9 @@ from core.types import VectorSpec, as_vector
 from systems.dynamics import DynamicsProtocol, DynamicsSimulator
 
 
+SAFE_INITIAL_STATE_MAX_ATTEMPTS = 256
+
+
 class MultiRobotSimulator(DynamicsSimulator):
     """Composite simulator that aggregates multiple robot simulators.
 
@@ -203,6 +206,7 @@ class MultiRobotSimulator(DynamicsSimulator):
             sim.reset(robot_state)
         self.state = state.copy()
         self.time = 0
+        self.reset_rollout_termination()
         return self.state
 
     def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
@@ -328,12 +332,55 @@ class MultiRobotSimulator(DynamicsSimulator):
         return features
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        states = [sim.random_initial_state(rng) for sim in self.simulators]
-        return np.concatenate(states)
+        return self._sample_safe_initial_state(rng=rng, randomize_goals=False)
+
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
+        for sim in self.simulators:
+            sim.randomize_goal_for_reset(rng)
 
     def reset_random(self) -> np.ndarray:
-        states = [sim.reset_random() for sim in self.simulators]
-        return self.reset(np.concatenate(states))
+        return self.reset(
+            self._sample_safe_initial_state(rng=self._sampling_rng, randomize_goals=True)
+        )
+
+    def _positions_respect_d_safe(self, states: list[np.ndarray]) -> bool:
+        if self.d_safe <= 0.0 or len(states) < 2:
+            return True
+
+        min_dist_sq = float(self.d_safe * self.d_safe)
+        for robot_idx, state in enumerate(states):
+            if state.shape[0] < 2:
+                raise ValueError(
+                    f"Robot {robot_idx} state must include x/y in first two entries for d_safe checks."
+                )
+
+        for i in range(len(states)):
+            p_i = states[i][:2]
+            for j in range(i + 1, len(states)):
+                p_j = states[j][:2]
+                if float(np.sum((p_i - p_j) ** 2)) < min_dist_sq:
+                    return False
+        return True
+
+    def _sample_safe_initial_state(
+        self,
+        rng: np.random.Generator,
+        randomize_goals: bool,
+    ) -> np.ndarray:
+        for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
+            states: list[np.ndarray] = []
+            for sim in self.simulators:
+                if randomize_goals:
+                    sim.randomize_goal_for_reset(rng)
+                states.append(sim.random_initial_state(rng))
+
+            if self._positions_respect_d_safe(states):
+                return np.concatenate(states)
+
+        raise RuntimeError(
+            "Unable to sample a multi-robot initial state that satisfies d_safe. "
+            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
+        )
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         split_obs = self._split_observation(obs)

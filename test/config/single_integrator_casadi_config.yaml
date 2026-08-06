@@ -7,3 +7,6 @@ R_weight: 0.1
 terminal_cost_multiplier: 10.0
 goal: [0.0, 0.0]
 randomize_goal: false
+initial_position_min_goal_distance: 0.05
+initial_position_radius_bounds: [0.05, 1.0]
+initial_state_seed: 42
