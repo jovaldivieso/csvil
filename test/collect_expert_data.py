@@ -1,5 +1,8 @@
 import os
 import sys
+import time
+import yaml
+import shutil
 import argparse
 from typing import Any, Mapping
 
@@ -108,20 +111,40 @@ def main():
     )
 
     args = parser.parse_args()
-    cfg = load_and_validate_system_config(system_name=args.system, config_path=args.config)
+
+    timestamp = str(int(time.time()))
+    repo_id = args.repo_id or f"local/{args.system}_{args.planner}_expert"
+    local_dir = (args.local_dir or f"data/lerobot_dataset_{args.system}_{args.planner}_{timestamp}")
+
+    config = load_and_validate_system_config(
+        system_name=args.system,
+        config_path=args.config,
+    )
 
     run_collection(
         system=args.system,
         planner_name=args.planner,
-        config=cfg,
-        repo_id=args.repo_id,
-        local_dir=args.local_dir,
+        config=config,
+        repo_id=repo_id,
+        local_dir=local_dir,
         num_traj=args.num_traj,
         num_steps=args.num_steps,
         action_noise_std=args.action_noise_std,
         initial_states=parse_initial_states_argument(args.initial_states),
     )
 
+    print(f"dataset saved to {local_dir}")
+
+    # copies configuration used for this experiment:
+    shutil.copy2(args.config, os.path.join(local_dir, "config.yaml"))
+
+    algorithm_config = config.get("db_lacam", {}).get("algorithm_config")
+    if algorithm_config:
+        shutil.copy2(algorithm_config, os.path.join(local_dir, "algorithm_config.yaml"))
+
+    # saves command-line parameters:
+    with open( os.path.join(local_dir, "run.yaml"), "w", encoding="utf-8") as file:
+        yaml.safe_dump(vars(args), file, sort_keys=False)
 
 if __name__ == "__main__":
     main()
