@@ -7,6 +7,10 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
+from systems.seed_utils import (
+    action_noise_rng_for_rollout,
+    default_action_noise_seed_for_config,
+)
 
 
 class DataCollector:
@@ -20,6 +24,7 @@ class DataCollector:
         self.repo_id = repo_id
         self.local_dir = Path(local_dir)
         self.fps = int(1 / self.sim.dt)
+        self.action_noise_seed = default_action_noise_seed_for_config(self.sim.config)
 
     def collect_trajectories(
         self,
@@ -66,6 +71,10 @@ class DataCollector:
                 state = self.sim.reset_random()
                 initial_state_source = "rng_fallback"
             episode_initial_state = state.copy()
+            episode_action_noise_rng = action_noise_rng_for_rollout(
+                self.action_noise_seed,
+                rollout_index=attempted_trajectories,
+            )
             planner_failed = False
 
             # Tell the planner a new episode is starting!
@@ -95,7 +104,7 @@ class DataCollector:
                     break
 
                 if action_noise_std > 0.0:
-                    noise = np.random.normal(
+                    noise = episode_action_noise_rng.normal(
                         loc=0.0,
                         scale=action_noise_std,
                         size=action.shape,

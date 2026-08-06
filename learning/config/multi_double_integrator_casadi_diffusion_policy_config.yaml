@@ -12,8 +12,8 @@ policy:
   push_to_hub: true
 
   # Neural network settings
-  down_dims: [16, 32, 64]
-  diffusion_step_embed_dim: 4
+  down_dims: [16, 32, 56]
+  diffusion_step_embed_dim: 24
 
   # Inference speed optimizations
   noise_scheduler_type: DDIM

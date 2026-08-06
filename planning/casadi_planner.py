@@ -57,6 +57,7 @@ class CasadiPlanner(Planner):
         Q_i : Per-robot state penalty blocks extracted from ``Q_diag``.
         R_i : Per-robot control penalty blocks.
         d_safe : Minimum allowed planar distance between any robot pair.
+        collision_slack_penalty_weight : Positive weight for collision slack penalties.
 
     The solver keeps the fleet jointly feasible by applying the shared dynamics,
     per-robot action bounds, optional per-robot state bounds, and the pairwise
@@ -170,6 +171,9 @@ class CasadiPlanner(Planner):
         self.N = config.get("horizon", 20)
         self.mode = config.get("mode", "mpc")  # Default to MPC
         self.terminal_cost_multiplier = float(config.get("terminal_cost_multiplier", 10.0))
+        self.collision_slack_penalty_weight = float(
+            config.get("collision_slack_penalty_weight", 10000.0)
+        )
 
         if self.N <= 0:
             raise ValueError("'horizon' must be a positive integer.")
@@ -177,6 +181,8 @@ class CasadiPlanner(Planner):
             raise ValueError("'mode' must be one of {'mpc', 'open_loop'}.")
         if self.terminal_cost_multiplier <= 0:
             raise ValueError("'terminal_cost_multiplier' must be positive.")
+        if self.collision_slack_penalty_weight <= 0:
+            raise ValueError("'collision_slack_penalty_weight' must be positive.")
 
         self.sub_simulators = self.sim.simulators
         self.robot_state_slices = self.sim.robot_state_slices
@@ -259,27 +265,52 @@ class CasadiPlanner(Planner):
                 ca.sum1(ca.mtimes(r_block, self.U[action_slice, :]) * self.U[action_slice, :])
             )
 
-        # Vectorized pairwise collision constraints for steps 0..N-1.
-        if self.d_safe > 0.0 and len(self.robot_state_slices) > 1:
-            for i in range(len(self.robot_state_slices)):
-                state_slice_i = self.robot_state_slices[i]
-                if state_slice_i.stop - state_slice_i.start < 2:
+        pairwise_collision_is_active = self.d_safe > 0.0 and len(self.robot_state_slices) > 1
+        xy_index_by_robot: list[tuple[int, int]] = []
+        if pairwise_collision_is_active:
+            for robot_idx, state_slice in enumerate(self.robot_state_slices):
+                if state_slice.stop - state_slice.start < 2:
                     raise ValueError(
-                        f"Robot {i} state must include at least x/y in first two entries."
+                        f"Robot {robot_idx} state must include at least x/y in first two entries."
                     )
-                xi = self.X[state_slice_i.start, :-1]
-                yi = self.X[state_slice_i.start + 1, :-1]
+                xy_index_by_robot.append((state_slice.start, state_slice.start + 1))
+
+        collision_pairs: list[tuple[int, int]] = []
+        if pairwise_collision_is_active:
+            for i in range(len(self.robot_state_slices)):
                 for j in range(i + 1, len(self.robot_state_slices)):
-                    state_slice_j = self.robot_state_slices[j]
-                    if state_slice_j.stop - state_slice_j.start < 2:
-                        raise ValueError(
-                            f"Robot {j} state must include at least x/y in first two entries."
-                        )
-                    xj = self.X[state_slice_j.start, :-1]
-                    yj = self.X[state_slice_j.start + 1, :-1]
-                    self.opti.subject_to(
-                        (xi - xj) ** 2 + (yi - yj) ** 2 >= self.d_safe ** 2
-                    )
+                    collision_pairs.append((i, j))
+
+        if pairwise_collision_is_active and len(collision_pairs) > 0:
+            # One slack variable per pair and horizon step (including terminal step).
+            # This avoids coupling violations across unrelated pairs.
+            collision_slack = self.opti.variable(len(collision_pairs), self.N + 1)
+            self.opti.subject_to(collision_slack >= 0)
+
+            for pair_idx, (i, j) in enumerate(collision_pairs):
+                xi_idx, yi_idx = xy_index_by_robot[i]
+                xj_idx, yj_idx = xy_index_by_robot[j]
+
+                xi = self.X[xi_idx, :-1]
+                yi = self.X[yi_idx, :-1]
+                xj = self.X[xj_idx, :-1]
+                yj = self.X[yj_idx, :-1]
+                self.opti.subject_to(
+                    (xi - xj) ** 2 + (yi - yj) ** 2 + collision_slack[pair_idx, :-1] >= self.d_safe ** 2
+                )
+
+                xi_terminal = self.X[xi_idx, self.N]
+                yi_terminal = self.X[yi_idx, self.N]
+                xj_terminal = self.X[xj_idx, self.N]
+                yj_terminal = self.X[yj_idx, self.N]
+                self.opti.subject_to(
+                    (xi_terminal - xj_terminal) ** 2
+                    + (yi_terminal - yj_terminal) ** 2
+                    + collision_slack[pair_idx, self.N]
+                    >= self.d_safe ** 2
+                )
+
+            cost += self.collision_slack_penalty_weight * ca.sum2(ca.sum1(collision_slack))
 
         for state_slice, q_block in zip(self.robot_state_slices, q_blocks):
             terminal_error = self.X[state_slice, self.N] - self.goal_param[state_slice]
@@ -287,27 +318,6 @@ class CasadiPlanner(Planner):
                 terminal_error.T,
                 ca.mtimes(q_block * self.terminal_cost_multiplier, terminal_error),
             )
-
-        if self.d_safe > 0.0 and len(self.robot_state_slices) > 1:
-            for i in range(len(self.robot_state_slices)):
-                state_slice_i = self.robot_state_slices[i]
-                if state_slice_i.stop - state_slice_i.start < 2:
-                    raise ValueError(
-                        f"Robot {i} state must include at least x/y in first two entries."
-                    )
-                xi = self.X[state_slice_i.start, self.N]
-                yi = self.X[state_slice_i.start + 1, self.N]
-                for j in range(i + 1, len(self.robot_state_slices)):
-                    state_slice_j = self.robot_state_slices[j]
-                    if state_slice_j.stop - state_slice_j.start < 2:
-                        raise ValueError(
-                            f"Robot {j} state must include at least x/y in first two entries."
-                        )
-                    xj = self.X[state_slice_j.start, self.N]
-                    yj = self.X[state_slice_j.start + 1, self.N]
-                    self.opti.subject_to(
-                        (xi - xj) ** 2 + (yi - yj) ** 2 >= self.d_safe ** 2
-                    )
 
         self.opti.minimize(cost)
         self.opti.subject_to(self.X[:, 0] == self.x0_param)

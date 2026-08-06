@@ -17,7 +17,11 @@ from systems.initial_state_utils import (
     normalize_initial_state_specs,
     parse_initial_states_argument,
 )
-from systems.seed_utils import default_seed_argument_for_simulator
+from systems.seed_utils import (
+    action_noise_seed_for_rollout,
+    default_action_noise_seed_for_config,
+    default_seed_argument_for_simulator,
+)
 from planning.casadi_planner import PlannerSolveError
 from learning.models.mlp import MLPPolicy
 from planning.planner import PlannerProtocol
@@ -173,11 +177,15 @@ def apply_execution_noise(
     simulator: DynamicsProtocol,
     action: np.ndarray,
     action_noise_std: float,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     if action_noise_std <= 0.0:
         return action
 
-    noise = np.random.normal(
+    if rng is None:
+        rng = np.random.default_rng()
+
+    noise = rng.normal(
         loc=0.0,
         scale=action_noise_std,
         size=action.shape,
@@ -198,6 +206,7 @@ def rollout_planner(
     rollout_id: int | None = None,
     seed_value: Any | None = None,
     initial_state_source: str | None = None,
+    action_noise_rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """
     Rolls out the expert planner from a given initial state.
@@ -234,6 +243,7 @@ def rollout_planner(
             simulator=simulator,
             action=action,
             action_noise_std=action_noise_std,
+            rng=action_noise_rng,
         )
         state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
@@ -251,6 +261,7 @@ def rollout_policy(
     initial_state: np.ndarray,
     num_steps: int,
     action_noise_std: float = 0.0,
+    action_noise_rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, bool, int]:
     """
     Rolls out the neural policy from a given initial state.
@@ -281,6 +292,7 @@ def rollout_policy(
             simulator=simulator,
             action=action,
             action_noise_std=action_noise_std,
+            rng=action_noise_rng,
         )
 
         state = simulator.step(state, executed_action)
@@ -304,6 +316,7 @@ def run_evaluation(
     output_path: str | None = None,
 ):
     validated_config = validate_system_config(system_name=system, raw_config=config)
+    action_noise_seed = default_action_noise_seed_for_config(validated_config)
 
     simulator = DynamicsFactory.create(system_name=system, config=validated_config)
     seed_specs = normalize_seed_specs(simulator=simulator, seeds=seeds)
@@ -317,6 +330,7 @@ def run_evaluation(
 
     device = get_inference_device()
     print(f"running inference on {device}")
+    print(f"action noise seed: {action_noise_seed}")
 
     # Dynamically load the requested policy
     if policy_type == "diffusion":
@@ -361,15 +375,17 @@ def run_evaluation(
             f"{total_rollouts} trajectories "
             f"({len(initial_state_specs)} explicit initial states + seeded/RNG fallback)"
         )
-        rollout_plan: list[tuple[Any, str, int, Any]] = []
+        rollout_plan: list[tuple[Any, str, int, Any, int | list[int] | None]] = []
         for rollout_idx in range(total_rollouts):
             if rollout_idx < len(initial_state_specs):
                 initial_state_spec: Any = simulator.validate_state(initial_state_specs[rollout_idx]).copy()
                 initial_state_source = "provided"
                 seed_value: Any = None
+                noise_seed_spec: int | list[int] | None = None
                 if rollout_idx < len(seed_specs):
                     seed_spec = seed_specs[rollout_idx]
                     torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
+                    noise_seed_spec = seed_spec
                 else:
                     torch_seed = rollout_idx + 1
             elif rollout_idx < len(seed_specs):
@@ -378,13 +394,15 @@ def run_evaluation(
                 seed_spec = seed_specs[rollout_idx]
                 torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
                 seed_value = seed_spec
+                noise_seed_spec = seed_spec
             else:
                 initial_state_spec = None
                 initial_state_source = "rng_fallback"
                 torch_seed = rollout_idx + 1
                 seed_value = None
+                noise_seed_spec = None
 
-            rollout_plan.append((initial_state_spec, initial_state_source, torch_seed, seed_value))
+            rollout_plan.append((initial_state_spec, initial_state_source, torch_seed, seed_value, noise_seed_spec))
     else:
         print(f"evaluating {len(seed_specs)} seeded trajectories")
         rollout_plan = []
@@ -396,10 +414,11 @@ def run_evaluation(
                     "seeded",
                     torch_seed,
                     seed_spec,
+                    seed_spec,
                 )
             )
 
-    for rollout_idx, (rollout_spec, initial_state_source, torch_seed, seed_value) in enumerate(rollout_plan, start=1):
+    for rollout_idx, (rollout_spec, initial_state_source, torch_seed, seed_value, noise_seed_spec) in enumerate(rollout_plan, start=1):
         torch.manual_seed(torch_seed)
 
         if initial_state_source == "seeded":
@@ -409,6 +428,20 @@ def run_evaluation(
             initial_state = simulator.validate_state(rollout_spec).copy()
         else:
             initial_state = simulator.reset_random().copy()
+
+        if noise_seed_spec is not None:
+            rollout_noise_seed = action_noise_seed_for_rollout(
+                action_noise_seed,
+                seed_spec=noise_seed_spec,
+            )
+        else:
+            rollout_noise_seed = action_noise_seed_for_rollout(
+                action_noise_seed,
+                rollout_index=rollout_idx,
+            )
+
+        expert_action_noise_rng = np.random.default_rng(rollout_noise_seed)
+        policy_action_noise_rng = np.random.default_rng(rollout_noise_seed)
 
         goal_state = simulator.goal_state.copy()
 
@@ -421,6 +454,7 @@ def run_evaluation(
             rollout_id=rollout_idx,
             seed_value=seed_value,
             initial_state_source=initial_state_source,
+            action_noise_rng=expert_action_noise_rng,
         )
 
         policy_trajectory, reached_goal, steps_taken = rollout_policy(
@@ -430,6 +464,7 @@ def run_evaluation(
             initial_state=initial_state,
             num_steps=num_steps,
             action_noise_std=action_noise_std,
+            action_noise_rng=policy_action_noise_rng,
         )
 
         policy_final_state = policy_trajectory[-1]
