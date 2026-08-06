@@ -344,6 +344,16 @@ def _validate_planner(
         raise ConfigurationError("'terminal_cost_multiplier' must be positive.")
     return planner
 
+def _preserve_environment_config(raw_config: Mapping[str, Any], config_out: dict[str, Any]) -> None:
+    environment = raw_config.get("environment")
+
+    if environment is None:
+        return
+    if not isinstance(environment, Mapping):
+        raise ConfigurationError("'environment' must be a mapping.")
+
+    config_out["environment"] = dict(environment)
+    
 def _preserve_db_lacam_config(raw_config: Mapping[str, Any], config_out: dict[str, Any]) -> None:
     
     db_lacam_config = raw_config.get("db_lacam")
@@ -503,7 +513,8 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         )
         if len(planner_cfg.r_weight_per_robot) > 0:
             config_out["R_weight_per_robot"] = [list(values) for values in planner_cfg.r_weight_per_robot]
-            
+        
+        _preserve_environment_config(raw_config, config_out)
         _preserve_db_lacam_config(raw_config, config_out)
         
         return config_out
@@ -668,6 +679,8 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
         }
     )
+    
+    _preserve_environment_config(raw_config, config_out)
     _preserve_db_lacam_config(raw_config, config_out)
     if done_hold_steps is not None:
         config_out["done_hold_steps"] = done_hold_steps

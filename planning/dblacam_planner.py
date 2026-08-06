@@ -57,11 +57,11 @@ class DbLacamPlanner(Planner):
         self.raise_planning_error = bool(self.config.get("raise_planning_error", True))
 
         # environment configuration, no obstacles:
-        environment = self.config.get("environment", {})
+        environment = config.get("environment", {})
         self.environment_min = environment.get("min", [-6.0, -6.0])
         self.environment_max = environment.get("max", [6.0, 6.0])
         self.obstacles = []
-
+        
         self.cached_plans = None
         self.step_idx = 0
 

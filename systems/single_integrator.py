@@ -1,14 +1,16 @@
+from typing import Any, Mapping
+
+import casadi as ca
+import numpy as np
+import torch
+
+from core.types import VectorSpec, as_vector
 from .dynamics import DynamicsSimulator
 from .state_space_types import (
     Euclidean2DAction,
     Euclidean2DState,
     Euclidean4DObservation,
 )
-from core.types import VectorSpec, as_vector
-import casadi as ca
-import numpy as np
-import torch
-from typing import Any, Mapping
 
 
 class SingleIntegrator(DynamicsSimulator):
@@ -43,6 +45,12 @@ class SingleIntegrator(DynamicsSimulator):
                 [self.initial_position_min_goal_distance, 1.0],
             )
         )
+        environment = config.get("environment", {})
+        self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
+        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]),
+            dtype=float,
+        )
+
         self.db_lacam_robot_type = "integrator1_2d_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
@@ -108,12 +116,16 @@ class SingleIntegrator(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        offset = self.sample_planar_start_offset(
-            rng,
-            radius_bounds=self.initial_position_radius_bounds,
-            min_goal_distance=self.initial_position_min_goal_distance,
-        )
-        return self.goal + offset
+        while True:
+            offset = self.sample_planar_start_offset(
+                rng,
+                radius_bounds=self.initial_position_radius_bounds,
+                min_goal_distance=self.initial_position_min_goal_distance,
+            )
+            initial_state = self.goal + offset
+
+            if np.all((initial_state >= self.environment_min) & (initial_state <= self.environment_max)):
+                return initial_state
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)

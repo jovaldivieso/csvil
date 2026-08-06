@@ -33,6 +33,10 @@ class Unicycle1(DynamicsSimulator):
         self.obs_dim = 5
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
+        
+        environment = config.get("environment", {})
+        self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
+        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]), dtype=float)
         self.initial_position_min_goal_distance = float(
             config.get("initial_position_min_goal_distance", self.error_tolerance)
         )
@@ -128,14 +132,17 @@ class Unicycle1(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        offset = self.sample_planar_start_offset(
-            rng,
-            radius_bounds=self.initial_position_radius_bounds,
-            min_goal_distance=self.initial_position_min_goal_distance,
-        )
-        pos = self.goal[:2] + offset
-        theta = rng.uniform(low=-np.pi, high=np.pi)
-        return np.array([pos[0], pos[1], theta])
+        while True:
+            offset = self.sample_planar_start_offset(
+                rng,
+                radius_bounds=self.initial_position_radius_bounds,
+                min_goal_distance=self.initial_position_min_goal_distance,
+            )
+            pos = self.goal[:2] + offset
+
+            if np.all((pos >= self.environment_min) & (pos <= self.environment_max)):
+                theta = rng.uniform(-np.pi, np.pi)
+                return np.array([pos[0], pos[1], theta])
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)
