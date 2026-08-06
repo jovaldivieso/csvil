@@ -20,6 +20,7 @@ class PlannerConfig:
     r_diag: tuple[float, ...] = ()
     r_weight_per_robot: tuple[tuple[float, ...], ...] = ()
     terminal_cost_multiplier: float = 10.0
+    collision_slack_penalty_weight: float = 10000.0
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,18 @@ def _optional_non_negative_int(config: Mapping[str, Any], key: str) -> int | Non
     if value < 0:
         raise ConfigurationError(f"'{key}' must be non-negative when provided.")
     return value
+
+
+def _resolved_action_noise_seed(config: Mapping[str, Any]) -> int:
+    action_noise_seed = _optional_non_negative_int(config, "action_noise_seed")
+    if action_noise_seed is not None:
+        return action_noise_seed
+
+    initial_state_seed = _optional_non_negative_int(config, "initial_state_seed")
+    if initial_state_seed is not None:
+        return initial_state_seed
+
+    return 0
 
 
 def _bool(config: Mapping[str, Any], key: str, default: bool) -> bool:
@@ -336,12 +349,15 @@ def _validate_planner(
         r_diag=r_diag,
         r_weight_per_robot=r_weight_per_robot,
         terminal_cost_multiplier=_float(config, "terminal_cost_multiplier", 10.0),
+        collision_slack_penalty_weight=_float(config, "collision_slack_penalty_weight", 10000.0),
     )
 
     if planner.horizon <= 0:
         raise ConfigurationError("'horizon' must be positive.")
     if planner.terminal_cost_multiplier <= 0:
         raise ConfigurationError("'terminal_cost_multiplier' must be positive.")
+    if planner.collision_slack_penalty_weight <= 0:
+        raise ConfigurationError("'collision_slack_penalty_weight' must be positive.")
     return planner
 
 def _preserve_db_lacam_config(raw_config: Mapping[str, Any], config_out: dict[str, Any]) -> None:
@@ -461,12 +477,14 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             error_tolerance=error_tolerance,
             initial_state_seed=_optional_non_negative_int(raw_config, "initial_state_seed"),
         )
+        action_noise_seed = _resolved_action_noise_seed(raw_config)
         done_hold_steps = _optional_positive_int(raw_config, "done_hold_steps")
 
         config_out: dict[str, Any] = {
             "dt": fleet_cfg.dt,
             "d_safe": fleet_cfg.d_safe,
             "error_tolerance": fleet_cfg.error_tolerance,
+            "action_noise_seed": action_noise_seed,
             "robots": [
                 {
                     "system": member.system,
@@ -499,6 +517,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
                 "R_weight": planner_cfg.r_weight,
                 "R_diag": list(planner_cfg.r_diag),
                 "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
+                "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
             }
         )
         if len(planner_cfg.r_weight_per_robot) > 0:
@@ -516,6 +535,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
     if error_tolerance <= 0:
         raise ConfigurationError("'error_tolerance' must be positive.")
     done_hold_steps = _optional_positive_int(raw_config, "done_hold_steps")
+    action_noise_seed = _resolved_action_noise_seed(raw_config)
 
     config_out: dict[str, Any]
     nx: int
@@ -544,6 +564,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "goal_position_bounds": list(system_cfg.goal_sampling.position_bounds),
             "max_vel": system_cfg.max_vel,
             "error_tolerance": system_cfg.error_tolerance,
+            "action_noise_seed": action_noise_seed,
             "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
             "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
@@ -576,6 +597,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "goal_position_bounds": list(system_cfg.goal_sampling.position_bounds),
             "max_accel": system_cfg.max_accel,
             "error_tolerance": system_cfg.error_tolerance,
+            "action_noise_seed": action_noise_seed,
             "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
             "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
@@ -608,6 +630,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "goal_position_bounds": list(system_cfg.goal_sampling.position_bounds),
             "max_v": system_cfg.max_v,
             "error_tolerance": system_cfg.error_tolerance,
+            "action_noise_seed": action_noise_seed,
             "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
             "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
@@ -646,6 +669,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "max_speed": system_cfg.max_speed,
             "max_omega": system_cfg.max_omega,
             "error_tolerance": system_cfg.error_tolerance,
+            "action_noise_seed": action_noise_seed,
             "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
             "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
@@ -666,6 +690,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "R_weight": planner_cfg.r_weight,
             "R_diag": list(planner_cfg.r_diag),
             "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
+            "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
         }
     )
     _preserve_db_lacam_config(raw_config, config_out)

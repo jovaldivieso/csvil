@@ -11,16 +11,17 @@ policy:
   repo_id: jovaldivieso/multi_double_integrator_casadi_act
   push_to_hub: true
 
-  # Neural network settings
+  # Neural network policy settings
+  chunk_size: 16
+  dim_feedforward: 470
   dim_model: 64
-  dim_feedforward: 466
-  n_heads: 1
+  latent_dim: 24
   n_encoder_layers: 1
-  n_decoder_layers: 1
+  n_heads: 1
   n_vae_encoder_layers: 1
+  use_vae: true
 
   # Action chunking & History adjustments
-  chunk_size: 16
   n_action_steps: 1
   n_obs_steps: 1            # Must be 1 for LeRobot's ACT implementation
 

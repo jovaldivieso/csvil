@@ -17,7 +17,11 @@ from systems.initial_state_utils import (
     normalize_initial_state_specs,
     parse_initial_states_argument,
 )
-from systems.seed_utils import default_seed_argument_for_simulator
+from systems.seed_utils import (
+    action_noise_rng_for_rollout,
+    default_action_noise_seed_for_config,
+    default_seed_argument_for_simulator,
+)
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
@@ -159,6 +163,7 @@ def rollout_trajectory(
     rollout_id: int | None = None,
     seed_value: Any | None = None,
     initial_state_source: str | None = None,
+    action_noise_rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, bool, bool]:
     """
     simulates one trajectory controlled by a planner
@@ -205,7 +210,9 @@ def rollout_trajectory(
             break
 
         if action_noise_std > 0.0:
-            noise = np.random.normal(
+            if action_noise_rng is None:
+                action_noise_rng = np.random.default_rng()
+            noise = action_noise_rng.normal(
                 loc=0.0,
                 scale=action_noise_std,
                 size=action.shape,
@@ -238,6 +245,7 @@ def run_plotting(
     output_path: str | None = None,
 ) -> str:
     validated_config = validate_system_config(system_name=system, raw_config=config)
+    action_noise_seed = default_action_noise_seed_for_config(validated_config)
 
     simulator = DynamicsFactory.create(system_name=system, config=validated_config)
     seed_specs = normalize_seed_specs(simulator=simulator, seeds=seeds)
@@ -250,6 +258,7 @@ def run_plotting(
         simulator=simulator,
         config=validated_config,
     )
+    print(f"action noise seed: {action_noise_seed}")
 
     output_path = output_path or default_plot_output_path(
         system=system,
@@ -271,24 +280,25 @@ def run_plotting(
             f"{num_traj} trajectories "
             f"({len(initial_state_specs)} explicit initial states + seeded/RNG fallback)..."
         )
-        initial_state_plan: list[tuple[Any, str]] = [
+        initial_state_plan: list[tuple[Any, str, int | list[int] | None]] = [
             (
                 simulator.validate_state(initial_state_specs[idx]).copy(),
                 "provided",
+                seed_specs[idx] if idx < len(seed_specs) else None,
             )
             if idx < len(initial_state_specs)
-            else ((seed_specs[idx], "seeded") if idx < len(seed_specs) else (None, "rng_fallback"))
+            else ((seed_specs[idx], "seeded", seed_specs[idx]) if idx < len(seed_specs) else (None, "rng_fallback", None))
             for idx in range(num_traj)
         ]
     else:
         num_traj = len(seed_specs)
         print(f"simulating {num_traj} randomized trajectories...")
         initial_state_plan = [
-            (seed_spec, "seeded")
+            (seed_spec, "seeded", seed_spec)
             for seed_spec in seed_specs
         ]
 
-    for rollout_idx, (initial_state_spec, initial_state_source) in enumerate(initial_state_plan, start=1):
+    for rollout_idx, (initial_state_spec, initial_state_source, noise_seed_spec) in enumerate(initial_state_plan, start=1):
         if initial_state_source == "seeded":
             initial_state = sample_initial_state(simulator=simulator, seed_spec=initial_state_spec)
             seed_value = initial_state_spec
@@ -299,6 +309,12 @@ def run_plotting(
             initial_state = simulator.reset_random().copy()
             seed_value = None
 
+        action_noise_rng = action_noise_rng_for_rollout(
+            action_noise_seed,
+            seed_spec=noise_seed_spec,
+            rollout_index=None if noise_seed_spec is not None else rollout_idx,
+        )
+
         trajectory, reached_goal, planner_failed = rollout_trajectory(
             simulator=simulator,
             planner=planner,
@@ -308,6 +324,7 @@ def run_plotting(
             rollout_id=rollout_idx,
             seed_value=seed_value,
             initial_state_source=initial_state_source,
+            action_noise_rng=action_noise_rng,
         )
 
         if planner_failed:

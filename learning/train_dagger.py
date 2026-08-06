@@ -35,6 +35,10 @@ from learning.models.mlp import MLPPolicy
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
+from systems.seed_utils import (
+    action_noise_seed_for_rollout,
+    default_action_noise_seed_for_config,
+)
 
 
 def get_training_device() -> torch.device:
@@ -258,7 +262,7 @@ def collect_dagger_data(
     steps_per_trajectory: int,
     device: torch.device,
     action_noise_std: float,
-    action_noise_rng: np.random.Generator,
+    action_noise_seed: int,
 ) -> DaggerEvalMetrics:
     """
     Roll out learner policy, query expert at visited states, aggregate labels.
@@ -281,7 +285,10 @@ def collect_dagger_data(
 
         state = simulator.reset_random()
         episode_initial_state = state.copy()
-        episode_noise_seed = int(action_noise_rng.integers(0, 2**63 - 1))
+        episode_noise_seed = action_noise_seed_for_rollout(
+            action_noise_seed,
+            rollout_index=attempted_episodes,
+        )
         episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
         planner_failed = False
         expert_planner.reset()
@@ -389,7 +396,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
     simulator = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
     device = get_training_device()
-    action_noise_rng = np.random.default_rng(cfg.seed)
+    action_noise_seed = default_action_noise_seed_for_config(cfg.experiment_config)
 
     obs_feature_names = observation_feature_names(simulator)
     act_feature_names = action_feature_names(simulator)
@@ -411,6 +418,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
     print(f"Initial dataset root: {cfg.dataset_root}")
     print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
     print(f"Evaluation action noise std: {cfg.eval_action_noise_std:.6f}")
+    print(f"Action noise seed: {action_noise_seed}")
     print("Initial offline training pass starts from the current expert dataset.")
 
     print(
@@ -477,6 +485,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
             action_fn=action_fn,
             reset_fn=None,
             action_noise_std=cfg.eval_action_noise_std,
+            action_noise_seed=action_noise_seed,
         )
         if metrics is None:
             return
@@ -528,7 +537,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 device=device,
                 action_noise_std=cfg.action_noise_std,
-                action_noise_rng=action_noise_rng,
+                action_noise_seed=action_noise_seed,
             )
         finally:
             # LeRobot writes parquet chunks lazily; finalize guarantees readable footers.

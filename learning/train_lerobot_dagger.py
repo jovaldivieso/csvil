@@ -34,6 +34,10 @@ from learning.train_lerobot import run_training
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
+from systems.seed_utils import (
+    action_noise_seed_for_rollout,
+    default_action_noise_seed_for_config,
+)
 
 
 def get_inference_device() -> torch.device:
@@ -290,7 +294,7 @@ def collect_lerobot_dagger_data(
     steps_per_trajectory: int,
     device: torch.device,
     action_noise_std: float,
-    action_noise_rng: np.random.Generator,
+    action_noise_seed: int,
 ) -> DaggerEvalMetrics:
     """
     Roll out LeRobot policy, query expert at visited states, append corrective labels.
@@ -311,7 +315,10 @@ def collect_lerobot_dagger_data(
 
         state = simulator.reset_random()
         episode_initial_state = state.copy()
-        episode_noise_seed = int(action_noise_rng.integers(0, 2**63 - 1))
+        episode_noise_seed = action_noise_seed_for_rollout(
+            action_noise_seed,
+            rollout_index=attempted_episodes,
+        )
         episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
         planner_failed = False
 
@@ -475,7 +482,6 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         raise FileNotFoundError(f"Dataset root does not exist: {cfg.dataset_root}")
 
     set_seed(cfg.seed)
-    action_noise_rng = np.random.default_rng(cfg.seed)
     device = get_inference_device()
     print(f"Running LeRobot DAgger on device: {device}")
     print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
@@ -485,6 +491,8 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         system_name=cfg.system,
         config_path=str(cfg.experiment_config_path),
     )
+    action_noise_seed = default_action_noise_seed_for_config(validated_experiment_config)
+    print(f"Action noise seed: {action_noise_seed}")
 
     base_training_config = read_training_config(cfg.lerobot_training_config_path)
     base_batch_size = int(base_training_config.get("batch_size", 64))
@@ -553,6 +561,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             action_fn=action_fn,
             reset_fn=reset_fn,
             action_noise_std=cfg.eval_action_noise_std,
+            action_noise_seed=action_noise_seed,
         )
         if metrics is None:
             return
@@ -606,7 +615,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 device=device,
                 action_noise_std=cfg.action_noise_std,
-                action_noise_rng=action_noise_rng,
+                action_noise_seed=action_noise_seed,
             )
         finally:
             dataset_writer.finalize()

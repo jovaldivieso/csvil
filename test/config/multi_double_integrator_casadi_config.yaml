@@ -6,8 +6,10 @@ mode: mpc
 Q_diag: [10.0, 10.0, 1.0, 1.0, 10.0, 10.0, 1.0, 1.0]
 R_weight: 0.1
 terminal_cost_multiplier: 10.0
+collision_slack_penalty_weight: 10000.0
 error_tolerance: 0.05
 initial_state_seed: 0
+action_noise_seed: 0
 
 robots:
   - system: double_integrator

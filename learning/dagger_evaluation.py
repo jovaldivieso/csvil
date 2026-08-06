@@ -5,7 +5,10 @@ from typing import Callable
 
 import numpy as np
 
-from systems.seed_utils import DEFAULT_MULTI_ROBOT_SEED_STRIDE
+from systems.seed_utils import (
+    DEFAULT_MULTI_ROBOT_SEED_STRIDE,
+    action_noise_rng_for_rollout,
+)
 from systems.dynamics import DynamicsProtocol
 
 
@@ -119,15 +122,6 @@ def rollout_policy_with_action_fn(
     return False, num_steps
 
 
-def action_noise_rng_from_seed_spec(seed_spec: int | list[int]) -> np.random.Generator:
-    if isinstance(seed_spec, int):
-        return np.random.default_rng(np.random.SeedSequence([int(seed_spec), 1]))
-
-    return np.random.default_rng(
-        np.random.SeedSequence([int(seed) for seed in seed_spec] + [1])
-    )
-
-
 def evaluate_policy_rollouts(
     simulator: DynamicsProtocol,
     num_episodes: int,
@@ -136,6 +130,7 @@ def evaluate_policy_rollouts(
     action_fn: Callable[[np.ndarray], np.ndarray],
     reset_fn: Callable[[], None] | None = None,
     action_noise_std: float = 0.0,
+    action_noise_seed: int = 0,
 ) -> DaggerEvalMetrics | None:
     if num_episodes == 0:
         return None
@@ -152,7 +147,10 @@ def evaluate_policy_rollouts(
     steps_taken: list[int] = []
     for seed_spec in seed_specs:
         initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
-        action_noise_rng = action_noise_rng_from_seed_spec(seed_spec)
+        action_noise_rng = action_noise_rng_for_rollout(
+            action_noise_seed,
+            seed_spec=seed_spec,
+        )
         reached_goal, rollout_steps = rollout_policy_with_action_fn(
             simulator=simulator,
             initial_state=initial_state,
