@@ -12,17 +12,17 @@ policy:
   push_to_hub: true
   
   # Neural network settings
-  down_dims: [32, 64]
-  diffusion_step_embed_dim: 16  
+  down_dims: [16, 32, 64]           # Reduced from default [512, 1024, 2048]
+  diffusion_step_embed_dim: 4       # Reduced from default 128
   
   # Inference Speed Optimizations
   noise_scheduler_type: DDIM    
   num_inference_steps: 20       
   
   # Horizon & History adjustments
-  horizon: 32
-  n_action_steps: 16            # Execute 16 steps before re-sampling
-  n_obs_steps: 3                # Capture last 3 observation frames
+  horizon: 16
+  n_action_steps: 4             # Execute 4 steps before re-sampling
+  n_obs_steps: 3                # Capture observation history
   
   normalization_mapping:
     STATE: MIN_MAX
@@ -45,8 +45,8 @@ policy:
   drop_n_last_frames: 0
 
 # Training settings
-steps: 12500
-save_freq: 12500
+steps: 5000
+save_freq: 5000
 batch_size: 64
 num_workers: 0
 save_checkpoint: true

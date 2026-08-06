@@ -25,6 +25,10 @@ class Unicycle2(DynamicsSimulator):
 
         # fixed goal position:
         self.goal = np.asarray(config.get("goal", [0.0, 0.0, 0.0]))
+        self.randomize_goal = config.get("randomize_goal", "goal" not in config)
+        self.goal_position_bounds = tuple(
+            float(value) for value in config.get("goal_position_bounds", [-1.0, 1.0])
+        )
 
         self.randomize_initial_velocity = config.get("randomize_initial_velocity", False)
 
@@ -36,6 +40,16 @@ class Unicycle2(DynamicsSimulator):
         self.max_omega = float(config.get("max_omega", 0.5))
 
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
+        self.initial_position_min_goal_distance = float(
+            config.get("initial_position_min_goal_distance", self.error_tolerance)
+        )
+        self.initial_position_radius_bounds = tuple(
+            float(value)
+            for value in config.get(
+                "initial_position_radius_bounds",
+                [self.initial_position_min_goal_distance, 1.0],
+            )
+        )
         
         # number of states and actions:
         self.nx = 5 
@@ -193,9 +207,12 @@ class Unicycle2(DynamicsSimulator):
         """
         samples random state
         """
-        radius = rng.uniform(0.5, 3.0)
-        angle = rng.uniform(0.0, 2 * np.pi)
-        pos = self.goal[:2] + radius * np.array([np.cos(angle), np.sin(angle)])
+        offset = self.sample_planar_start_offset(
+            rng,
+            radius_bounds=self.initial_position_radius_bounds,
+            min_goal_distance=self.initial_position_min_goal_distance,
+        )
+        pos = self.goal[:2] + offset
         theta = rng.uniform(low=-np.pi, high=np.pi)
 
         v = 0.0
@@ -206,27 +223,15 @@ class Unicycle2(DynamicsSimulator):
         
         return np.array([pos[0], pos[1], theta, v, omega])
 
-    def reset_random(self) -> np.ndarray:
-        """
-        creates a random valid initial state around goal
-        """
-
-        radius = np.random.uniform(0.5, 3.0)
-        angle = np.random.uniform(0.0, 2 * np.pi)
-
-        pos = self.goal[:2] + radius * np.array(
-            [np.cos(angle), np.sin(angle)]
-        )
-        theta = np.random.uniform(low=-np.pi, high=np.pi)
-
-        v = 0.0
-        omega = 0.0
-        if self.randomize_initial_velocity:
-            v = np.random.uniform(-self.max_speed, self.max_speed)
-            omega = np.random.uniform(-self.max_omega, self.max_omega)
-        
-        initial_state = np.array([pos[0], pos[1], theta, v, omega])
-        return self.reset(initial_state)
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
+        if self.randomize_goal:
+            goal_pos = rng.uniform(
+                low=self.goal_position_bounds[0],
+                high=self.goal_position_bounds[1],
+                size=self.goal.shape[0] - 1,
+            )
+            goal_theta = rng.uniform(low=-np.pi, high=np.pi)
+            self.goal = np.array([goal_pos[0], goal_pos[1], goal_theta])
 
     def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
         """

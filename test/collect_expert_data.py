@@ -10,6 +10,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
+from systems.initial_state_utils import parse_initial_states_argument
 from utils import collect_expert_data
 
 
@@ -22,6 +23,7 @@ def run_collection(
     action_noise_std: float = 0.0,
     repo_id: str | None = None,
     local_dir: str | None = None,
+    initial_states: Any | None = None,
 ):
     repo_id = repo_id or f"local/{system}_{planner_name}_expert"
     local_dir = local_dir or f"data/lerobot_dataset_{system}_{planner_name}"
@@ -37,6 +39,7 @@ def run_collection(
         num_traj=num_traj,
         num_steps=num_steps,
         action_noise_std=action_noise_std,
+        initial_states=initial_states,
     )
 
 
@@ -92,6 +95,17 @@ def main():
         type=str,
         help="local directory where dataset is saved",
     )
+    parser.add_argument(
+        "--initial-states",
+        type=str,
+        default=None,
+        help=(
+            "explicit initial state specs. Examples: '[x, y, ...]' for one rollout, "
+            "'[[...], [...]]' for multiple global states, or "
+            "'[[[robot1...], [robot2...]], ...]' for multi-robot rollouts. "
+            "When exhausted, collection falls back to simulator RNG sampling."
+        ),
+    )
 
     args = parser.parse_args()
     cfg = load_and_validate_system_config(system_name=args.system, config_path=args.config)
@@ -105,6 +119,7 @@ def main():
         num_traj=args.num_traj,
         num_steps=args.num_steps,
         action_noise_std=args.action_noise_std,
+        initial_states=parse_initial_states_argument(args.initial_states),
     )
 
 

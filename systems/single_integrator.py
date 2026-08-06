@@ -1,14 +1,16 @@
+from typing import Any, Mapping
+
+import casadi as ca
+import numpy as np
+import torch
+
+from core.types import VectorSpec, as_vector
 from .dynamics import DynamicsSimulator
 from .state_space_types import (
     Euclidean2DAction,
     Euclidean2DState,
     Euclidean4DObservation,
 )
-from core.types import VectorSpec, as_vector
-import casadi as ca
-import numpy as np
-import torch
-from typing import Any, Mapping
 
 
 class SingleIntegrator(DynamicsSimulator):
@@ -24,16 +26,31 @@ class SingleIntegrator(DynamicsSimulator):
         # Determine if we should randomize the goal based on config
         self.randomize_goal = config.get("randomize_goal",
                                          "goal" not in config)
+        self.goal_position_bounds = tuple(
+            float(value) for value in config.get("goal_position_bounds", [-1.0, 1.0])
+        )
         self.max_action = config.get("max_vel", 1.0)
         self.nx = 2
         self.nu = 2
         self.obs_dim = 4
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
-        
+        self.initial_position_min_goal_distance = float(
+            config.get("initial_position_min_goal_distance", self.error_tolerance)
+        )
+        self.initial_position_radius_bounds = tuple(
+            float(value)
+            for value in config.get(
+                "initial_position_radius_bounds",
+                [self.initial_position_min_goal_distance, 1.0],
+            )
+        )
         environment = config.get("environment", {})
         self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
-        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]), dtype=float)
+        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]),
+            dtype=float,
+        )
+
         self.db_lacam_robot_type = "integrator1_2d_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
@@ -100,9 +117,11 @@ class SingleIntegrator(DynamicsSimulator):
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
         while True:
-            radius = rng.uniform(0.5, 3.0)
-            angle = rng.uniform(0.0, 2 * np.pi)
-            offset = radius * np.array([np.cos(angle), np.sin(angle)])
+            offset = self.sample_planar_start_offset(
+                rng,
+                radius_bounds=self.initial_position_radius_bounds,
+                min_goal_distance=self.initial_position_min_goal_distance,
+            )
             initial_state = self.goal + offset
 
             if np.all((initial_state >= self.environment_min) & (initial_state <= self.environment_max)):
@@ -117,19 +136,13 @@ class SingleIntegrator(DynamicsSimulator):
     def goal_state(self) -> np.ndarray:
         return np.array([self.goal[0], self.goal[1]])
 
-    def reset_random(self) -> np.ndarray:
-        """Randomize start position, and optionally the goal."""
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         if self.randomize_goal:
-            self.goal = np.random.uniform(low=self.environment_min, high=self.environment_max, size=2)
-
-        while True:
-            radius = np.random.uniform(0.5, 3.0)
-            angle = np.random.uniform(0, 2 * np.pi)
-            offset = radius * np.array([np.cos(angle), np.sin(angle)])
-            start_pos = self.goal + offset
-
-            if np.all((start_pos >= self.environment_min) & (start_pos <= self.environment_max)):
-                return self.reset(start_pos)
+            self.goal = rng.uniform(
+                low=self.goal_position_bounds[0],
+                high=self.goal_position_bounds[1],
+                size=self.goal.shape[0],
+            )
 
     def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
         """Package the observation and action into a dictionary for LeRobot"""
