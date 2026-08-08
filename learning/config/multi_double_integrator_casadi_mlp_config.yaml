@@ -1,0 +1,6 @@
+# MLP architecture config for learning/train_dagger.py
+# Input/output dimensions are inferred from simulator dataset features and action space.
+
+model:
+  # Hidden layer widths for MLPPolicy(state_dim -> ... -> action_dim)
+  hidden_dims: [256, 256, 128]

@@ -1,52 +1,47 @@
-# Dataset settings
-dataset:
-  repo_id: local/double_integrator_casadi_expert
-  root: data/lerobot_dataset_double_integrator_casadi
-
 # Policy settings
 policy:
   type: act
   device: mps
   
-  repo_id: jovaldivieso/double_integrator_casadi_act
+  repo_id: jovaldivieso/unicycle2_casadi_act
   push_to_hub: true
 
   # Neural network policy settings
-  chunk_size: 16
-  dim_feedforward: 466
-  dim_model: 64
-  latent_dim: 24
+  chunk_size: 32
+  dim_feedforward: 1024
+  dim_model: 128
+  latent_dim: 32
   n_encoder_layers: 1
   n_decoder_layers: 1       # Keep this at 1 like default LeRobot's ACT
   n_heads: 1
   n_vae_encoder_layers: 1
   use_vae: true
-  
+
   # Action chunking & History adjustments
   n_action_steps: 1
   n_obs_steps: 1            # Must be 1 for LeRobot's ACT implementation
-  
+
   normalization_mapping:
     STATE: MIN_MAX
     ENV: MIN_MAX
     ACTION: MIN_MAX
-  
+
   input_features:
     observation.environment_state:
-      shape: [2]
+      shape: [3]
       type: ENV
     observation.state:
       shape: [2]
       type: STATE
-      
+
   output_features:
     action:
       shape: [2]
       type: ACTION
 
 # Training settings
-steps: 5000
-save_freq: 5000
+steps: 17000
+save_freq: 17000
 batch_size: 64
 num_workers: 0
 save_checkpoint: true

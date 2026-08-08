@@ -14,17 +14,17 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-try:
-    from tqdm.auto import tqdm
-except Exception:  # pragma: no cover - fallback for minimal environments
-    tqdm = None
+from tqdm.auto import tqdm
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from core.config import load_and_validate_system_config
+from core.config import (
+    load_and_validate_mlp_architecture_config,
+    load_and_validate_system_config,
+)
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger_evaluation import (
     DaggerEvalMetrics,
@@ -39,6 +39,9 @@ from systems.seed_utils import (
     action_noise_seed_for_rollout,
     default_action_noise_seed_for_config,
 )
+
+
+DEFAULT_MLP_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 128)
 
 
 def get_training_device() -> torch.device:
@@ -158,9 +161,18 @@ class DaggerConfig:
     eval_action_noise_std: float
     batch_size: int
     learning_rate: float
+    mlp_hidden_dims: tuple[int, ...]
     checkpoint_dir: Path
     seed: int
     max_train_steps: int | None
+
+
+def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
+    if mlp_config_path is None:
+        return DEFAULT_MLP_HIDDEN_DIMS
+
+    validated = load_and_validate_mlp_architecture_config(mlp_config_path)
+    return validated.hidden_dims
 
 
 def default_checkpoint_dir_for_system(system: str) -> Path:
@@ -408,7 +420,11 @@ def run_dagger(cfg: DaggerConfig) -> None:
     state_dim = observation_dim_from_features(simulator)
     action_dim = int(simulator.nu)
 
-    policy = MLPPolicy(state_dim=state_dim, action_dim=action_dim).to(device)
+    policy = MLPPolicy(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        hidden_dims=cfg.mlp_hidden_dims,
+    ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate)
 
     cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -419,6 +435,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
     print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
     print(f"Evaluation action noise std: {cfg.eval_action_noise_std:.6f}")
     print(f"Action noise seed: {action_noise_seed}")
+    print(f"MLP hidden dims: {list(cfg.mlp_hidden_dims)}")
     print("Initial offline training pass starts from the current expert dataset.")
 
     print(
@@ -498,6 +515,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
             "optimizer_state_dict": optimizer.state_dict(),
             "state_dim": state_dim,
             "action_dim": action_dim,
+            "hidden_dims": list(cfg.mlp_hidden_dims),
             "obs_feature_names": obs_feature_names,
             "system": cfg.system,
         }
@@ -662,7 +680,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=64,
         help="mini-batch size for MLP training",
     )
     parser.add_argument(
@@ -670,6 +688,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1e-3,
         help="learning rate for Adam optimizer",
+    )
+    parser.add_argument(
+        "--mlp-config",
+        type=Path,
+        default=None,
+        help=(
+            "optional YAML config for MLP architecture; expected key 'model.hidden_dims' "
+            "(or top-level 'hidden_dims'), e.g. [512, 256, 128]"
+        ),
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -705,6 +732,7 @@ def main() -> None:
     checkpoint_dir = args.checkpoint_dir
     if checkpoint_dir is None:
         checkpoint_dir = default_checkpoint_dir_for_system(args.system)
+    mlp_hidden_dims = load_mlp_hidden_dims(args.mlp_config)
 
     cfg = DaggerConfig(
         system=args.system,
@@ -723,6 +751,7 @@ def main() -> None:
         eval_action_noise_std=args.eval_action_noise_std,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        mlp_hidden_dims=mlp_hidden_dims,
         checkpoint_dir=checkpoint_dir,
         seed=args.seed,
         max_train_steps=args.max_train_steps,

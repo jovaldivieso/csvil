@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from matplotlib import colors as mcolors
+from matplotlib.patches import FancyArrowPatch
 
 from core.factory import DynamicsFactory, PlannerFactory
 from systems.initial_state_utils import normalize_initial_state_specs
@@ -30,6 +31,11 @@ def _blend_robot_family_color(
 
     blended = (1.0 - robot_weight) * base_rgb + robot_weight * robot_rgb
     return tuple(np.clip(blended, 0.0, 1.0))
+
+
+def _heading_sample_stride(num_points: int) -> int:
+    """Choose a sparse, readable stride for trajectory heading arrows."""
+    return max(1, num_points // 20)
 
 def collect_expert_data(
     simulator_name: str,
@@ -248,6 +254,27 @@ def plot_xy_trajectories(
                     zorder=4,
                 )
 
+                stride = _heading_sample_stride(len(robot_traj))
+                heading_idx = np.arange(0, len(robot_traj), stride, dtype=int)
+                if heading_idx[-1] != len(robot_traj) - 1:
+                    heading_idx = np.append(heading_idx, len(robot_traj) - 1)
+
+                sampled_states = robot_traj[heading_idx]
+                sampled_theta = sampled_states[:, 2]
+                ax.quiver(
+                    sampled_states[:, 0],
+                    sampled_states[:, 1],
+                    0.18 * np.cos(sampled_theta),
+                    0.18 * np.sin(sampled_theta),
+                    color=line.get_color(),
+                    angles="xy",
+                    scale_units="xy",
+                    scale=1,
+                    width=0.003,
+                    alpha=0.75,
+                    zorder=3,
+                )
+
     ax.set_title(title)
     ax.set_xlabel("X position")
     ax.set_ylabel("Y position")
@@ -368,6 +395,11 @@ def save_xy_rollout_video(
                 {
                     "x": robot_traj[:, 0],
                     "y": robot_traj[:, 1],
+                    "theta": (
+                        robot_traj[:, 2]
+                        if show_heading and has_heading_goal(robot_simulators[robot_idx])
+                        else None
+                    ),
                     "color": robot_color,
                     "marker": marker,
                     "label": label,
@@ -382,6 +414,8 @@ def save_xy_rollout_video(
 
     line_artists = []
     point_artists = []
+    heading_artists = []
+    heading_length = 0.22
     for item in series:
         line, = ax.plot(
             [],
@@ -397,6 +431,24 @@ def save_xy_rollout_video(
         point, = ax.plot([], [], marker="o", color=item["color"], markersize=3)
         line_artists.append(line)
         point_artists.append(point)
+
+        theta_series = item.get("theta")
+        if theta_series is not None:
+            heading = FancyArrowPatch(
+                (0.0, 0.0),
+                (0.0, 0.0),
+                arrowstyle="-|>",
+                color=item["color"],
+                linewidth=1.8,
+                alpha=0.9,
+                mutation_scale=12.0,
+                zorder=6,
+            )
+            heading.set_visible(False)
+            ax.add_patch(heading)
+            heading_artists.append(heading)
+        else:
+            heading_artists.append(None)
 
     all_x = np.concatenate([item["x"] for item in series])
     all_y = np.concatenate([item["y"] for item in series])
@@ -415,19 +467,33 @@ def save_xy_rollout_video(
     total_frames = max(len(item["x"]) for item in series)
 
     def _init():
-        for line, point in zip(line_artists, point_artists):
+        for line, point, heading in zip(line_artists, point_artists, heading_artists):
             line.set_data([], [])
             point.set_data([], [])
-        return [*line_artists, *point_artists]
+            if heading is not None:
+                heading.set_positions((0.0, 0.0), (0.0, 0.0))
+                heading.set_visible(False)
+        return [*line_artists, *point_artists, *[h for h in heading_artists if h is not None]]
 
     def _update(frame_idx: int):
-        for item, line, point in zip(series, line_artists, point_artists):
+        for item, line, point, heading in zip(series, line_artists, point_artists, heading_artists):
             end = min(frame_idx + 1, len(item["x"]))
             x_data = item["x"][:end]
             y_data = item["y"][:end]
             line.set_data(x_data, y_data)
             point.set_data([x_data[-1]], [y_data[-1]])
-        return [*line_artists, *point_artists]
+            theta_series = item.get("theta")
+            if heading is not None and theta_series is not None:
+                theta = theta_series[end - 1]
+                heading.set_positions(
+                    (x_data[-1], y_data[-1]),
+                    (
+                        x_data[-1] + heading_length * np.cos(theta),
+                        y_data[-1] + heading_length * np.sin(theta),
+                    ),
+                )
+                heading.set_visible(True)
+        return [*line_artists, *point_artists, *[h for h in heading_artists if h is not None]]
 
     anim = animation.FuncAnimation(
         fig,

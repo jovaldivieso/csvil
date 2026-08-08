@@ -2,10 +2,10 @@
 
 This repository contains a modular pipeline for controller synthesis via imitation learning. The goal is to imitate a computationally expensive motion planner with a faster neural policy for online control.
 
-The current expert planner uses CasADi, but the architecture is designed to plug in additional planner backends (for example, OMPL) with minimal pipeline changes. A separate Docker environment for future work with db-LaCAM is included as well.
+The current expert planner uses CasADi, but the architecture is designed to plug in additional planner backends (for example, OMPL) with minimal code-path changes. A separate Docker environment for work with the db-LaCAM multi-robot global planner is included as well.
 
 Design-wise, the codebase follows a small set of explicit patterns so new systems
-and planners can be added without changing the pipeline shape.
+and planners can typically be added without changing the overall pipeline shape.
 
 Core design patterns and rationale:
 
@@ -25,8 +25,8 @@ Core design patterns and rationale:
   Configs are normalized and validated in `core/config.py`, and vector dimensions are checked at simulator, planner, and learning boundaries. That turns YAML mistakes and shape mismatches into early local failures instead of wasted rollouts, training runs, or corrupted datasets.
 
 In practice, this means most features are implemented once at the fleet level,
-then reused unchanged for single-robot experiments, multi-robot experiments, and
-mixed future extensions.
+then reused across single-robot experiments, multi-robot experiments, and
+mixed future extensions with minimal system-specific changes.
 
 ## Installation & setup
 
@@ -105,7 +105,8 @@ csvil/
 │   │   ├── double_integrator_casadi_act_config.yaml
 │   │   ├── double_integrator_casadi_diffusion_policy_config.yaml
 │   │   ├── multi_double_integrator_casadi_act_config.yaml
-│   │   └── multi_double_integrator_casadi_diffusion_policy_config.yaml
+│   │   ├── multi_double_integrator_casadi_diffusion_policy_config.yaml
+│   │   └── multi_unicycle2_casadi_mlp_config.yaml
 │   ├── models/
 │   │   └── mlp.py             # Custom MLP policy used for BC/DAgger
 │   ├── dagger_evaluation.py   # Shared in-loop DAgger evaluation helpers
@@ -130,6 +131,7 @@ csvil/
     ├── config/
     │   ├── double_integrator_casadi_config.yaml
     │   ├── multi_double_integrator_casadi_config.yaml
+    │   ├── multi_unicycle2_casadi_config.yaml
     │   └── multi_robot_dblacam_config.yaml
     ├── collect_expert_data.py    # CLI for expert dataset generation
     ├── evaluate_policy.py        # CLI for rollout/evaluation across policy families
@@ -146,6 +148,10 @@ The available systems are:
 - `unicycle1`
 - `unicycle2`
 - `multi_robot` (composite fleet, e.g. multiple double integrators)
+
+These cover different dynamics classes under one pipeline shape: holonomic systems
+(`single_integrator`, `double_integrator`) and non-holonomic systems
+(`unicycle1`, `unicycle2`). The current built-in dynamics examples span both fully actuated and underactuated systems.
 
 Available planners are:
 
@@ -185,6 +191,12 @@ Canonical multi-robot example:
 - `learning/config/multi_double_integrator_casadi_diffusion_policy_config.yaml`
 - `learning/config/multi_double_integrator_casadi_act_config.yaml`
 
+Canonical multi-robot `unicycle2` + MLP DAgger example:
+
+- `test/config/multi_unicycle2_casadi_config.yaml`
+  (2x homogeneous `unicycle2` robots with shared MPC planner settings and global `d_safe`)
+- `learning/config/multi_unicycle2_casadi_mlp_config.yaml`
+
 ## Pipeline features
 
 ### Generate a motion planning expert dataset
@@ -197,7 +209,8 @@ python test/collect_expert_data.py \
 --system double_integrator \
 --planner casadi \
 --config test/config/double_integrator_casadi_config.yaml \
---action-noise-std 0.0
+--action-noise-std 0.0 \
+--num-traj 100
 ```
 
 If the CasADi solver fails for a rollout, that trajectory is skipped and not
@@ -218,7 +231,8 @@ python test/collect_expert_data.py \
 --system multi_robot \
 --planner casadi \
 --config test/config/multi_double_integrator_casadi_config.yaml \
---action-noise-std 0.0
+--action-noise-std 0.0 \
+--num-traj 100
 ```
 
 Without `--repo-id` / `--local-dir`, the collector uses the default naming
@@ -290,7 +304,9 @@ docker compose run --rm csvil \
 python test/plot_expert_trajectories.py \
 --system double_integrator \
 --planner casadi \
---config test/config/double_integrator_casadi_config.yaml
+--config test/config/double_integrator_casadi_config.yaml \
+--num-steps 150 \
+--action-noise-std 0.03
 ```
 
 For a multi-robot setup:
@@ -301,6 +317,7 @@ python test/plot_expert_trajectories.py \
 --system multi_robot \
 --planner casadi \
 --config test/config/multi_double_integrator_casadi_config.yaml \
+--num-steps 150 \
 --action-noise-std 0.03
 ```
 
@@ -382,13 +399,14 @@ python learning/train_dagger.py \
 --action-noise-std 0.0
 ```
 
-Multi-robot MLP policy with DAgger training:
+Multi-robot MLP policy with DAgger training for 2 `double_integrator` systems:
 
 ```bash
 docker compose run --rm csvil \
 python learning/train_dagger.py \
 --system multi_robot \
 --config test/config/multi_double_integrator_casadi_config.yaml \
+--mlp-config learning/config/multi_double_integrator_casadi_mlp_config.yaml \
 --repo-id local/multi_robot_casadi_expert \
 --dataset-root data/lerobot_dataset_multi_robot_casadi \
 --dagger-iterations 1 \
@@ -403,6 +421,7 @@ round does: aggregate learner rollouts with expert labels, then retrain.
 
 - `--dagger-iterations 0`: pure offline training only (no aggregation)
 - `--dagger-iterations 1`: one aggregate + retrain refinement
+- `--mlp-config`: optional YAML file for MLP architecture, e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [512, 256, 128]`
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate` and `aggregation_mean_steps`.
 - After each retrain, deterministic in-loop evaluation reports `eval_success_rate` and `eval_mean_steps`.
 - Evaluation defaults to 10 seeded rollouts; tune with `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, and `--eval-action-noise-std`.
@@ -582,7 +601,7 @@ execution functions (`run_evaluation`, `run_plotting`, `run_collection`) so they
 
 ### CLI argument quick reference
 
-Use this as a compact source of truth for current entrypoint flags.
+Use this as a compact quick reference for current entrypoint flags.
 
 - `test/collect_expert_data.py`
   - required workflow args: `--system`, `--planner`, `--config`
