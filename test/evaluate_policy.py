@@ -42,6 +42,31 @@ def is_observation_feature(feature_name: str) -> bool:
     return feature_name.startswith("observation.") or ".observation." in feature_name
 
 
+def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, ...]:
+    """Infer hidden layer widths from MLP Sequential Linear layer weights."""
+    linear_layers: list[tuple[int, int]] = []
+    for key, value in state_dict.items():
+        if key.startswith("network.") and key.endswith(".weight"):
+            parts = key.split(".")
+            if len(parts) != 3:
+                continue
+            try:
+                layer_idx = int(parts[1])
+            except ValueError:
+                continue
+            if value.ndim != 2:
+                continue
+            linear_layers.append((layer_idx, int(value.shape[0])))
+
+    if len(linear_layers) < 2:
+        # Fallback to historical default for legacy checkpoints.
+        return (256, 256, 128)
+
+    linear_layers.sort(key=lambda item: item[0])
+    # Last Linear maps to action_dim; preceding ones are hidden widths.
+    return tuple(out_dim for _, out_dim in linear_layers[:-1])
+
+
 def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
     if raw_seeds is None:
         return []
@@ -347,13 +372,24 @@ def run_evaluation(
         )
         action_dim = int(simulator.nu)
 
-        policy = MLPPolicy(state_dim=state_dim, action_dim=action_dim)
-
         checkpoint = torch.load(model_dir, map_location=device)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            policy.load_state_dict(checkpoint["model_state_dict"])
+            state_dict = checkpoint["model_state_dict"]
+            hidden_dims_raw = checkpoint.get("hidden_dims")
+            if isinstance(hidden_dims_raw, list) and len(hidden_dims_raw) > 0:
+                hidden_dims = tuple(int(width) for width in hidden_dims_raw)
+            else:
+                hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
         else:
-            policy.load_state_dict(checkpoint)
+            state_dict = checkpoint
+            hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+
+        policy = MLPPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dims=hidden_dims,
+        )
+        policy.load_state_dict(state_dict)
 
         policy_display_name = "MLP"
     else:

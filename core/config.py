@@ -110,6 +110,11 @@ class MultiRobotSystemConfig:
     initial_state_seed: int | None = None
 
 
+@dataclass(frozen=True)
+class MLPArchitectureConfig:
+    hidden_dims: tuple[int, ...] = (256, 256, 128)
+
+
 def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     """Load YAML into a dictionary and fail with context when invalid."""
     path = Path(config_path)
@@ -122,6 +127,43 @@ def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ConfigurationError(f"Expected YAML mapping in {path}, got {type(data).__name__}.")
     return data
+
+
+def validate_mlp_architecture_config(raw_config: Mapping[str, Any]) -> MLPArchitectureConfig:
+    """Validate MLP architecture YAML for custom DAgger training."""
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ConfigurationError(
+            "MLP config must be a mapping with either a top-level 'hidden_dims' key "
+            "or a nested 'model.hidden_dims' key."
+        )
+
+    hidden_dims_raw = model_section.get("hidden_dims")
+    if hidden_dims_raw is None:
+        raise ConfigurationError(
+            "Missing 'hidden_dims' in MLP config. "
+            "Expected e.g. model: {hidden_dims: [256, 256, 128]}."
+        )
+    if not isinstance(hidden_dims_raw, list) or len(hidden_dims_raw) == 0:
+        raise ConfigurationError("'hidden_dims' must be a non-empty list of positive integers.")
+
+    hidden_dims: list[int] = []
+    for idx, width in enumerate(hidden_dims_raw):
+        if isinstance(width, bool) or not isinstance(width, int):
+            raise ConfigurationError(
+                f"'hidden_dims[{idx}]' must be int, got {type(width).__name__}."
+            )
+        if width <= 0:
+            raise ConfigurationError(f"'hidden_dims[{idx}]' must be positive.")
+        hidden_dims.append(int(width))
+
+    return MLPArchitectureConfig(hidden_dims=tuple(hidden_dims))
+
+
+def load_and_validate_mlp_architecture_config(config_path: str | Path) -> MLPArchitectureConfig:
+    """Load and validate custom MLP architecture YAML."""
+    raw = load_yaml_config(config_path)
+    return validate_mlp_architecture_config(raw)
 
 
 def _float(config: Mapping[str, Any], key: str, default: float) -> float:
