@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import math
 import os
 import random
 import sys
@@ -13,6 +14,10 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - fallback for minimal environments
+    tqdm = None
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -21,10 +26,19 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
+from learning.dagger_evaluation import (
+    DaggerEvalMetrics,
+    apply_execution_noise,
+    evaluate_policy_rollouts,
+)
 from learning.models.mlp import MLPPolicy
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
+from systems.seed_utils import (
+    action_noise_seed_for_rollout,
+    default_action_noise_seed_for_config,
+)
 
 
 def get_training_device() -> torch.device:
@@ -134,13 +148,19 @@ class DaggerConfig:
     dataset_root: Path
     planner_name: str
     dagger_iterations: int
-    epochs_per_iteration: int
     trajectories_per_iteration: int
     steps_per_trajectory: int
+    action_noise_std: float
+    target_epochs_per_round: float
+    eval_episodes: int
+    eval_steps: int | None
+    eval_seed_start: int
+    eval_action_noise_std: float
     batch_size: int
     learning_rate: float
     checkpoint_dir: Path
     seed: int
+    max_train_steps: int | None
 
 
 def default_checkpoint_dir_for_system(system: str) -> Path:
@@ -149,17 +169,41 @@ def default_checkpoint_dir_for_system(system: str) -> Path:
     return Path("outputs/train_dagger")
 
 
-def train_policy_epoch(
+def train_policy_steps(
     policy: MLPPolicy,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    num_steps: int,
 ) -> float:
+    if num_steps <= 0:
+        raise ValueError("'num_steps' must be positive.")
+
     policy.train()
     mse_loss = nn.MSELoss()
     running_loss = 0.0
+    data_iterator = iter(dataloader)
+    progress = None
+    if tqdm is not None:
+        progress = tqdm(
+            range(1, num_steps + 1),
+            desc="Train steps",
+            unit="step",
+            leave=False,
+            dynamic_ncols=True,
+        )
+        step_iterator = progress
+    else:
+        step_iterator = range(1, num_steps + 1)
+        print("tqdm not installed; showing periodic step progress.")
 
-    for observations, actions in dataloader:
+    for step in step_iterator:
+        try:
+            observations, actions = next(data_iterator)
+        except StopIteration:
+            data_iterator = iter(dataloader)
+            observations, actions = next(data_iterator)
+
         observations = observations.to(device)
         actions = actions.to(device)
 
@@ -169,9 +213,44 @@ def train_policy_epoch(
         loss.backward()
         optimizer.step()
 
-        running_loss += float(loss.item())
+        step_loss = float(loss.item())
+        running_loss += step_loss
+        running_mean = running_loss / float(step)
+        if progress is not None:
+            progress.set_postfix(loss=f"{step_loss:.6f}", mean=f"{running_mean:.6f}")
+        elif step == 1 or step == num_steps or step % max(1, num_steps // 10) == 0:
+            print(
+                f"  step {step}/{num_steps} "
+                f"loss={step_loss:.6f} mean_loss={running_mean:.6f}"
+            )
 
-    return running_loss / max(len(dataloader), 1)
+    if progress is not None:
+        progress.close()
+
+    return running_loss / float(num_steps)
+
+
+def resolve_round_steps(
+    num_frames: int,
+    batch_size: int,
+    target_epochs_per_round: float,
+    max_train_steps: int | None,
+) -> tuple[int, float]:
+    if num_frames <= 0:
+        raise ValueError("Training dataset must contain at least one frame.")
+    if batch_size <= 0:
+        raise ValueError("'batch_size' must be positive.")
+    if target_epochs_per_round <= 0:
+        raise ValueError("'target_epochs_per_round' must be positive.")
+
+    steps = math.ceil(float(target_epochs_per_round) * float(num_frames) / float(batch_size))
+    if max_train_steps is not None:
+        steps = min(steps, int(max_train_steps))
+    if steps <= 0:
+        raise ValueError("Per-round training steps must remain positive.")
+
+    approx_epochs = float(steps) * float(batch_size) / float(num_frames)
+    return steps, approx_epochs
 
 
 def collect_dagger_data(
@@ -182,13 +261,17 @@ def collect_dagger_data(
     trajectories_per_iteration: int,
     steps_per_trajectory: int,
     device: torch.device,
-) -> int:
+    action_noise_std: float,
+    action_noise_seed: int,
+) -> DaggerEvalMetrics:
     """
     Roll out learner policy, query expert at visited states, aggregate labels.
     """
     successful_episodes = 0
     attempted_episodes = 0
     max_attempts = max(trajectories_per_iteration * 3, trajectories_per_iteration)
+    reached_goal_count = 0
+    steps_taken: list[int] = []
 
     policy.eval()
 
@@ -201,11 +284,20 @@ def collect_dagger_data(
             )
 
         state = simulator.reset_random()
-        done_counter = 0
+        episode_initial_state = state.copy()
+        episode_noise_seed = action_noise_seed_for_rollout(
+            action_noise_seed,
+            rollout_index=attempted_episodes,
+        )
+        episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
         planner_failed = False
         expert_planner.reset()
 
-        for _ in range(steps_per_trajectory):
+        reached_goal = False
+        rollout_steps = steps_per_trajectory
+        episode_frames: list[dict[str, object]] = []
+
+        for step in range(1, steps_per_trajectory + 1):
             observation = simulator.observe(state)
 
             with torch.inference_mode():
@@ -215,29 +307,62 @@ def collect_dagger_data(
             try:
                 expert_action = expert_planner(observation)
             except PlannerSolveError as exc:
-                print(f"Skipping episode due to planner failure: {exc}")
+                print(
+                    "Skipping episode due to planner failure "
+                    f"(attempt={attempted_episodes}, step={step}, action_noise_std={action_noise_std:.6f}, "
+                    f"noise_seed={episode_noise_seed})."
+                )
+                print(
+                    "Planner failure context: "
+                    f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
+                    f"current_state={np.array2string(np.asarray(state), precision=6)}, "
+                    f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
+                )
+                print(f"Underlying solver error: {exc}")
                 planner_failed = True
                 break
 
             frame_data = simulator.format_dataset_frame(observation, expert_action)
             frame_data["task"] = "reach target"
-            dataset_writer.add_frame(frame_data)
+            episode_frames.append(frame_data)
 
-            # Environment advances using learner action; label is expert correction.
-            state = simulator.step(state, policy_action)
+            # Environment advances with noisy learner action; labels remain clean expert corrections.
+            executed_action = apply_execution_noise(
+                simulator=simulator,
+                action=policy_action,
+                action_noise_std=action_noise_std,
+                rng=episode_action_noise_rng,
+            )
+            state = simulator.step(state, executed_action)
 
-            if simulator.is_done(state):
-                done_counter += 1
-                if done_counter >= 5:
-                    break
+            if simulator.should_terminate_rollout(state):
+                reached_goal = True
+                rollout_steps = step
+                break
 
         if planner_failed:
             continue
 
+        for frame_data in episode_frames:
+            dataset_writer.add_frame(frame_data)
         dataset_writer.save_episode()
         successful_episodes += 1
+        reached_goal_count += int(reached_goal)
+        steps_taken.append(int(rollout_steps))
 
-    return successful_episodes
+        if successful_episodes % 10 == 0:
+            print(
+                "Collected "
+                f"{successful_episodes}/{trajectories_per_iteration} trajectories"
+            )
+
+    return DaggerEvalMetrics(
+        success_rate=float(reached_goal_count) / float(successful_episodes),
+        mean_steps=float(np.mean(np.asarray(steps_taken, dtype=float))),
+        min_steps=min(steps_taken),
+        max_steps=max(steps_taken),
+        num_episodes=successful_episodes,
+    )
 
 
 def run_dagger(cfg: DaggerConfig) -> None:
@@ -245,22 +370,33 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
     if cfg.dagger_iterations < 0:
         raise ValueError("'dagger_iterations' must be non-negative.")
-    if cfg.epochs_per_iteration <= 0:
-        raise ValueError("'epochs_per_iteration' must be positive.")
     if cfg.trajectories_per_iteration <= 0:
         raise ValueError("'trajectories_per_iteration' must be positive.")
     if cfg.steps_per_trajectory <= 0:
         raise ValueError("'steps_per_trajectory' must be positive.")
+    if cfg.action_noise_std < 0:
+        raise ValueError("'action_noise_std' must be non-negative.")
+    if cfg.target_epochs_per_round <= 0:
+        raise ValueError("'target_epochs_per_round' must be positive.")
+    if cfg.eval_episodes < 0:
+        raise ValueError("'eval_episodes' must be non-negative.")
+    if cfg.eval_steps is not None and cfg.eval_steps <= 0:
+        raise ValueError("'eval_steps' must be positive when provided.")
+    if cfg.eval_action_noise_std < 0:
+        raise ValueError("'eval_action_noise_std' must be non-negative.")
     if cfg.batch_size <= 0:
         raise ValueError("'batch_size' must be positive.")
     if cfg.learning_rate <= 0:
         raise ValueError("'learning_rate' must be positive.")
+    if cfg.max_train_steps is not None and cfg.max_train_steps <= 0:
+        raise ValueError("'max_train_steps' must be positive when provided.")
 
     if not cfg.dataset_root.exists():
         raise FileNotFoundError(f"Dataset root does not exist: {cfg.dataset_root}")
 
     simulator = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
     device = get_training_device()
+    action_noise_seed = default_action_noise_seed_for_config(cfg.experiment_config)
 
     obs_feature_names = observation_feature_names(simulator)
     act_feature_names = action_feature_names(simulator)
@@ -280,7 +416,16 @@ def run_dagger(cfg: DaggerConfig) -> None:
     print("Starting DAgger training")
     print(f"Device: {device}")
     print(f"Initial dataset root: {cfg.dataset_root}")
+    print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
+    print(f"Evaluation action noise std: {cfg.eval_action_noise_std:.6f}")
+    print(f"Action noise seed: {action_noise_seed}")
     print("Initial offline training pass starts from the current expert dataset.")
+
+    print(
+        "Epoch-target schedule: "
+        f"target_epochs={cfg.target_epochs_per_round:.2f}, "
+        f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
+    )
 
     def train_on_aggregate(label: str) -> None:
         print(f"\n=== {label} ===")
@@ -300,14 +445,51 @@ def run_dagger(cfg: DaggerConfig) -> None:
         )
 
         print(f"Training on {len(train_dataset)} aggregated frames")
-        for epoch in range(1, cfg.epochs_per_iteration + 1):
-            epoch_loss = train_policy_epoch(
-                policy=policy,
-                dataloader=train_loader,
-                optimizer=optimizer,
-                device=device,
-            )
-            print(f"  epoch {epoch:03d}/{cfg.epochs_per_iteration:03d} | mse={epoch_loss:.6f}")
+        round_steps, approx_epochs = resolve_round_steps(
+            num_frames=len(train_dataset),
+            batch_size=cfg.batch_size,
+            target_epochs_per_round=cfg.target_epochs_per_round,
+            max_train_steps=cfg.max_train_steps,
+        )
+        print(
+            f"  optimizer_steps={round_steps} "
+            f"(~{approx_epochs:.2f} epochs at batch_size={cfg.batch_size})"
+        )
+        step_loss = train_policy_steps(
+            policy=policy,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            device=device,
+            num_steps=round_steps,
+        )
+        print(f"  mean_step_loss={step_loss:.6f}")
+
+    def evaluate_current_policy(label: str) -> None:
+        if cfg.eval_episodes == 0:
+            return
+
+        eval_simulator = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
+        eval_steps = cfg.eval_steps if cfg.eval_steps is not None else cfg.steps_per_trajectory
+
+        def action_fn(observation: np.ndarray) -> np.ndarray:
+            with torch.inference_mode():
+                model_input = flatten_observation_for_policy(eval_simulator, observation, device=device)
+                action = policy.select_action(model_input).squeeze(0).cpu().numpy()
+            return action
+
+        metrics = evaluate_policy_rollouts(
+            simulator=eval_simulator,
+            num_episodes=cfg.eval_episodes,
+            num_steps=eval_steps,
+            seed_start=cfg.eval_seed_start,
+            action_fn=action_fn,
+            reset_fn=None,
+            action_noise_std=cfg.eval_action_noise_std,
+            action_noise_seed=action_noise_seed,
+        )
+        if metrics is None:
+            return
+        print_rollout_metrics(label=label, prefix="eval", metrics=metrics)
 
     def save_checkpoints(training_round: int) -> None:
         checkpoint_data = {
@@ -327,6 +509,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         print(f"Saved checkpoints: {latest_checkpoint} and {iteration_checkpoint}")
 
     train_on_aggregate("Initial offline training pass")
+    evaluate_current_policy("Round 0 evaluation")
     save_checkpoints(training_round=0)
 
     if cfg.dagger_iterations == 0:
@@ -345,7 +528,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
 
         try:
-            collected_episodes = collect_dagger_data(
+            aggregation_metrics = collect_dagger_data(
                 simulator=simulator_for_rollout,
                 expert_planner=expert_planner,
                 policy=policy,
@@ -353,6 +536,8 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 trajectories_per_iteration=cfg.trajectories_per_iteration,
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 device=device,
+                action_noise_std=cfg.action_noise_std,
+                action_noise_seed=action_noise_seed,
             )
         finally:
             # LeRobot writes parquet chunks lazily; finalize guarantees readable footers.
@@ -360,10 +545,24 @@ def run_dagger(cfg: DaggerConfig) -> None:
             del dataset_writer
             gc.collect()
 
-        print(f"Collected {collected_episodes} new DAgger episodes")
+        print_rollout_metrics(
+            label=f"Refinement {refinement} aggregation",
+            prefix="aggregation",
+            metrics=aggregation_metrics,
+        )
 
         train_on_aggregate(f"DAgger refinement {refinement}/{cfg.dagger_iterations}: retrain")
+        evaluate_current_policy(f"Refinement {refinement} evaluation")
         save_checkpoints(training_round=refinement)
+
+
+def print_rollout_metrics(label: str, prefix: str, metrics: DaggerEvalMetrics) -> None:
+    print(
+        f"{label}: {prefix}_success_rate={100.0 * metrics.success_rate:.1f}% "
+        f"{prefix}_mean_steps={metrics.mean_steps:.2f} "
+        f"{prefix}_min_steps={metrics.min_steps} {prefix}_max_steps={metrics.max_steps} "
+        f"episodes={metrics.num_episodes}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -410,12 +609,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--epochs-per-iteration",
-        type=int,
-        default=20,
-        help="supervised training epochs per DAgger iteration",
-    )
-    parser.add_argument(
         "--trajectories-per-iteration",
         type=int,
         default=20,
@@ -426,6 +619,45 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=150,
         help="maximum rollout steps per learner trajectory",
+    )
+    parser.add_argument(
+        "--action-noise-std",
+        type=float,
+        default=0.0,
+        help=(
+            "std-dev of Gaussian action noise applied during DAgger rollout execution; "
+            "expert labels remain noise-free"
+        ),
+    )
+    parser.add_argument(
+        "--target-epochs-per-round",
+        type=float,
+        default=30.0,
+        help="target number of dataset epochs to train per round",
+    )
+    parser.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=10,
+        help="number of seeded rollouts used for in-loop policy evaluation after each retrain",
+    )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=None,
+        help="maximum rollout steps used for in-loop evaluation (defaults to --steps-per-trajectory)",
+    )
+    parser.add_argument(
+        "--eval-seed-start",
+        type=int,
+        default=10000,
+        help="first deterministic seed used to generate evaluation initial states",
+    )
+    parser.add_argument(
+        "--eval-action-noise-std",
+        type=float,
+        default=0.0,
+        help="std-dev of Gaussian action noise applied during in-loop evaluation rollouts",
     )
     parser.add_argument(
         "--batch-size",
@@ -452,8 +684,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=99,
         help="random seed",
+    )
+    parser.add_argument(
+        "--max-train-steps",
+        type=int,
+        default=None,
+        help="optional upper bound on per-round optimizer steps",
     )
     return parser.parse_args()
 
@@ -475,13 +713,19 @@ def main() -> None:
         dataset_root=args.dataset_root,
         planner_name=args.planner,
         dagger_iterations=args.dagger_iterations,
-        epochs_per_iteration=args.epochs_per_iteration,
         trajectories_per_iteration=args.trajectories_per_iteration,
         steps_per_trajectory=args.steps_per_trajectory,
+        action_noise_std=args.action_noise_std,
+        target_epochs_per_round=args.target_epochs_per_round,
+        eval_episodes=args.eval_episodes,
+        eval_steps=args.eval_steps,
+        eval_seed_start=args.eval_seed_start,
+        eval_action_noise_std=args.eval_action_noise_std,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         checkpoint_dir=checkpoint_dir,
         seed=args.seed,
+        max_train_steps=args.max_train_steps,
     )
 
     run_dagger(cfg)

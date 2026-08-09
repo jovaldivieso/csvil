@@ -1,15 +1,14 @@
 dt: 0.1
+environment:
+    min: [0.0, 0.0]
+    max: [8.0, 8.0]
+    obstacles: []
 
 db_lacam:
   mode: replan
   replan_freq: 60
   time_limit_ms: 60000
   algorithm_config: planning/dblacam_algorithm_default.yaml
-
-  environment:
-    min: [0.0, 0.0]
-    max: [8.0, 8.0]
-    obstacles: []
 
 robots:
   - system: single_integrator

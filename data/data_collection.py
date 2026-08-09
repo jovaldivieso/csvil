@@ -7,6 +7,10 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
+from systems.seed_utils import (
+    action_noise_rng_for_rollout,
+    default_action_noise_seed_for_config,
+)
 
 
 class DataCollector:
@@ -20,6 +24,7 @@ class DataCollector:
         self.repo_id = repo_id
         self.local_dir = Path(local_dir)
         self.fps = int(1 / self.sim.dt)
+        self.action_noise_seed = default_action_noise_seed_for_config(self.sim.config)
 
     def collect_trajectories(
         self,
@@ -27,8 +32,10 @@ class DataCollector:
         num_trajectories: int,
         num_steps: int = 100,
         action_noise_std: float = 0.0,
+        initial_states: list[np.ndarray] | None = None,
     ) -> LeRobotDataset:
         print(f"Collecting {num_trajectories} trajectories...")
+        provided_initial_states = initial_states or []
 
         if self.local_dir.exists():
             print(f"Cleaning up existing dataset at {self.local_dir}...")
@@ -56,9 +63,18 @@ class DataCollector:
                     f"Collected {successful_trajectories}/{num_trajectories} successful trajectories."
                 )
 
-            # Ask the simulator to initialize itself in a random, valid way
-            state = self.sim.reset_random()
-            done_counter = 0
+            # Use provided initial states first; then fall back to simulator RNG.
+            if attempted_trajectories <= len(provided_initial_states):
+                state = self.sim.reset(provided_initial_states[attempted_trajectories - 1])
+                initial_state_source = "provided"
+            else:
+                state = self.sim.reset_random()
+                initial_state_source = "rng_fallback"
+            episode_initial_state = state.copy()
+            episode_action_noise_rng = action_noise_rng_for_rollout(
+                self.action_noise_seed,
+                rollout_index=attempted_trajectories,
+            )
             planner_failed = False
 
             # Tell the planner a new episode is starting!
@@ -73,14 +89,22 @@ class DataCollector:
                     action = motion_planner(obs)
                 except PlannerSolveError as exc:
                     print(
-                        "Skipping trajectory due to planner failure: "
-                        f"{exc}"
+                        "Skipping trajectory due to planner failure "
+                        f"(attempt={attempted_trajectories}, source={initial_state_source}, "
+                        f"action_noise_std={action_noise_std:.6f})."
                     )
+                    print(
+                        "Planner failure context: "
+                        f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
+                        f"current_state={np.array2string(np.asarray(state), precision=6)}, "
+                        f"goal_state={np.array2string(np.asarray(self.sim.goal_state), precision=6)}"
+                    )
+                    print(f"Underlying solver error: {exc}")
                     planner_failed = True
                     break
 
                 if action_noise_std > 0.0:
-                    noise = np.random.normal(
+                    noise = episode_action_noise_rng.normal(
                         loc=0.0,
                         scale=action_noise_std,
                         size=action.shape,
@@ -100,11 +124,8 @@ class DataCollector:
                 dataset.add_frame(frame_data)
                 state = self.sim.step(state, executed_action)
 
-                # Break so it learns to hold its position and stop
-                if self.sim.is_done(state):
-                    done_counter += 1
-                    if done_counter >= 5:
-                        break
+                if self.sim.should_terminate_rollout(state):
+                    break
 
             if planner_failed:
                 continue

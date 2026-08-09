@@ -57,6 +57,9 @@ class DynamicsFactory:
             if not isinstance(robot_config, Mapping):
                 raise ValueError(f"robots[{robot_idx}].config must be a mapping.")
 
+            robot_config = dict(robot_config)
+            robot_config["environment"] = config.get("environment", {})
+            
             simulators.append(
                 DynamicsFactory.create(system_name=robot_system, config=robot_config)
             )

@@ -24,6 +24,9 @@ class Unicycle1(DynamicsSimulator):
         self.goal = np.array(config.get("goal", [0.0, 0.0, 0.0]))
         self.randomize_goal = config.get("randomize_goal",
                                          "goal" not in config)
+        self.goal_position_bounds = tuple(
+            float(value) for value in config.get("goal_position_bounds", [-1.0, 1.0])
+        )
         self.max_action = config.get("max_v", 2.0)
         self.nx = 3
         self.nu = 2
@@ -31,6 +34,19 @@ class Unicycle1(DynamicsSimulator):
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
         
+        environment = config.get("environment", {})
+        self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
+        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]), dtype=float)
+        self.initial_position_min_goal_distance = float(
+            config.get("initial_position_min_goal_distance", self.error_tolerance)
+        )
+        self.initial_position_radius_bounds = tuple(
+            float(value)
+            for value in config.get(
+                "initial_position_radius_bounds",
+                [self.initial_position_min_goal_distance, 1.0],
+            )
+        )
         self.db_lacam_robot_type = "unicycle1_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
@@ -116,11 +132,17 @@ class Unicycle1(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        radius = rng.uniform(0.5, 3.0)
-        angle = rng.uniform(0.0, 2 * np.pi)
-        pos = self.goal[:2] + radius * np.array([np.cos(angle), np.sin(angle)])
-        theta = rng.uniform(low=-np.pi, high=np.pi)
-        return np.array([pos[0], pos[1], theta])
+        while True:
+            offset = self.sample_planar_start_offset(
+                rng,
+                radius_bounds=self.initial_position_radius_bounds,
+                min_goal_distance=self.initial_position_min_goal_distance,
+            )
+            pos = self.goal[:2] + offset
+
+            if np.all((pos >= self.environment_min) & (pos <= self.environment_max)):
+                theta = rng.uniform(-np.pi, np.pi)
+                return np.array([pos[0], pos[1], theta])
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
         obs = self.validate_observation(obs)
@@ -135,22 +157,15 @@ class Unicycle1(DynamicsSimulator):
     def goal_state(self) -> np.ndarray:
         return np.array([self.goal[0], self.goal[1], self.goal[2]])
 
-    def reset_random(self) -> np.ndarray:
-        """Randomize start position, and optionally the goal."""
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         if self.randomize_goal:
-            goal_pos = np.random.uniform(low=-5.0, high=5.0, size=2)
-            goal_theta = np.random.uniform(low=-np.pi, high=np.pi)
+            goal_pos = rng.uniform(
+                low=self.goal_position_bounds[0],
+                high=self.goal_position_bounds[1],
+                size=self.goal.shape[0] - 1,
+            )
+            goal_theta = rng.uniform(low=-np.pi, high=np.pi)
             self.goal = np.array([goal_pos[0], goal_pos[1], goal_theta])
-
-        radius = np.random.uniform(0.5, 3.0)
-        angle = np.random.uniform(0, 2 * np.pi)
-        offset = np.array([radius * np.cos(angle), radius * np.sin(angle)])
-
-        start_pos = self.goal[:2] + offset
-        start_theta = np.random.uniform(low=-np.pi, high=np.pi)
-
-        initial_state = np.array([start_pos[0], start_pos[1], start_theta])
-        return self.reset(initial_state)
 
     def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
         """Package the observation and action into a dictionary for LeRobot"""
