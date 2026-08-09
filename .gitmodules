@@ -1,0 +1,4 @@
+[submodule "dynoplan"]
+	path = dynoplan
+	url = git@github.com:quimortiz/dynoplan.git
+	branch = dbecbs-tro
