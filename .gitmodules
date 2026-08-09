@@ -1,0 +1,4 @@
+[submodule "db-lacam"]
+	path = db-lacam
+	url = https://github.com/franzqueissner/db-lacam-csvil.git
+	branch = select-motion-primitives
