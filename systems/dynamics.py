@@ -158,7 +158,9 @@ class DynamicsSimulator(ABC):
                 "Initial-state sampling requires the maximum initial radius to exceed the minimum goal distance."
             )
 
-        radius = rng.uniform(effective_radius_min, radius_max)
+        # Sample uniformly with respect to planar area on the annulus, not uniformly in radius.
+        radius_sq = rng.uniform(effective_radius_min**2, radius_max**2)
+        radius = float(np.sqrt(radius_sq))
         angle = rng.uniform(0.0, 2.0 * np.pi)
         return np.array([radius * np.cos(angle), radius * np.sin(angle)], dtype=float)
 

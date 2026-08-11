@@ -10,5 +10,7 @@ goal: [0.0, 0.0, 0.0]
 randomize_goal: false
 initial_position_min_goal_distance: 0.05
 initial_position_radius_bounds: [0.05, 1.0]
-initial_state_seed: 42
-action_noise_seed: 42
+pos_tol: 0.05
+theta_tol: 0.05
+vel_tol: 0.05
+omega_tol: 0.05

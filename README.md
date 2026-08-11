@@ -440,15 +440,46 @@ docker compose run --rm csvil \
 python learning/train_dagger.py \
 --system unicycle2 \
 --expert-config test/config/unicycle2_casadi_config.yaml \
---dagger-iterations 15 \
+--dagger-iterations 10 \
 --trajectories-per-iteration 20 \
---steps-per-trajectory 150 \
+--steps-per-trajectory 200 \
 --target-epochs-per-round 10 \
 --action-noise-std 0.0 \
 --expert-mix-beta-start 0.5 \
 --expert-mix-beta-decay-rate 0.1 \
 --expert-mix-decay-after-success-rate 0.0
 ```
+
+Observed result for the command above:
+
+- `Round 10 evaluation: eval_success_rate=100.0% eval_mean_steps=139.70 eval_min_steps=70 eval_max_steps=169 episodes=10`
+- `Saved checkpoints: outputs/train_dagger/mlp_dagger_checkpoint.pt and outputs/train_dagger/mlp_dagger_iter_009.pt`
+
+Single-trajectory evaluation command used to verify the checkpoint:
+
+```bash
+docker compose run --rm csvil \
+python test/evaluate_policy.py \
+--system unicycle2 \
+--policy-type mlp \
+--config test/config/unicycle2_casadi_config.yaml \
+--model-dir outputs/train_dagger/mlp_dagger_checkpoint.pt \
+--num-steps 200 \
+--action-noise-std 0.0 \
+--seeds "[0]" \
+--initial-states '[
+  [[-0.5, 0.5, 0.78, 0.0, 0.0]]
+]'
+```
+
+Observed summary for the command above:
+
+- `policy_successes: 1/1`
+- `success_rate: 1.0000`
+- `mean_policy_steps: 153.000`
+- `mean_expert_steps: 131.000`
+- `mean_policy_goal_error_l2: 0.034745`
+- `mean_expert_goal_error_l2: 0.043021`
 
 `--dagger-iterations` means the number of refinement rounds, where each
 round does: aggregate learner rollouts with expert labels, then retrain.

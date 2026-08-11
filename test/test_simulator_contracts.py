@@ -315,6 +315,32 @@ class SimulatorContractTests(unittest.TestCase):
         self.assertTrue(np.all(simulator.goal[:2] >= -1.0))
         self.assertTrue(np.all(simulator.goal[:2] <= 1.0))
 
+    def test_planar_start_offset_is_area_uniform_on_annulus(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="single_integrator",
+            config={
+                "dt": 0.05,
+                "goal": [0.0, 0.0],
+                "randomize_goal": False,
+            },
+        )
+
+        radius_min = 0.25
+        radius_max = 1.0
+        rng = np.random.default_rng(17)
+        radii_sq = []
+        for _ in range(4000):
+            offset = simulator.sample_planar_start_offset(
+                rng,
+                radius_bounds=(radius_min, radius_max),
+                min_goal_distance=radius_min,
+            )
+            radii_sq.append(float(np.dot(offset, offset)))
+
+        empirical_mean = float(np.mean(np.asarray(radii_sq, dtype=float)))
+        expected_mean = 0.5 * (radius_min**2 + radius_max**2)
+        self.assertAlmostEqual(empirical_mean, expected_mean, delta=0.02)
+
     def test_seeded_reset_random_respects_configured_start_region(self) -> None:
         def position_distance_to_goal(simulator: DynamicsProtocol, state: np.ndarray) -> float:
             if simulator.num_robots == 1:
