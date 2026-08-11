@@ -586,7 +586,7 @@ def run_evaluation(
     trajectory_colors = ["tab:blue"] * num_expert + ["tab:orange"] * num_policy
     trajectory_line_styles = ["--"] * num_expert + ["-"] * num_policy
 
-    show_heading = simulator.has_heading
+    show_heading = not simulator.is_euclidean
 
     plot_xy_trajectories(
         simulator=simulator,

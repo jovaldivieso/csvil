@@ -137,8 +137,8 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.d_safe = float(self.config.get("d_safe", 0.0))
 
     @property
-    def has_heading(self) -> bool:
-        return any(bool(sub_sim.has_heading) for sub_sim in self.simulators)
+    def is_euclidean(self) -> bool:
+        return all(bool(sub_sim.is_euclidean) for sub_sim in self.simulators)
 
     @staticmethod
     def _observation_feature_dims(simulator: DynamicsProtocol) -> tuple[int, int]:

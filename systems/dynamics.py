@@ -7,6 +7,7 @@ from core.types import VectorSpec, as_vector
 
 
 DEFAULT_DONE_HOLD_STEPS = 5
+DEFAULT_INITIAL_STATE_SEED = 0
 
 
 @runtime_checkable
@@ -59,7 +60,8 @@ class DynamicsProtocol(Protocol):
     nu: int
     obs_dim: int
     max_action: float
-    has_heading: bool
+    is_euclidean: bool
+    angular_state_indices: tuple[int, ...]
     num_robots: int
     simulators: list["DynamicsProtocol"]
     robot_state_slices: list[slice]
@@ -130,7 +132,10 @@ class DynamicsSimulator(ABC):
         self.state = None
         self.time = 0
         self.dt = config.get("dt", 0.05)
-        self._sampling_rng = np.random.default_rng(config.get("initial_state_seed"))
+        initial_state_seed = config.get("initial_state_seed", DEFAULT_INITIAL_STATE_SEED)
+        if initial_state_seed is None:
+            initial_state_seed = DEFAULT_INITIAL_STATE_SEED
+        self._sampling_rng = np.random.default_rng(int(initial_state_seed))
         self._rollout_done_counter = 0
         self._early_rollout_termination_enabled = True
 
@@ -185,9 +190,14 @@ class DynamicsSimulator(ABC):
         return self._rollout_done_counter >= hold_steps
 
     @property
-    def has_heading(self) -> bool:
-        """Whether the simulator state/goal semantics include orientation (theta)."""
-        return False
+    def is_euclidean(self) -> bool:
+        """Whether squared Euclidean residuals are valid across all state coordinates."""
+        return True
+
+    @property
+    def angular_state_indices(self) -> tuple[int, ...]:
+        """Local state coordinates whose planner residuals should use wrapped angular distance."""
+        return ()
 
     @property
     def num_robots(self) -> int:

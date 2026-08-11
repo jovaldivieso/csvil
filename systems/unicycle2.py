@@ -39,9 +39,12 @@ class Unicycle2(DynamicsSimulator):
         self.max_speed = float(config.get("max_speed", 0.5))
         self.max_omega = float(config.get("max_omega", 0.5))
 
-        self.error_tolerance = float(config.get("error_tolerance", 0.05))
+        self.pos_tol = float(config.get("pos_tol", 0.05))
+        self.theta_tol = float(config.get("theta_tol", 0.05))
+        self.vel_tol = float(config.get("vel_tol", 0.05))
+        self.omega_tol = float(config.get("omega_tol", 0.05))
         self.initial_position_min_goal_distance = float(
-            config.get("initial_position_min_goal_distance", self.error_tolerance)
+            config.get("initial_position_min_goal_distance", self.pos_tol)
         )
         self.initial_position_radius_bounds = tuple(
             float(value)
@@ -66,8 +69,12 @@ class Unicycle2(DynamicsSimulator):
         )
 
     @property
-    def has_heading(self) -> bool:
-        return True
+    def is_euclidean(self) -> bool:
+        return False
+
+    @property
+    def angular_state_indices(self) -> tuple[int, ...]:
+        return (2,)
 
     def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
         """
@@ -106,9 +113,10 @@ class Unicycle2(DynamicsSimulator):
         """
         state = self.validate_state(state)
         state_view = SE2PoseAndEuclidean2DState.from_array(state)
-        rel_pos = self.goal[0:2] - state_view.pose.translation
+        rel_pos_world = self.goal[0:2] - state_view.pose.translation
+        rel_pos_body = state_view.pose.orientation.inverse().act(rel_pos_world)
         rel_theta = state_view.pose.orientation.error_to(SO2State.from_angle(self.goal[2]))
-        obs = np.array([rel_pos[0], rel_pos[1], rel_theta, state_view.v, state_view.omega])
+        obs = np.array([rel_pos_body[0], rel_pos_body[1], rel_theta, state_view.v, state_view.omega])
         return self.validate_observation(obs)
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
@@ -117,11 +125,14 @@ class Unicycle2(DynamicsSimulator):
         """
         obs = self.validate_observation(obs)
         obs_view = SE2PoseAndEuclidean2DObservation.from_array(obs)
+        theta = SO2State.from_angle(self.goal[2] - obs_view.rel_theta).angle
+        orientation = SO2State.from_angle(theta)
+        rel_pos_world = orientation.act(obs_view.exteroception[0:2])
         return np.array(
             [
-                self.goal[0] - obs_view.exteroception[0],
-                self.goal[1] - obs_view.exteroception[1],
-                self.goal[2] - obs_view.rel_theta,
+                self.goal[0] - rel_pos_world[0],
+                self.goal[1] - rel_pos_world[1],
+                theta,
                 obs_view.euclidean_2d[0],
                 obs_view.euclidean_2d[1],
             ]
@@ -144,10 +155,10 @@ class Unicycle2(DynamicsSimulator):
         theta_error = abs(state_view.pose.orientation.error_to(SO2State.from_angle(self.goal[2])))
 
         return (
-            pos_error < self.error_tolerance
-            and theta_error < self.error_tolerance
-            and abs(state_view.v) < self.error_tolerance # speed error
-            and abs(state_view.omega) < self.error_tolerance # omega error
+            pos_error < self.pos_tol
+            and theta_error < self.theta_tol
+            and abs(state_view.v) < self.vel_tol # speed error
+            and abs(state_view.omega) < self.omega_tol # omega error
         )
 
     def casadi_dynamics(self, x: Any, u: Any):

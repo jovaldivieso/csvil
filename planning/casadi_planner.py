@@ -194,6 +194,8 @@ class CasadiPlanner(Planner):
         # State variables for open-loop planning
         self.cached_plan = None
         self.step_idx = 0
+        self.last_X_sol = None
+        self.last_U_sol = None
 
         # Cost matrices depending on system state
         q_diag = config.get("Q_diag", [10.0] * self.sim.nx)
@@ -251,8 +253,9 @@ class CasadiPlanner(Planner):
                         global_dim = state_slice.start + local_dim
                         self.opti.subject_to(self.X[global_dim, 1:] <= upper)
 
-        # Vectorized running costs over all N steps.
-        for state_slice, action_slice, q_block, r_block in zip(
+        # Running costs over all N steps.
+        for sub_sim, state_slice, action_slice, q_block, r_block in zip(
+            self.sub_simulators,
             self.robot_state_slices,
             self.robot_action_slices,
             q_blocks,
@@ -260,7 +263,22 @@ class CasadiPlanner(Planner):
         ):
             goal_matrix = ca.repmat(self.goal_param[state_slice], 1, self.N)
             error_matrix = self.X[state_slice, :-1] - goal_matrix
-            cost += ca.sum2(ca.sum1(ca.mtimes(q_block, error_matrix) * error_matrix))
+            q_block_no_theta = q_block
+            angular_state_indices = tuple(getattr(sub_sim, "angular_state_indices", ()))
+            if len(angular_state_indices) > 0:
+                q_block_no_theta = np.array(q_block, copy=True)
+                for angular_idx in angular_state_indices:
+                    if angular_idx < 0 or angular_idx >= q_block.shape[0]:
+                        raise ValueError(
+                            f"Simulator {type(sub_sim).__name__} declares invalid angular_state_indices entry {angular_idx} "
+                            f"for local state dimension {q_block.shape[0]}."
+                        )
+                    q_theta = float(q_block[angular_idx, angular_idx])
+                    q_block_no_theta[angular_idx, angular_idx] = 0.0
+                    theta_error = error_matrix[angular_idx, :]
+                    cost += q_theta * ca.sum2(1.0 - ca.cos(theta_error))
+
+            cost += ca.sum2(ca.sum1(ca.mtimes(q_block_no_theta, error_matrix) * error_matrix))
             cost += ca.sum2(
                 ca.sum1(ca.mtimes(r_block, self.U[action_slice, :]) * self.U[action_slice, :])
             )
@@ -312,11 +330,25 @@ class CasadiPlanner(Planner):
 
             cost += self.collision_slack_penalty_weight * ca.sum2(ca.sum1(collision_slack))
 
-        for state_slice, q_block in zip(self.robot_state_slices, q_blocks):
+        for sub_sim, state_slice, q_block in zip(self.sub_simulators, self.robot_state_slices, q_blocks):
             terminal_error = self.X[state_slice, self.N] - self.goal_param[state_slice]
+            q_block_no_theta = q_block
+            angular_state_indices = tuple(getattr(sub_sim, "angular_state_indices", ()))
+            if len(angular_state_indices) > 0:
+                q_block_no_theta = np.array(q_block, copy=True)
+                for angular_idx in angular_state_indices:
+                    if angular_idx < 0 or angular_idx >= q_block.shape[0]:
+                        raise ValueError(
+                            f"Simulator {type(sub_sim).__name__} declares invalid angular_state_indices entry {angular_idx} "
+                            f"for local state dimension {q_block.shape[0]}."
+                        )
+                    q_theta = float(q_block[angular_idx, angular_idx])
+                    q_block_no_theta[angular_idx, angular_idx] = 0.0
+                    cost += self.terminal_cost_multiplier * q_theta * (1.0 - ca.cos(terminal_error[angular_idx]))
+
             cost += ca.mtimes(
                 terminal_error.T,
-                ca.mtimes(q_block * self.terminal_cost_multiplier, terminal_error),
+                ca.mtimes(q_block_no_theta * self.terminal_cost_multiplier, terminal_error),
             )
 
         self.opti.minimize(cost)
@@ -327,6 +359,8 @@ class CasadiPlanner(Planner):
 
     def reset(self) -> None:
         """Signals the start of a new episode."""
+        self.last_X_sol = None
+        self.last_U_sol = None
         if self.mode == "open_loop":
             self.cached_plan = None
             self.step_idx = 0
@@ -337,9 +371,17 @@ class CasadiPlanner(Planner):
             self.opti.set_value(self.x0_param, x0)
             self.opti.set_value(self.goal_param, self.sim.goal_state)
 
+            if self.last_X_sol is not None and self.last_U_sol is not None:
+                shifted_X = np.hstack([self.last_X_sol[:, 1:], self.last_X_sol[:, -1:]])
+                shifted_U = np.hstack([self.last_U_sol[:, 1:], self.last_U_sol[:, -1:]])
+                self.opti.set_initial(self.X, shifted_X)
+                self.opti.set_initial(self.U, shifted_U)
+
             try:
                 sol = self.opti.solve()
-                return sol.value(self.U[:, 0])
+                self.last_X_sol = sol.value(self.X)
+                self.last_U_sol = sol.value(self.U)
+                return self.last_U_sol[:, 0]
             except RuntimeError as exc:
                 raise PlannerSolveError(
                     "CasADi planner solve failed in MPC mode. "

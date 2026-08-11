@@ -20,7 +20,10 @@ robots:
       randomize_goal: false
       initial_position_min_goal_distance: 0.05
       initial_position_radius_bounds: [0.05, 1.0]
-      error_tolerance: 0.05
+      pos_tol: 0.05
+      theta_tol: 0.05
+      vel_tol: 0.05
+      omega_tol: 0.05
 
   - system: unicycle2
     config:
@@ -30,4 +33,7 @@ robots:
       randomize_goal: false
       initial_position_min_goal_distance: 0.05
       initial_position_radius_bounds: [0.05, 1.0]
-      error_tolerance: 0.05
+      pos_tol: 0.05
+      theta_tol: 0.05
+      vel_tol: 0.05
+      omega_tol: 0.05

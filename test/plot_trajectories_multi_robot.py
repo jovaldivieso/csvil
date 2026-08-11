@@ -85,7 +85,7 @@ def main():
         path_to_output=output_path,
         title="db-LaCAM multi-robot trajectory",
         path_labels=["db-LaCAM"],
-        show_heading=simulator.has_heading,
+        show_heading=not simulator.is_euclidean,
     )
 
     for robot_index, reached_goal in enumerate(reached_goals):

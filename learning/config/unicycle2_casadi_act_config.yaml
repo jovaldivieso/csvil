@@ -3,14 +3,11 @@ policy:
   type: act
   device: mps
   
-  repo_id: jovaldivieso/unicycle2_casadi_act
-  push_to_hub: true
-
   # Neural network policy settings
-  chunk_size: 32
-  dim_feedforward: 1024
-  dim_model: 128
-  latent_dim: 32
+  chunk_size: 16
+  dim_feedforward: 512
+  dim_model: 64
+  latent_dim: 24
   n_encoder_layers: 1
   n_decoder_layers: 1       # Keep this at 1 like default LeRobot's ACT
   n_heads: 1
@@ -40,8 +37,8 @@ policy:
       type: ACTION
 
 # Training settings
-steps: 17000
-save_freq: 17000
+steps: 1000
+save_freq: 1000
 batch_size: 64
 num_workers: 0
 save_checkpoint: true

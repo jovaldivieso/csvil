@@ -344,7 +344,7 @@ def run_plotting(
             "Try lowering action noise, relaxing d_safe, or providing less adversarial initial states."
         )
 
-    show_heading = simulator.has_heading
+    show_heading = not simulator.is_euclidean
 
     plot_xy_trajectories(
         simulator=simulator,

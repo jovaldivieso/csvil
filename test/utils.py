@@ -129,12 +129,8 @@ def plot_xy_trajectories(
     robot_count = len(robot_state_slices)
     robot_color_map = plt.get_cmap("tab10", max(robot_count, 1))
 
-    def has_heading_goal(sub_simulator: Any) -> bool:
-        goal = getattr(sub_simulator, "goal", None)
-        if goal is None:
-            return False
-        goal_arr = np.asarray(goal, dtype=float)
-        return goal_arr.ndim == 1 and goal_arr.shape[0] >= 3
+    def has_non_euclidean_state(sub_simulator: Any) -> bool:
+        return not bool(getattr(sub_simulator, "is_euclidean", True))
 
     for robot_idx, sub_sim in enumerate(robot_simulators):
         robot_color = robot_color_map(robot_idx)
@@ -150,7 +146,7 @@ def plot_xy_trajectories(
             zorder=5,
         )
 
-        if show_heading and has_heading_goal(sub_sim):
+        if show_heading and has_non_euclidean_state(sub_sim):
             goal_theta = np.asarray(sub_sim.goal, dtype=float)[2]
             ax.quiver(
                 goal_x,
@@ -239,7 +235,7 @@ def plot_xy_trajectories(
                 zorder=4,
             )
 
-            if show_heading and has_heading_goal(robot_simulators[robot_idx]):
+            if show_heading and has_non_euclidean_state(robot_simulators[robot_idx]):
                 start_theta = robot_traj[0, 2]
                 ax.quiver(
                     robot_traj[0, 0],
@@ -322,12 +318,8 @@ def save_xy_rollout_video(
     robot_count = len(robot_state_slices)
     robot_color_map = plt.get_cmap("tab10", max(robot_count, 1))
 
-    def has_heading_goal(sub_simulator: Any) -> bool:
-        goal = getattr(sub_simulator, "goal", None)
-        if goal is None:
-            return False
-        goal_arr = np.asarray(goal, dtype=float)
-        return goal_arr.ndim == 1 and goal_arr.shape[0] >= 3
+    def has_non_euclidean_state(sub_simulator: Any) -> bool:
+        return not bool(getattr(sub_simulator, "is_euclidean", True))
 
     if path_labels is None:
         path_labels = ["trajectory"] + [None] * (len(trajectories) - 1)
@@ -341,7 +333,7 @@ def save_xy_rollout_video(
         goal_x, goal_y = sub_sim.goal_state[:2]
         ax.scatter(goal_x, goal_y, marker="*", s=180 if robot_count > 1 else 220, color=robot_color, zorder=5)
 
-        if show_heading and has_heading_goal(sub_sim):
+        if show_heading and has_non_euclidean_state(sub_sim):
             goal_theta = np.asarray(sub_sim.goal, dtype=float)[2]
             ax.quiver(
                 goal_x,
@@ -397,7 +389,7 @@ def save_xy_rollout_video(
                     "y": robot_traj[:, 1],
                     "theta": (
                         robot_traj[:, 2]
-                        if show_heading and has_heading_goal(robot_simulators[robot_idx])
+                        if show_heading and has_non_euclidean_state(robot_simulators[robot_idx])
                         else None
                     ),
                     "color": robot_color,

@@ -182,23 +182,42 @@ class SimulatorContractTests(unittest.TestCase):
                 f"{name}: action feature sum {action_feature_dim} != nu {simulator.nu}",
             )
 
-    def test_heading_metadata_contract(self) -> None:
+    def test_geometry_metadata_contract(self) -> None:
         simulators = _build_simulators()
-        expected_has_heading = {
-            "single_integrator": False,
-            "double_integrator": False,
-            "unicycle1": True,
-            "unicycle2": True,
-            "multi_robot": False,
+        expected_is_euclidean = {
+            "single_integrator": True,
+            "double_integrator": True,
+            "unicycle1": False,
+            "unicycle2": False,
+            "multi_robot": True,
         }
 
-        for name, expected in expected_has_heading.items():
+        for name, expected in expected_is_euclidean.items():
             self.assertIn(name, simulators)
             simulator = simulators[name]
             self.assertEqual(
-                bool(simulator.has_heading),
+                bool(simulator.is_euclidean),
                 expected,
-                f"{name}: has_heading mismatch",
+                f"{name}: is_euclidean mismatch",
+            )
+
+    def test_angular_state_indices_contract(self) -> None:
+        simulators = _build_simulators()
+        expected_angular_state_indices = {
+            "single_integrator": (),
+            "double_integrator": (),
+            "unicycle1": (2,),
+            "unicycle2": (2,),
+            "multi_robot": (),
+        }
+
+        for name, expected in expected_angular_state_indices.items():
+            self.assertIn(name, simulators)
+            simulator = simulators[name]
+            self.assertEqual(
+                tuple(simulator.angular_state_indices),
+                expected,
+                f"{name}: angular_state_indices mismatch",
             )
 
     def test_heading_system_boundary_roundtrip_preserves_so2_state(self) -> None:

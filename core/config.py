@@ -86,7 +86,10 @@ class Unicycle2SystemConfig:
     max_accel: float = 0.25
     max_speed: float = 0.5
     max_omega: float = 0.5
-    error_tolerance: float = 0.05
+    pos_tol: float = 0.05
+    theta_tol: float = 0.05
+    vel_tol: float = 0.05
+    omega_tol: float = 0.05
     goal_sampling: GoalSamplingConfig = GoalSamplingConfig()
     initial_state_sampling: InitialStateSamplingConfig = InitialStateSamplingConfig(
         position_radius_bounds=(0.05, 1.0),
@@ -262,12 +265,12 @@ def _positive_vector(raw: Any, key: str, size: int) -> tuple[float, ...]:
 def _initial_state_sampling(
     raw_config: Mapping[str, Any],
     *,
-    error_tolerance: float,
+    default_min_goal_distance: float,
 ) -> InitialStateSamplingConfig:
     min_goal_distance = _float(
         raw_config,
         "initial_position_min_goal_distance",
-        error_tolerance,
+        default_min_goal_distance,
     )
     if min_goal_distance < 0:
         raise ConfigurationError("'initial_position_min_goal_distance' must be non-negative.")
@@ -584,9 +587,6 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
     if dt <= 0:
         raise ConfigurationError("'dt' must be positive.")
 
-    error_tolerance = _float(raw_config, "error_tolerance", 0.05)
-    if error_tolerance <= 0:
-        raise ConfigurationError("'error_tolerance' must be positive.")
     done_hold_steps = _optional_positive_int(raw_config, "done_hold_steps")
     action_noise_seed = _resolved_action_noise_seed(raw_config)
 
@@ -594,10 +594,13 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
     nx: int
 
     if system_name == "single_integrator":
+        error_tolerance = _float(raw_config, "error_tolerance", 0.05)
+        if error_tolerance <= 0:
+            raise ConfigurationError("'error_tolerance' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=error_tolerance,
         )
         system_cfg = SingleIntegratorSystemConfig(
             dt=dt,
@@ -627,10 +630,13 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         nu = 2
 
     elif system_name == "double_integrator":
+        error_tolerance = _float(raw_config, "error_tolerance", 0.05)
+        if error_tolerance <= 0:
+            raise ConfigurationError("'error_tolerance' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=error_tolerance,
         )
         system_cfg = DoubleIntegratorSystemConfig(
             dt=dt,
@@ -660,10 +666,13 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         nu = 2
 
     elif system_name == "unicycle1":
+        error_tolerance = _float(raw_config, "error_tolerance", 0.05)
+        if error_tolerance <= 0:
+            raise ConfigurationError("'error_tolerance' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=error_tolerance,
         )
         system_cfg = Unicycle1SystemConfig(
             dt=dt,
@@ -693,10 +702,27 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         nu = 2
 
     elif system_name == "unicycle2":
+        if "error_tolerance" in raw_config:
+            raise ConfigurationError(
+                "'error_tolerance' is not supported for 'unicycle2'. "
+                "Use 'pos_tol', 'theta_tol', 'vel_tol', and 'omega_tol'."
+            )
+        pos_tol = _float(raw_config, "pos_tol", 0.05)
+        theta_tol = _float(raw_config, "theta_tol", 0.05)
+        vel_tol = _float(raw_config, "vel_tol", 0.05)
+        omega_tol = _float(raw_config, "omega_tol", 0.05)
+        if pos_tol <= 0:
+            raise ConfigurationError("'pos_tol' must be positive.")
+        if theta_tol <= 0:
+            raise ConfigurationError("'theta_tol' must be positive.")
+        if vel_tol <= 0:
+            raise ConfigurationError("'vel_tol' must be positive.")
+        if omega_tol <= 0:
+            raise ConfigurationError("'omega_tol' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=pos_tol,
         )
         system_cfg = Unicycle2SystemConfig(
             dt=dt,
@@ -706,7 +732,10 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             max_accel=_float(raw_config, "max_accel", 0.25),
             max_speed=_float(raw_config, "max_speed", 0.5),
             max_omega=_float(raw_config, "max_omega", 0.5),
-            error_tolerance=error_tolerance,
+            pos_tol=pos_tol,
+            theta_tol=theta_tol,
+            vel_tol=vel_tol,
+            omega_tol=omega_tol,
             goal_sampling=goal_sampling,
             initial_state_sampling=initial_state_sampling,
         )
@@ -721,7 +750,10 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "max_accel": system_cfg.max_accel,
             "max_speed": system_cfg.max_speed,
             "max_omega": system_cfg.max_omega,
-            "error_tolerance": system_cfg.error_tolerance,
+            "pos_tol": system_cfg.pos_tol,
+            "theta_tol": system_cfg.theta_tol,
+            "vel_tol": system_cfg.vel_tol,
+            "omega_tol": system_cfg.omega_tol,
             "action_noise_seed": action_noise_seed,
             "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
             "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),

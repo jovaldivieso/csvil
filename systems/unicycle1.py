@@ -53,8 +53,12 @@ class Unicycle1(DynamicsSimulator):
         return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))
 
     @property
-    def has_heading(self) -> bool:
-        return True
+    def is_euclidean(self) -> bool:
+        return False
+
+    @property
+    def angular_state_indices(self) -> tuple[int, ...]:
+        return (2,)
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray:
         state = super().reset(initial_state)
