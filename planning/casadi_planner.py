@@ -217,11 +217,8 @@ class CasadiPlanner(Planner):
 
         cost = 0
 
-        q_blocks: list[np.ndarray] = []
-        r_blocks: list[np.ndarray] = []
-        for state_slice, action_slice in zip(self.robot_state_slices, self.robot_action_slices):
-            q_blocks.append(self.Q[state_slice, state_slice])
-            r_blocks.append(self.R[action_slice, action_slice])
+        q_blocks = [self.Q[state_slice, state_slice] for state_slice in self.robot_state_slices]
+        r_blocks = [self.R[action_slice, action_slice] for action_slice in self.robot_action_slices]
 
         # Build dynamics constraints (kept in a loop because casadi_dynamics
         # is not guaranteed to support batched matrix inputs).
@@ -233,9 +230,8 @@ class CasadiPlanner(Planner):
         # Vectorized actuator limits over all horizon steps.
         for sub_sim, action_slice in zip(self.sub_simulators, self.robot_action_slices):
             robot_max_action = float(getattr(sub_sim, "max_action", self.sim.max_action))
-            for action_dim in range(action_slice.start, action_slice.stop):
-                self.opti.subject_to(self.U[action_dim, :] >= -robot_max_action)
-                self.opti.subject_to(self.U[action_dim, :] <= robot_max_action)
+            self.opti.subject_to(ca.vec(self.U[action_slice, :]) >= -robot_max_action)
+            self.opti.subject_to(ca.vec(self.U[action_slice, :]) <= robot_max_action)
 
         # Vectorized optional per-robot state bounds over steps 1..N.
         for sub_sim, state_slice in zip(self.sub_simulators, self.robot_state_slices):
@@ -243,15 +239,32 @@ class CasadiPlanner(Planner):
             sub_upper = getattr(sub_sim, "state_upper_bounds", None)
 
             if sub_lower is not None:
-                for local_dim, lower in enumerate(sub_lower):
-                    if np.isfinite(lower):
-                        global_dim = state_slice.start + local_dim
-                        self.opti.subject_to(self.X[global_dim, 1:] >= lower)
+                lower_bounds = np.asarray(sub_lower, dtype=float)
+                finite_lower = np.isfinite(lower_bounds)
+                if np.any(finite_lower):
+                    lower_indices = (state_slice.start + np.flatnonzero(finite_lower)).tolist()
+                    lower_values = ca.repmat(
+                        ca.reshape(ca.DM(lower_bounds[finite_lower]), len(lower_indices), 1),
+                        1,
+                        self.N,
+                    )
+                    self.opti.subject_to(
+                        ca.vec(self.X[lower_indices, 1:]) >= ca.vec(lower_values)
+                    )
+
             if sub_upper is not None:
-                for local_dim, upper in enumerate(sub_upper):
-                    if np.isfinite(upper):
-                        global_dim = state_slice.start + local_dim
-                        self.opti.subject_to(self.X[global_dim, 1:] <= upper)
+                upper_bounds = np.asarray(sub_upper, dtype=float)
+                finite_upper = np.isfinite(upper_bounds)
+                if np.any(finite_upper):
+                    upper_indices = (state_slice.start + np.flatnonzero(finite_upper)).tolist()
+                    upper_values = ca.repmat(
+                        ca.reshape(ca.DM(upper_bounds[finite_upper]), len(upper_indices), 1),
+                        1,
+                        self.N,
+                    )
+                    self.opti.subject_to(
+                        ca.vec(self.X[upper_indices, 1:]) <= ca.vec(upper_values)
+                    )
 
         # Running costs over all N steps.
         for sub_sim, state_slice, action_slice, q_block, r_block in zip(

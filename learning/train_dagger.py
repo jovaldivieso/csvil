@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
-import math
 import os
-import random
 import sys
 import time
 from dataclasses import dataclass
@@ -27,17 +25,25 @@ from core.config import (
     load_and_validate_system_config,
 )
 from core.factory import DynamicsFactory, PlannerFactory
-from learning.dagger_evaluation import (
+from learning.dagger import (
     DaggerEvalMetrics,
+    action_feature_names,
     apply_execution_noise,
+    collect_dagger_rollouts,
     evaluate_policy_rollouts,
+    observation_dim_from_features,
+    observation_feature_names,
+    pack_observation_features,
+    print_rollout_metrics,
+    resolve_round_steps,
+    scheduled_expert_mix_beta,
+    set_seed,
+    with_seeded_initial_state_config,
 )
 from learning.models.mlp import MLPPolicy
-from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
-    action_noise_seed_for_rollout,
     default_action_noise_seed_for_config,
 )
 
@@ -53,105 +59,26 @@ def get_training_device() -> torch.device:
     return torch.device("cpu")
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def with_seeded_initial_state_config(
-    system_name: str,
-    config: Mapping[str, Any],
-    base_seed: int,
-) -> dict[str, Any]:
-    """Ensure all simulator RNG entrypoints get deterministic initial-state seeds."""
-    seeded_config = dict(config)
-
-    if system_name != "multi_robot":
-        seeded_config.setdefault("initial_state_seed", int(base_seed))
-        return seeded_config
-
-    seeded_config.setdefault("initial_state_seed", int(base_seed))
-    robots_raw = seeded_config.get("robots", [])
-    seeded_robots: list[dict[str, Any]] = []
-    for robot_idx, robot_entry in enumerate(robots_raw):
-        if not isinstance(robot_entry, Mapping):
-            seeded_robots.append(dict(robot_entry))
-            continue
-
-        robot_system = robot_entry.get("system")
-        robot_cfg_raw = robot_entry.get("config", {})
-        robot_cfg = dict(robot_cfg_raw) if isinstance(robot_cfg_raw, Mapping) else {}
-        robot_cfg.setdefault("initial_state_seed", int(base_seed + 1000 * (robot_idx + 1)))
-        seeded_robots.append(
-            {
-                "system": robot_system,
-                "config": robot_cfg,
-            }
-        )
-
-    seeded_config["robots"] = seeded_robots
-    return seeded_config
-
-
-def observation_feature_names(simulator: DynamicsProtocol) -> list[str]:
-    def is_observation_feature(name: str) -> bool:
-        return name.startswith("observation.") or ".observation." in name
-
-    return [
-        feature_name
-        for feature_name in simulator.get_dataset_features().keys()
-        if is_observation_feature(feature_name)
-    ]
-
-
-def action_feature_names(simulator: DynamicsProtocol) -> list[str]:
-    def is_action_feature(name: str) -> bool:
-        return name == "action" or name.endswith(".action")
-
-    return [
-        feature_name
-        for feature_name in simulator.get_dataset_features().keys()
-        if is_action_feature(feature_name)
-    ]
-
-
-def observation_dim_from_features(simulator: DynamicsProtocol) -> int:
-    def is_observation_feature(name: str) -> bool:
-        return name.startswith("observation.") or ".observation." in name
-
-    total_dim = 0
-    for feature_name, feature_info in simulator.get_dataset_features().items():
-        if is_observation_feature(feature_name):
-            total_dim += int(feature_info["shape"][0])
-    return total_dim
-
-
 def flatten_observation_for_policy(
     simulator: DynamicsProtocol,
     observation: np.ndarray,
+    observation_feature_names_list: list[str],
     device: torch.device,
 ) -> torch.Tensor:
     """
     Pack runtime observation exactly like dataset frames, then flatten for MLP.
     """
-    features = simulator.get_dataset_features()
-
-    def is_observation_feature(name: str) -> bool:
-        return name.startswith("observation.") or ".observation." in name
-
-    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
-    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
+    packed_features = pack_observation_features(
+        simulator=simulator,
+        observation=observation,
+        feature_names=observation_feature_names_list,
+    )
 
     chunks: list[torch.Tensor] = []
-    for feature_name in features.keys():
-        if is_observation_feature(feature_name):
-            if feature_name not in packed_frame:
-                raise KeyError(
-                    f"Missing observation feature '{feature_name}' in packed frame. "
-                    "Check simulator.format_dataset_frame() and dataset schema alignment."
-                )
-            chunks.append(torch.as_tensor(packed_frame[feature_name], dtype=torch.float32, device=device).view(-1))
+    for feature_name in observation_feature_names_list:
+        chunks.append(
+            torch.as_tensor(packed_features[feature_name], dtype=torch.float32, device=device).view(-1)
+        )
 
     return torch.cat(chunks, dim=0).unsqueeze(0)
 
@@ -230,25 +157,6 @@ def default_dataset_root_for_system(system: str, timestamp: int) -> Path:
     return Path(f"data/lerobot_dataset_{system}_dagger_{timestamp}")
 
 
-def scheduled_expert_mix_beta(
-    round_offset: int,
-    beta_start: float,
-    beta_end: float,
-    decay_rounds: int,
-    beta_decay_rate: float | None = None,
-) -> float:
-    if beta_decay_rate is not None:
-        clamped_offset = max(round_offset, 0)
-        return float(max(0.0, beta_start - float(beta_decay_rate) * float(clamped_offset)))
-
-    if decay_rounds <= 1:
-        return float(beta_start)
-
-    clamped_offset = min(max(round_offset, 0), decay_rounds - 1)
-    progress = float(clamped_offset) / float(decay_rounds - 1)
-    return float(beta_start + (beta_end - beta_start) * progress)
-
-
 def train_policy_steps(
     policy: MLPPolicy,
     dataloader: DataLoader,
@@ -308,158 +216,6 @@ def train_policy_steps(
         progress.close()
 
     return running_loss / float(num_steps)
-
-
-def resolve_round_steps(
-    num_frames: int,
-    batch_size: int,
-    target_epochs_per_round: float,
-    max_train_steps: int | None,
-) -> tuple[int, float]:
-    if num_frames <= 0:
-        raise ValueError("Training dataset must contain at least one frame.")
-    if batch_size <= 0:
-        raise ValueError("'batch_size' must be positive.")
-    if target_epochs_per_round <= 0:
-        raise ValueError("'target_epochs_per_round' must be positive.")
-
-    steps = math.ceil(float(target_epochs_per_round) * float(num_frames) / float(batch_size))
-    if max_train_steps is not None:
-        steps = min(steps, int(max_train_steps))
-    if steps <= 0:
-        raise ValueError("Per-round training steps must remain positive.")
-
-    approx_epochs = float(steps) * float(batch_size) / float(num_frames)
-    return steps, approx_epochs
-
-
-def collect_dagger_data(
-    simulator: DynamicsProtocol,
-    expert_planner: PlannerProtocol,
-    policy: MLPPolicy,
-    dataset_writer: LeRobotDataset,
-    trajectories_per_iteration: int,
-    steps_per_trajectory: int,
-    device: torch.device,
-    action_noise_std: float,
-    action_noise_seed: int,
-    expert_mixing_beta: float,
-) -> DaggerEvalMetrics:
-    """
-    Roll out learner policy, query expert at visited states, aggregate labels.
-    """
-    successful_episodes = 0
-    attempted_episodes = 0
-    max_attempts = max(trajectories_per_iteration * 3, trajectories_per_iteration)
-    reached_goal_count = 0
-    steps_taken: list[int] = []
-    expert_executed_steps = 0
-    total_executed_steps = 0
-
-    policy.eval()
-
-    while successful_episodes < trajectories_per_iteration:
-        attempted_episodes += 1
-        if attempted_episodes > max_attempts:
-            raise RuntimeError(
-                "Too many failed DAgger rollout attempts. "
-                f"Collected {successful_episodes}/{trajectories_per_iteration} episodes."
-            )
-
-        state = simulator.reset_random()
-        episode_initial_state = state.copy()
-        episode_noise_seed = action_noise_seed_for_rollout(
-            action_noise_seed,
-            rollout_index=attempted_episodes,
-        )
-        episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
-        planner_failed = False
-        expert_planner.reset()
-
-        reached_goal = False
-        rollout_steps = steps_per_trajectory
-        episode_frames: list[dict[str, object]] = []
-
-        for step in range(1, steps_per_trajectory + 1):
-            observation = simulator.observe(state)
-
-            with torch.inference_mode():
-                model_input = flatten_observation_for_policy(simulator, observation, device=device)
-                policy_action = policy.select_action(model_input).squeeze(0).cpu().numpy()
-
-            try:
-                expert_action = expert_planner(observation)
-            except PlannerSolveError as exc:
-                print(
-                    "Skipping episode due to planner failure "
-                    f"(attempt={attempted_episodes}, step={step}, action_noise_std={action_noise_std:.6f}, "
-                    f"noise_seed={episode_noise_seed})."
-                )
-                print(
-                    "Planner failure context: "
-                    f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
-                    f"current_state={np.array2string(np.asarray(state), precision=6)}, "
-                    f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
-                )
-                print(f"Underlying solver error: {exc}")
-                planner_failed = True
-                break
-
-            frame_data = simulator.format_dataset_frame(observation, expert_action)
-            frame_data["task"] = "reach target"
-            episode_frames.append(frame_data)
-
-            use_expert_action = bool(episode_action_noise_rng.random() < expert_mixing_beta)
-            base_action = expert_action if use_expert_action else policy_action
-            expert_executed_steps += int(use_expert_action)
-            total_executed_steps += 1
-
-            # Environment advances with noisy mixed execution action; labels remain clean expert corrections.
-            executed_action = apply_execution_noise(
-                simulator=simulator,
-                action=base_action,
-                action_noise_std=action_noise_std,
-                rng=episode_action_noise_rng,
-            )
-            state = simulator.step(state, executed_action)
-
-            if simulator.should_terminate_rollout(state):
-                reached_goal = True
-                rollout_steps = step
-                break
-
-        if planner_failed:
-            continue
-
-        for frame_data in episode_frames:
-            dataset_writer.add_frame(frame_data)
-        dataset_writer.save_episode()
-        successful_episodes += 1
-        reached_goal_count += int(reached_goal)
-        steps_taken.append(int(rollout_steps))
-
-        if successful_episodes % 10 == 0:
-            print(
-                "Collected "
-                f"{successful_episodes}/{trajectories_per_iteration} trajectories"
-            )
-
-    if total_executed_steps > 0:
-        realized_expert_fraction = float(expert_executed_steps) / float(total_executed_steps)
-        print(
-            "Execution mixing stats: "
-            f"requested_beta={expert_mixing_beta:.3f}, "
-            f"realized_expert_fraction={realized_expert_fraction:.3f}, "
-            f"executed_steps={total_executed_steps}"
-        )
-
-    return DaggerEvalMetrics(
-        success_rate=float(reached_goal_count) / float(successful_episodes),
-        mean_steps=float(np.mean(np.asarray(steps_taken, dtype=float))),
-        min_steps=min(steps_taken),
-        max_steps=max(steps_taken),
-        num_episodes=successful_episodes,
-    )
 
 
 def run_dagger(cfg: DaggerConfig) -> None:
@@ -609,7 +365,12 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
         def action_fn(observation: np.ndarray) -> np.ndarray:
             with torch.inference_mode():
-                model_input = flatten_observation_for_policy(eval_simulator, observation, device=device)
+                model_input = flatten_observation_for_policy(
+                    eval_simulator,
+                    observation,
+                    observation_feature_names_list=obs_feature_names,
+                    device=device,
+                )
                 action = policy.select_action(model_input).squeeze(0).cpu().numpy()
             return action
 
@@ -723,17 +484,26 @@ def run_dagger(cfg: DaggerConfig) -> None:
             dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
 
         try:
-            aggregation_metrics = collect_dagger_data(
+            def policy_action_fn(observation: np.ndarray) -> np.ndarray:
+                with torch.inference_mode():
+                    model_input = flatten_observation_for_policy(
+                        simulator_for_rollout,
+                        observation,
+                        observation_feature_names_list=obs_feature_names,
+                        device=device,
+                    )
+                    return policy.select_action(model_input).squeeze(0).cpu().numpy()
+
+            aggregation_metrics = collect_dagger_rollouts(
                 simulator=simulator_for_rollout,
                 expert_planner=expert_planner,
-                policy=policy,
                 dataset_writer=dataset_writer,
                 trajectories_per_iteration=cfg.trajectories_per_iteration,
                 steps_per_trajectory=cfg.steps_per_trajectory,
-                device=device,
                 action_noise_std=cfg.action_noise_std,
                 action_noise_seed=action_noise_seed,
                 expert_mixing_beta=round_beta,
+                policy_action_fn=policy_action_fn,
             )
         finally:
             # LeRobot writes parquet chunks lazily; finalize guarantees readable footers.
@@ -757,19 +527,9 @@ def run_dagger(cfg: DaggerConfig) -> None:
         if eval_metrics is not None:
             last_eval_success_rate = eval_metrics.success_rate
 
-        aggregation_round_offset += 1
+        if allow_decay:
+            aggregation_round_offset += 1
         save_checkpoints(training_round=training_round)
-
-
-def print_rollout_metrics(label: str, prefix: str, metrics: DaggerEvalMetrics) -> None:
-    print(
-        f"{label}: {prefix}_success_rate={100.0 * metrics.success_rate:.1f}% "
-        f"{prefix}_mean_steps={metrics.mean_steps:.2f} "
-        f"{prefix}_min_steps={metrics.min_steps} {prefix}_max_steps={metrics.max_steps} "
-        f"episodes={metrics.num_episodes}"
-    )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a custom MLP policy with DAgger")
     parser.add_argument(

@@ -111,8 +111,7 @@ csvil/
 │   │   └── mlp.py             # Custom MLP policy used for BC/DAgger
 │   ├── dagger_evaluation.py   # Shared in-loop DAgger evaluation helpers
 │   ├── train_dagger.py        # Iterative DAgger for the custom MLP baseline
-│   ├── train_lerobot.py       # LeRobot training entrypoint (ACT / Diffusion)
-│   └── train_lerobot_dagger.py  # Iterative DAgger wrapper for LeRobot policies
+│   └── train_lerobot_dagger.py  # LeRobot ACT / Diffusion training and DAgger entrypoint
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
 │   ├── casadi_planner.py      # CasADi planner implementation
@@ -357,26 +356,35 @@ lerobot-dataset-viz \
 --episode-index 0
 ```
 
-### Train a diffusion or ACT policy with LeRobot
+### Train a diffusion or ACT policy with LeRobot and DAgger
 
-Train a diffusion policy or ACT using the matching YAML configuration:
-
-```bash
-docker compose run --rm csvil \
-python learning/train_lerobot.py \
---config learning/config/double_integrator_casadi_diffusion_policy_config.yaml
-```
-
-Multi-robot diffusion config:
+Use the LeRobot DAgger entrypoint for both pure offline training and iterative DAgger.
+For pure offline ACT/Diffusion training on a pre-collected dataset, pass the dataset metadata
+and set `--dagger-iterations 0`:
 
 ```bash
 docker compose run --rm csvil \
-python learning/train_lerobot.py \
---config learning/config/multi_double_integrator_casadi_diffusion_policy_config.yaml
+python learning/train_lerobot_dagger.py \
+--system double_integrator \
+--expert-config test/config/double_integrator_casadi_config.yaml \
+--lerobot-train-config learning/config/double_integrator_casadi_diffusion_policy_config.yaml \
+--repo-id local/double_integrator_casadi_expert \
+--dataset-root data/lerobot_dataset_double_integrator_casadi \
+--dagger-iterations 0
 ```
 
-The training entrypoint now exposes `run_training(config_path)` for programmatic
-use in sweep/automation scripts while preserving the same CLI behavior.
+Multi-robot diffusion config follows the same pattern:
+
+```bash
+docker compose run --rm csvil \
+python learning/train_lerobot_dagger.py \
+--system multi_robot \
+--expert-config test/config/multi_double_integrator_casadi_config.yaml \
+--lerobot-train-config learning/config/multi_double_integrator_casadi_diffusion_policy_config.yaml \
+--repo-id local/multi_robot_casadi_expert \
+--dataset-root data/lerobot_dataset_multi_robot_casadi \
+--dagger-iterations 0
+```
 
 Training outputs and checkpoints are saved in the configured output directory.
 
@@ -552,7 +560,7 @@ python learning/train_lerobot_dagger.py \
 How this loop works:
 
 - Initial pass trains from scratch unless `--initial-pretrained-path` is provided.
-- Offline ACT/Diffusion pretraining is optional; if you already have an expert dataset, you can skip a separate `train_lerobot.py` warm-start and let DAgger perform the first training pass directly.
+- Offline ACT/Diffusion pretraining is optional; if you already have an expert dataset, you can use `train_lerobot_dagger.py --dagger-iterations 0` for a pure offline pass or let DAgger perform the first training pass directly.
 - Round 0 uses the fixed `steps` value from `--lerobot-train-config` (for example `steps: 12000` for ACT).
 - Refinement rounds (1+) aggregate expert labels, then retrain with `policy.pretrained_path` set to the latest checkpoint.
 - Refinement retraining steps are sized with `--target-epochs-per-round`; `--max-train-steps` applies as a hard cap.
@@ -678,9 +686,8 @@ Use this compact sequence for most experiments:
 
 1. Collect expert data: see `Generate a motion planning expert dataset`.
 2. Train one policy family:
-   - MLP + DAgger: `learning/train_dagger.py`
-   - ACT/Diffusion: `learning/train_lerobot.py`
-   - ACT/Diffusion + DAgger: `learning/train_lerobot_dagger.py`
+  - MLP + DAgger: `learning/train_dagger.py`
+  - ACT/Diffusion offline or with DAgger: `learning/train_lerobot_dagger.py`
 3. Evaluate with `test/evaluate_policy.py` using the canonical template above.
 
 For robust model selection, prefer multi-seed evaluation (for example 30 seeds)
@@ -703,8 +710,6 @@ Use this as a compact quick reference for current entrypoint flags.
 - `test/evaluate_policy.py`
   - required workflow args: `--system`, `--policy-type`, `--config`, `--model-dir`
   - optional rollout args: `--num-steps`, `--seeds`, `--initial-states`, `--action-noise-std`, `--output-path`
-- `learning/train_lerobot.py`
-  - required args: `--config`
 - `learning/train_dagger.py`
   - required args: `--system`, `--expert-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
@@ -712,7 +717,7 @@ Use this as a compact quick reference for current entrypoint flags.
   - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 - `learning/train_lerobot_dagger.py`
   - required args: `--system`, `--expert-config`, `--lerobot-train-config`
-  - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode)
+  - optional dataset args: `--repo-id`, `--dataset-root` (provide both with `--dagger-iterations 0` for pure offline training; omit both for fresh DAgger mode)
   - optional DAgger args: `--planner`, `--policy-type`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`
   - optional training/eval args: `--train-output-root`, `--initial-pretrained-path`, `--seed`, `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--max-train-steps`, `--allow-push-to-hub`
 
