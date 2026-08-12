@@ -32,6 +32,7 @@ from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger import (
     DaggerEvalMetrics,
+    ExpertMixBetaController,
     apply_execution_noise,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
@@ -39,7 +40,6 @@ from learning.dagger import (
     pack_observation_features,
     print_rollout_metrics,
     resolve_round_steps,
-    scheduled_expert_mix_beta,
     set_seed,
     with_seeded_initial_state_config,
 )
@@ -415,6 +415,7 @@ class LeRobotDaggerConfig:
     expert_mix_beta_end: float
     expert_mix_beta_decay_rate: float | None
     expert_mix_decay_after_success_rate: float | None
+    adaptive_beta_recovery: bool
     train_output_root: Path
     seed: int
     policy_type: str | None
@@ -601,8 +602,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         return metrics
 
     previous_pretrained_path: Path | None = cfg.initial_pretrained_path
-    last_eval_success_rate: float | None = None
-
+    initial_eval_success_rate: float | None = None
     if not cfg.start_with_aggregation:
         print("\n=== Initial LeRobot training pass (no aggregation) ===")
         previous_pretrained_path = run_training_round(
@@ -619,8 +619,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             model_dir=previous_pretrained_path,
         )
         if initial_eval_metrics is not None:
-            last_eval_success_rate = initial_eval_metrics.success_rate
-
+            initial_eval_success_rate = initial_eval_metrics.success_rate
         if cfg.dagger_iterations == 0:
             print("No DAgger refinements requested (--dagger-iterations 0).")
             print("\nLeRobot DAgger loop complete.")
@@ -635,8 +634,17 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             )
         round_indices = range(0, cfg.dagger_iterations)
 
-    decay_rounds = max(1, cfg.dagger_iterations)
-    aggregation_round_offset = 0
+    beta_controller = ExpertMixBetaController(
+        beta_start=cfg.expert_mix_beta_start,
+        beta_end=cfg.expert_mix_beta_end,
+        decay_rounds=max(1, cfg.dagger_iterations),
+        beta_decay_rate=cfg.expert_mix_beta_decay_rate,
+        decay_after_success_rate=cfg.expert_mix_decay_after_success_rate,
+        adaptive_recovery=cfg.adaptive_beta_recovery,
+    )
+
+    if cfg.expert_mix_decay_after_success_rate is not None and initial_eval_success_rate is not None:
+        beta_controller.prime_from_evaluation(initial_eval_success_rate)
 
     for round_index in round_indices:
         if cfg.start_with_aggregation:
@@ -651,28 +659,12 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             config=seeded_experiment_config,
         )
 
-        allow_decay = True
-        if cfg.expert_mix_decay_after_success_rate is not None:
-            allow_decay = (
-                last_eval_success_rate is not None
-                and last_eval_success_rate > cfg.expert_mix_decay_after_success_rate
-            )
-
-        if allow_decay:
-            round_beta = scheduled_expert_mix_beta(
-                round_offset=aggregation_round_offset,
-                beta_start=cfg.expert_mix_beta_start,
-                beta_end=cfg.expert_mix_beta_end,
-                decay_rounds=decay_rounds,
-                beta_decay_rate=cfg.expert_mix_beta_decay_rate,
-            )
-        else:
-            round_beta = cfg.expert_mix_beta_start
+        round_beta = beta_controller.current_beta
 
         print(
             "Aggregation execution policy: "
             f"expert_beta={round_beta:.3f}, "
-            f"decay_active={'yes' if allow_decay else 'no'}"
+            f"decay_active={'yes' if beta_controller.decay_active else 'no'}"
         )
 
         policy: DiffusionPolicy | ACTPolicy | None = None
@@ -793,11 +785,9 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             ),
             model_dir=previous_pretrained_path,
         )
-        if eval_metrics is not None:
-            last_eval_success_rate = eval_metrics.success_rate
-
-        if allow_decay:
-            aggregation_round_offset += 1
+        beta_controller.update_after_evaluation(
+            eval_metrics.success_rate if eval_metrics is not None else None
+        )
 
     print("\nLeRobot DAgger loop complete.")
 def parse_args() -> argparse.Namespace:
@@ -920,6 +910,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--adaptive-beta-recovery",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "toggle adaptive recovery on eval regressions: when enabled, beta is increased by one "
+            "schedule step after a success-rate drop; when disabled (default), beta follows a "
+            "monotonic schedule"
+        ),
+    )
+    parser.add_argument(
         "--train-output-root",
         type=Path,
         default=Path("outputs/train"),
@@ -993,7 +993,7 @@ def main() -> None:
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both for fresh DAgger mode.")
 
     if args.repo_id is None and args.dataset_root is None:
-        timestamp = int(time.time())
+        timestamp = time.time_ns()
         repo_id = default_repo_id_for_system(args.system, timestamp)
         dataset_root = default_dataset_root_for_system(args.system, timestamp)
         start_with_aggregation = True
@@ -1018,6 +1018,7 @@ def main() -> None:
         expert_mix_beta_end=args.expert_mix_beta_end,
         expert_mix_beta_decay_rate=args.expert_mix_beta_decay_rate,
         expert_mix_decay_after_success_rate=args.expert_mix_decay_after_success_rate,
+        adaptive_beta_recovery=args.adaptive_beta_recovery,
         train_output_root=args.train_output_root,
         seed=args.seed,
         policy_type=args.policy_type,

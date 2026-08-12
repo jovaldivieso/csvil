@@ -140,6 +140,24 @@ class MultiRobotSimulator(DynamicsSimulator):
     def is_euclidean(self) -> bool:
         return all(bool(sub_sim.is_euclidean) for sub_sim in self.simulators)
 
+    @property
+    def angular_state_indices(self) -> tuple[int, ...]:
+        global_indices: list[int] = []
+        for sub_sim, state_slice in zip(self.simulators, self.robot_state_slices):
+            local_indices = tuple(getattr(sub_sim, "angular_state_indices", ()))
+            local_state_dim = int(sub_sim.nx)
+
+            for local_idx_raw in local_indices:
+                local_idx = int(local_idx_raw)
+                if local_idx < 0 or local_idx >= local_state_dim:
+                    raise ValueError(
+                        f"Sub-simulator {type(sub_sim).__name__} declares invalid angular_state_indices "
+                        f"entry {local_idx} for local state dimension {local_state_dim}."
+                    )
+                global_indices.append(int(state_slice.start) + local_idx)
+
+        return tuple(global_indices)
+
     @staticmethod
     def _observation_feature_dims(simulator: DynamicsProtocol) -> tuple[int, int]:
         env_dim = 0

@@ -113,10 +113,9 @@ class Unicycle2(DynamicsSimulator):
         """
         state = self.validate_state(state)
         state_view = SE2PoseAndEuclidean2DState.from_array(state)
-        rel_pos_world = self.goal[0:2] - state_view.pose.translation
-        rel_pos_body = state_view.pose.orientation.inverse().act(rel_pos_world)
+        rel_pos = self.goal[0:2] - state_view.pose.translation
         rel_theta = state_view.pose.orientation.error_to(SO2State.from_angle(self.goal[2]))
-        obs = np.array([rel_pos_body[0], rel_pos_body[1], rel_theta, state_view.v, state_view.omega])
+        obs = np.array([rel_pos[0], rel_pos[1], rel_theta, state_view.v, state_view.omega])
         return self.validate_observation(obs)
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
@@ -125,14 +124,11 @@ class Unicycle2(DynamicsSimulator):
         """
         obs = self.validate_observation(obs)
         obs_view = SE2PoseAndEuclidean2DObservation.from_array(obs)
-        theta = SO2State.from_angle(self.goal[2] - obs_view.rel_theta).angle
-        orientation = SO2State.from_angle(theta)
-        rel_pos_world = orientation.act(obs_view.exteroception[0:2])
         return np.array(
             [
-                self.goal[0] - rel_pos_world[0],
-                self.goal[1] - rel_pos_world[1],
-                theta,
+                self.goal[0] - obs_view.exteroception[0],
+                self.goal[1] - obs_view.exteroception[1],
+                self.goal[2] - obs_view.rel_theta,
                 obs_view.euclidean_2d[0],
                 obs_view.euclidean_2d[1],
             ]

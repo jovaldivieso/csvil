@@ -220,6 +220,38 @@ class SimulatorContractTests(unittest.TestCase):
                 f"{name}: angular_state_indices mismatch",
             )
 
+    def test_multi_robot_non_euclidean_geometry_metadata(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": 0.05,
+                "d_safe": 0.1,
+                "robots": [
+                    {
+                        "system": "unicycle2",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [0.0, 0.0, 0.0],
+                            "randomize_goal": False,
+                            "randomize_initial_velocity": False,
+                        },
+                    },
+                    {
+                        "system": "unicycle2",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [1.0, -1.0, 0.0],
+                            "randomize_goal": False,
+                            "randomize_initial_velocity": False,
+                        },
+                    },
+                ],
+            },
+        )
+
+        self.assertFalse(bool(simulator.is_euclidean))
+        self.assertEqual(tuple(simulator.angular_state_indices), (2, 7))
+
     def test_heading_system_boundary_roundtrip_preserves_so2_state(self) -> None:
         simulators = _build_simulators()
         test_states = {

@@ -498,6 +498,7 @@ round does: aggregate learner rollouts with expert labels, then retrain.
 - `--expert-mix-beta-start` / `--expert-mix-beta-end`: control how often the expert action is executed during aggregation rollouts; set both to `0.0` to recover the old no-mixing behavior
 - `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`
 - `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` for a strict "start decaying only after success is nonzero" gate
+- `--adaptive-beta-recovery`: optional (default `false`); when enabled, beta increases by one schedule step after an eval-success regression; when disabled, beta follows monotonic decay
 - `--mlp-config`: optional YAML file for MLP architecture, e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [256, 256, 128]`
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate` and `aggregation_mean_steps`.
 - After each retrain, deterministic in-loop evaluation reports `eval_success_rate` and `eval_mean_steps`.
@@ -548,6 +549,23 @@ python learning/train_lerobot_dagger.py \
 --expert-mix-beta-start 0.6
 ```
 
+Fresh-start `unicycle2` ACT + DAgger example:
+
+```bash
+python learning/train_lerobot_dagger.py \
+--system unicycle2 \
+--expert-config test/config/unicycle2_casadi_config.yaml \
+--lerobot-train-config learning/config/unicycle2_casadi_act_config.yaml \
+--dagger-iterations 10 \
+--trajectories-per-iteration 100 \
+--steps-per-trajectory 200 \
+--target-epochs-per-round 10 \
+--action-noise-std 0.0 \
+--expert-mix-beta-start 0.5 \
+--expert-mix-beta-decay-rate 0.1 \
+--expert-mix-decay-after-success-rate 0.0
+```
+
 or
 
 ```bash
@@ -578,6 +596,7 @@ How this loop works:
 - `--expert-mix-beta-start` / `--expert-mix-beta-end`: control expert execution during aggregation rollouts; set both to `0.0` to disable mixing, or use a positive start value and decay to `0.0` for incremental DAgger.
 - `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`.
 - `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` if you want decay to remain off until eval success becomes nonzero.
+- `--adaptive-beta-recovery`: optional (default `false`); when enabled, beta increases by one schedule step after an eval-success regression; when disabled, beta follows monotonic decay.
 - During aggregation, the learner or expert action is executed in simulation depending on the mix probability beta, while the dataset always stores expert (CasADi) corrective labels.
 - Dataset appends use `LeRobotDataset.resume(...)` and call `finalize()` each iteration to keep parquet chunks readable.
 
@@ -721,12 +740,12 @@ Use this as a compact quick reference for current entrypoint flags.
 - `learning/train_dagger.py`
   - required args: `--system`, `--expert-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
-  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`
+  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`, `--adaptive-beta-recovery`
   - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 - `learning/train_lerobot_dagger.py`
   - required args: `--system`, `--expert-config`, `--lerobot-train-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (provide both with `--dagger-iterations 0` for pure offline training; omit both for fresh DAgger mode)
-  - optional DAgger args: `--planner`, `--policy-type`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`
+  - optional DAgger args: `--planner`, `--policy-type`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`, `--adaptive-beta-recovery`
   - optional training/eval args: `--train-output-root`, `--initial-pretrained-path`, `--seed`, `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--max-train-steps`, `--allow-push-to-hub`
 
 ## TODO / Roadmap / Brainstorming

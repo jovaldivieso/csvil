@@ -27,6 +27,100 @@ class DaggerEvalMetrics:
     num_episodes: int
 
 
+@dataclass
+class ExpertMixBetaController:
+    beta_start: float
+    beta_end: float
+    decay_rounds: int
+    beta_decay_rate: float | None = None
+    decay_after_success_rate: float | None = None
+    adaptive_recovery: bool = False
+
+    current_beta: float = 0.0
+    decay_active: bool = False
+    previous_eval_success_rate: float | None = None
+
+    def __post_init__(self) -> None:
+        self.current_beta = float(self.beta_start)
+
+    def _gate_is_open(self, eval_success_rate: float) -> bool:
+        if self.decay_after_success_rate is None:
+            return True
+        return float(eval_success_rate) > float(self.decay_after_success_rate)
+
+    def _step_delta(self) -> float:
+        if self.beta_decay_rate is not None:
+            return abs(float(self.beta_decay_rate))
+
+        if self.decay_rounds <= 1:
+            return 0.0
+
+        return abs(float(self.beta_end) - float(self.beta_start)) / float(self.decay_rounds - 1)
+
+    def _beta_bounds(self) -> tuple[float, float]:
+        if self.beta_decay_rate is not None:
+            # Additive mode follows beta_t = max(0, beta_start - rate * t).
+            return 0.0, max(0.0, float(self.beta_start))
+        return min(float(self.beta_start), float(self.beta_end)), max(float(self.beta_start), float(self.beta_end))
+
+    def _decrease_beta(self) -> None:
+        delta = self._step_delta()
+        if self.beta_decay_rate is not None:
+            next_beta = self.current_beta - delta
+        else:
+            schedule_direction = 1.0 if float(self.beta_end) > float(self.beta_start) else -1.0
+            next_beta = self.current_beta + schedule_direction * delta
+
+        lower_bound, upper_bound = self._beta_bounds()
+        self.current_beta = float(min(max(next_beta, lower_bound), upper_bound))
+
+    def _increase_beta(self) -> None:
+        delta = self._step_delta()
+        if self.beta_decay_rate is not None:
+            next_beta = self.current_beta + delta
+        else:
+            recovery_direction = -1.0 if float(self.beta_end) > float(self.beta_start) else 1.0
+            next_beta = self.current_beta + recovery_direction * delta
+
+        lower_bound, upper_bound = self._beta_bounds()
+        self.current_beta = float(min(max(next_beta, lower_bound), upper_bound))
+
+    def update_after_evaluation(self, eval_success_rate: float | None) -> None:
+        if eval_success_rate is None:
+            if self.decay_after_success_rate is None:
+                if not self.decay_active:
+                    self.decay_active = True
+                self._decrease_beta()
+            return
+
+        eval_rate = float(eval_success_rate)
+
+        if not self.decay_active:
+            if self._gate_is_open(eval_rate):
+                self.decay_active = True
+                self._decrease_beta()
+            self.previous_eval_success_rate = eval_rate
+            return
+
+        previous_rate = self.previous_eval_success_rate
+        if self.adaptive_recovery and previous_rate is not None and eval_rate < previous_rate:
+            self._increase_beta()
+        else:
+            self._decrease_beta()
+
+        self.previous_eval_success_rate = eval_rate
+
+    def prime_from_evaluation(self, eval_success_rate: float | None) -> None:
+        """Prime gate state from an evaluation without advancing the beta schedule."""
+        if eval_success_rate is None:
+            return
+
+        eval_rate = float(eval_success_rate)
+        if self._gate_is_open(eval_rate):
+            self.decay_active = True
+        self.previous_eval_success_rate = eval_rate
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -101,6 +195,41 @@ def pack_observation_features(
     observation: np.ndarray,
     feature_names: list[str],
 ) -> dict[str, np.ndarray]:
+    dataset_features = simulator.get_dataset_features()
+    schema_observation_features = [
+        feature_name
+        for feature_name in dataset_features.keys()
+        if is_observation_feature(feature_name)
+    ]
+    if feature_names != schema_observation_features:
+        mismatch_index = next(
+            (
+                idx
+                for idx, (expected_name, provided_name) in enumerate(
+                    zip(schema_observation_features, feature_names)
+                )
+                if expected_name != provided_name
+            ),
+            None,
+        )
+        if mismatch_index is not None:
+            mismatch_details = (
+                f"first mismatch at index {mismatch_index}: "
+                f"expected '{schema_observation_features[mismatch_index]}' "
+                f"but got '{feature_names[mismatch_index]}'"
+            )
+        else:
+            mismatch_details = (
+                "feature list lengths differ: "
+                f"expected {len(schema_observation_features)} but got {len(feature_names)}"
+            )
+
+        raise ValueError(
+            "Observation feature ordering does not match simulator dataset schema; "
+            "this can cause silent policy input misalignment. "
+            f"{mismatch_details}"
+        )
+
     dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
     packed_frame = simulator.format_dataset_frame(observation, dummy_action)
 
@@ -112,10 +241,32 @@ def pack_observation_features(
             "Check simulator.format_dataset_frame() and dataset schema alignment."
         )
 
-    return {
-        feature_name: np.asarray(packed_frame[feature_name], dtype=np.float32)
-        for feature_name in feature_names
-    }
+    packed_observation_features: dict[str, np.ndarray] = {}
+    for feature_name in feature_names:
+        if feature_name not in dataset_features:
+            raise KeyError(
+                f"Observation feature '{feature_name}' is missing from simulator dataset schema."
+            )
+
+        feature_info = dataset_features[feature_name]
+        expected_shape_raw = feature_info.get("shape") if isinstance(feature_info, Mapping) else None
+        if not isinstance(expected_shape_raw, (list, tuple)):
+            raise ValueError(
+                "Simulator dataset schema must define a list/tuple 'shape' for observation feature "
+                f"'{feature_name}'. Got: {expected_shape_raw!r}"
+            )
+
+        expected_shape = tuple(int(dim) for dim in expected_shape_raw)
+        feature_array = np.asarray(packed_frame[feature_name], dtype=np.float32)
+        if feature_array.shape != expected_shape:
+            raise ValueError(
+                f"Observation feature '{feature_name}' shape mismatch: "
+                f"expected {expected_shape}, got {feature_array.shape}."
+            )
+
+        packed_observation_features[feature_name] = feature_array
+
+    return packed_observation_features
 
 
 def scheduled_expert_mix_beta(
@@ -253,6 +404,7 @@ def collect_dagger_rollouts(
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
     if policy_action_fn is None and expert_mixing_beta < 1.0:
         raise ValueError("'policy_action_fn' is required when 'expert_mixing_beta' is less than 1.0.")
+    should_query_policy = policy_action_fn is not None and expert_mixing_beta < 1.0
 
     successful_episodes = 0
     attempted_episodes = 0
@@ -318,10 +470,13 @@ def collect_dagger_rollouts(
             episode_frames.append(frame_builder(observation, expert_action))
 
             use_expert_action = bool(episode_action_noise_rng.random() < expert_mixing_beta)
-            if use_expert_action or policy_action_fn is None:
+            policy_action = None
+            if should_query_policy and not use_expert_action:
+                policy_action = policy_action_fn(observation)
+            if use_expert_action or policy_action is None:
                 base_action = expert_action
             else:
-                base_action = policy_action_fn(observation)
+                base_action = policy_action
             expert_executed_steps += int(use_expert_action)
             total_executed_steps += 1
 

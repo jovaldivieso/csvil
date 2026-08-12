@@ -7,6 +7,9 @@ from typing import Any, Mapping
 import yaml
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 class ConfigurationError(ValueError):
     """Raised when an experiment configuration is missing or malformed."""
 
@@ -449,7 +452,49 @@ def _validate_environment_config(raw_environment: Any, *, key_name: str) -> dict
     return validated_environment
 
 
-def _validate_db_lacam_config(raw_config: Mapping[str, Any]) -> dict[str, Any] | None:
+def _resolve_existing_path(
+    raw_path: str,
+    *,
+    field_name: str,
+    config_dir: Path | None,
+    expect_dir: bool = False,
+    expect_file: bool = False,
+) -> Path:
+    if expect_dir and expect_file:
+        raise ConfigurationError(
+            f"'{field_name}' cannot require both a file and a directory."
+        )
+
+    path = Path(raw_path).expanduser()
+
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        if config_dir is not None:
+            candidates.append(config_dir / path)
+        candidates.append(_REPO_ROOT / path)
+        candidates.append(Path.cwd() / path)
+
+    for candidate in candidates:
+        if expect_dir:
+            if candidate.is_dir():
+                return candidate.resolve()
+        elif expect_file:
+            if candidate.is_file():
+                return candidate.resolve()
+        elif candidate.exists():
+            return candidate.resolve()
+
+    kind = "directory" if expect_dir else "file" if expect_file else "path"
+    raise ConfigurationError(f"'{field_name}' does not exist ({kind}): {raw_path}")
+
+
+def _validate_db_lacam_config(
+    raw_config: Mapping[str, Any],
+    *,
+    config_dir: Path | None = None,
+) -> dict[str, Any] | None:
     raw_db_lacam = raw_config.get("db_lacam")
     if raw_db_lacam is None:
         return None
@@ -476,28 +521,42 @@ def _validate_db_lacam_config(raw_config: Mapping[str, Any]) -> dict[str, Any] |
     validated_db_lacam["time_limit_ms"] = int(time_limit_ms)
 
     algorithm_config = raw_db_lacam.get("algorithm_config")
-    if algorithm_config is not None:
-        if not isinstance(algorithm_config, str) or algorithm_config.strip() == "":
-            raise ConfigurationError("'db_lacam.algorithm_config' must be a non-empty string when provided.")
-        if not Path(algorithm_config).exists():
-            raise ConfigurationError(f"'db_lacam.algorithm_config' does not exist: {algorithm_config}")
-        validated_db_lacam["algorithm_config"] = algorithm_config
+    if not isinstance(algorithm_config, str) or algorithm_config.strip() == "":
+        raise ConfigurationError("'db_lacam.algorithm_config' is required and must be a non-empty string.")
+    validated_db_lacam["algorithm_config"] = str(
+        _resolve_existing_path(
+            algorithm_config,
+            field_name="db_lacam.algorithm_config",
+            config_dir=config_dir,
+            expect_file=True,
+        )
+    )
 
     executable = raw_db_lacam.get("executable")
     if executable is not None:
         if not isinstance(executable, str) or executable.strip() == "":
             raise ConfigurationError("'db_lacam.executable' must be a non-empty string when provided.")
-        if not Path(executable).exists():
-            raise ConfigurationError(f"'db_lacam.executable' does not exist: {executable}")
-        validated_db_lacam["executable"] = executable
+        validated_db_lacam["executable"] = str(
+            _resolve_existing_path(
+                executable,
+                field_name="db_lacam.executable",
+                config_dir=config_dir,
+                expect_file=True,
+            )
+        )
 
     cwd = raw_db_lacam.get("cwd")
     if cwd is not None:
         if not isinstance(cwd, str) or cwd.strip() == "":
             raise ConfigurationError("'db_lacam.cwd' must be a non-empty string when provided.")
-        if not Path(cwd).is_dir():
-            raise ConfigurationError(f"'db_lacam.cwd' is not a directory: {cwd}")
-        validated_db_lacam["cwd"] = cwd
+        validated_db_lacam["cwd"] = str(
+            _resolve_existing_path(
+                cwd,
+                field_name="db_lacam.cwd",
+                config_dir=config_dir,
+                expect_dir=True,
+            )
+        )
 
     raise_planning_error = raw_db_lacam.get("raise_planning_error", True)
     if not isinstance(raise_planning_error, bool):
@@ -641,10 +700,19 @@ def _validate_planner(
 def load_and_validate_system_config(system_name: str, config_path: str | Path) -> dict[str, Any]:
     """Load YAML config and return a validated config dictionary for a system."""
     raw = load_yaml_config(config_path)
-    return validate_system_config(system_name=system_name, raw_config=raw)
+    return validate_system_config(
+        system_name=system_name,
+        raw_config=raw,
+        config_dir=Path(config_path).expanduser().resolve().parent,
+    )
 
 
-def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> dict[str, Any]:
+def validate_system_config(
+    system_name: str,
+    raw_config: Mapping[str, Any],
+    *,
+    config_dir: Path | None = None,
+) -> dict[str, Any]:
     """Validate system and planner fields, returning normalized config values."""
     if system_name == "multi_robot":
         _require_only_known_keys(raw_config, _allowed_multi_robot_keys(), context="'multi_robot' config")
@@ -734,7 +802,11 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             robot_cfg_with_dt = dict(robot_cfg_raw)
             robot_cfg_with_dt.setdefault("dt", dt)
 
-            validated_robot_cfg = validate_system_config(robot_system, robot_cfg_with_dt)
+            validated_robot_cfg = validate_system_config(
+                robot_system,
+                robot_cfg_with_dt,
+                config_dir=config_dir,
+            )
             members.append(
                 MultiRobotMemberConfig(
                     system=robot_system,
@@ -814,7 +886,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         if "environment" in raw_config:
             config_out["environment"] = _validate_environment_config(raw_config["environment"], key_name="environment")
 
-        validated_db_lacam = _validate_db_lacam_config(raw_config)
+        validated_db_lacam = _validate_db_lacam_config(raw_config, config_dir=config_dir)
         if validated_db_lacam is not None:
             config_out["db_lacam"] = validated_db_lacam
             if "environment" not in config_out and "environment" in validated_db_lacam:
@@ -1029,7 +1101,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
     if "environment" in raw_config:
         config_out["environment"] = _validate_environment_config(raw_config["environment"], key_name="environment")
 
-    validated_db_lacam = _validate_db_lacam_config(raw_config)
+    validated_db_lacam = _validate_db_lacam_config(raw_config, config_dir=config_dir)
     if validated_db_lacam is not None:
         config_out["db_lacam"] = validated_db_lacam
         if "environment" not in config_out and "environment" in validated_db_lacam:

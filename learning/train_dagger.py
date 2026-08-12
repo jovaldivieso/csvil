@@ -27,6 +27,7 @@ from core.config import (
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger import (
     DaggerEvalMetrics,
+    ExpertMixBetaController,
     action_feature_names,
     apply_execution_noise,
     collect_dagger_rollouts,
@@ -36,7 +37,6 @@ from learning.dagger import (
     pack_observation_features,
     print_rollout_metrics,
     resolve_round_steps,
-    scheduled_expert_mix_beta,
     set_seed,
     with_seeded_initial_state_config,
 )
@@ -122,6 +122,7 @@ class DaggerConfig:
     expert_mix_beta_end: float
     expert_mix_beta_decay_rate: float | None
     expert_mix_decay_after_success_rate: float | None
+    adaptive_beta_recovery: bool
     target_epochs_per_round: float
     eval_episodes: int
     eval_steps: int | None
@@ -407,9 +408,13 @@ def run_dagger(cfg: DaggerConfig) -> None:
         torch.save(checkpoint_data, iteration_checkpoint)
         print(f"Saved checkpoints: {latest_checkpoint} and {iteration_checkpoint}")
 
+    initial_eval_success_rate: float | None = None
+
     if not cfg.start_with_aggregation:
         train_on_aggregate("Initial offline training pass")
         last_eval_metrics = evaluate_current_policy("Round 0 evaluation")
+        if last_eval_metrics is not None:
+            initial_eval_success_rate = last_eval_metrics.success_rate
         save_checkpoints(training_round=0)
 
         if cfg.dagger_iterations == 0:
@@ -425,12 +430,17 @@ def run_dagger(cfg: DaggerConfig) -> None:
             )
         refinement_round_indices = range(0, cfg.dagger_iterations)
 
-    last_eval_success_rate: float | None = None
-    if not cfg.start_with_aggregation and 'last_eval_metrics' in locals() and last_eval_metrics is not None:
-        last_eval_success_rate = last_eval_metrics.success_rate
+    beta_controller = ExpertMixBetaController(
+        beta_start=cfg.expert_mix_beta_start,
+        beta_end=cfg.expert_mix_beta_end,
+        decay_rounds=max(1, cfg.dagger_iterations),
+        beta_decay_rate=cfg.expert_mix_beta_decay_rate,
+        decay_after_success_rate=cfg.expert_mix_decay_after_success_rate,
+        adaptive_recovery=cfg.adaptive_beta_recovery,
+    )
 
-    decay_rounds = max(1, cfg.dagger_iterations)
-    aggregation_round_offset = 0
+    if cfg.expert_mix_decay_after_success_rate is not None and initial_eval_success_rate is not None:
+        beta_controller.prime_from_evaluation(initial_eval_success_rate)
 
     for training_round in refinement_round_indices:
         if cfg.start_with_aggregation:
@@ -449,28 +459,12 @@ def run_dagger(cfg: DaggerConfig) -> None:
             config=seeded_experiment_config,
         )
 
-        allow_decay = True
-        if cfg.expert_mix_decay_after_success_rate is not None:
-            allow_decay = (
-                last_eval_success_rate is not None
-                and last_eval_success_rate > cfg.expert_mix_decay_after_success_rate
-            )
-
-        if allow_decay:
-            round_beta = scheduled_expert_mix_beta(
-                round_offset=aggregation_round_offset,
-                beta_start=cfg.expert_mix_beta_start,
-                beta_end=cfg.expert_mix_beta_end,
-                decay_rounds=decay_rounds,
-                beta_decay_rate=cfg.expert_mix_beta_decay_rate,
-            )
-        else:
-            round_beta = cfg.expert_mix_beta_start
+        round_beta = beta_controller.current_beta
 
         print(
             "Aggregation execution policy: "
             f"expert_beta={round_beta:.3f}, "
-            f"decay_active={'yes' if allow_decay else 'no'}"
+            f"decay_active={'yes' if beta_controller.decay_active else 'no'}"
         )
 
         if cfg.start_with_aggregation and not cfg.dataset_root.exists():
@@ -524,11 +518,9 @@ def run_dagger(cfg: DaggerConfig) -> None:
             train_on_aggregate(f"DAgger refinement {training_round}/{cfg.dagger_iterations}: retrain")
             eval_metrics = evaluate_current_policy(f"Refinement {training_round} evaluation")
 
-        if eval_metrics is not None:
-            last_eval_success_rate = eval_metrics.success_rate
-
-        if allow_decay:
-            aggregation_round_offset += 1
+        beta_controller.update_after_evaluation(
+            eval_metrics.success_rate if eval_metrics is not None else None
+        )
         save_checkpoints(training_round=training_round)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a custom MLP policy with DAgger")
@@ -632,6 +624,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--adaptive-beta-recovery",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "toggle adaptive recovery on eval regressions: when enabled, beta is increased by one "
+            "schedule step after a success-rate drop; when disabled (default), beta follows a "
+            "monotonic schedule"
+        ),
+    )
+    parser.add_argument(
         "--target-epochs-per-round",
         type=float,
         default=30.0,
@@ -722,7 +724,7 @@ def main() -> None:
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both for fresh DAgger mode.")
 
     if args.repo_id is None and args.dataset_root is None:
-        timestamp = int(time.time())
+        timestamp = time.time_ns()
         repo_id = default_repo_id_for_system(args.system, timestamp)
         dataset_root = default_dataset_root_for_system(args.system, timestamp)
         start_with_aggregation = True
@@ -746,6 +748,7 @@ def main() -> None:
         expert_mix_beta_end=args.expert_mix_beta_end,
         expert_mix_beta_decay_rate=args.expert_mix_beta_decay_rate,
         expert_mix_decay_after_success_rate=args.expert_mix_decay_after_success_rate,
+        adaptive_beta_recovery=args.adaptive_beta_recovery,
         target_epochs_per_round=args.target_epochs_per_round,
         eval_episodes=args.eval_episodes,
         eval_steps=args.eval_steps,
