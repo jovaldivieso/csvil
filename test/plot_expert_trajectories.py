@@ -11,7 +11,7 @@ PROJECT_ROOT = os.path.dirname(
 )
 sys.path.insert(0, PROJECT_ROOT)
 
-from core.config import load_and_validate_system_config, validate_system_config
+from core.config import load_and_validate_system_config, load_yaml_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
 from systems.initial_state_utils import (
     normalize_initial_state_specs,
@@ -26,6 +26,36 @@ from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from utils import plot_xy_trajectories, save_xy_rollout_video
+
+
+def _extract_config_start_state(system: str, raw_config: Mapping[str, Any]) -> np.ndarray:
+    """Build an initial state from config-defined starts when available."""
+    if system == "multi_robot":
+        robots = raw_config.get("robots")
+        if not isinstance(robots, list) or len(robots) == 0:
+            raise ValueError("'multi_robot' requires a non-empty 'robots' list in config.")
+
+        starts: list[np.ndarray] = []
+        for idx, robot_entry in enumerate(robots):
+            if not isinstance(robot_entry, Mapping):
+                raise ValueError(f"robots[{idx}] must be a mapping.")
+            if "start" in robot_entry:
+                starts.append(np.asarray(robot_entry["start"], dtype=np.float32))
+                continue
+
+            robot_cfg = robot_entry.get("config")
+            if not isinstance(robot_cfg, Mapping) or "start" not in robot_cfg:
+                raise ValueError(
+                    "Config-start rollout requested, but a robot entry is missing 'start' or 'config.start'."
+                )
+            starts.append(np.asarray(robot_cfg["start"], dtype=np.float32))
+
+        return np.concatenate(starts)
+
+    if "start" not in raw_config:
+        raise ValueError("Config-start rollout requested, but system config has no 'start' entry.")
+
+    return np.asarray(raw_config["start"], dtype=np.float32)
 
 
 def default_plot_output_path(system: str, planner_name: str) -> str:
@@ -113,8 +143,11 @@ def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
 
 def normalize_seed_specs(
     simulator: DynamicsProtocol,
-    seeds: list[int] | list[list[int]],
+    seeds: list[int] | list[list[int]] | None,
 ) -> list[int | list[int]]:
+    if seeds is None:
+        seeds = []
+
     if len(seeds) == 0:
         seeds = default_seed_argument_for_simulator(simulator)
 
@@ -238,11 +271,16 @@ def run_plotting(
     system: str,
     planner_name: str,
     config: Mapping[str, Any],
-    seeds: list[int] | list[list[int]],
+    seeds: list[int] | list[list[int]] | None,
     num_steps: int,
     initial_states: Any | None = None,
     action_noise_std: float = 0.0,
+    num_traj: int | None = None,
+    use_config_start: bool = False,
+    video: bool = True,
+    video_fps: int = 12,
     output_path: str | None = None,
+    raw_config: Mapping[str, Any] | None = None,
 ) -> str:
     validated_config = validate_system_config(system_name=system, raw_config=config)
     action_noise_seed = default_action_noise_seed_for_config(validated_config)
@@ -272,37 +310,71 @@ def run_plotting(
     goals_reached = 0
     failed_trajectories = 0
     trajectories: list[np.ndarray] = []
+    per_robot_goals_reached: np.ndarray | None = None
+
+    if num_traj is not None and num_traj <= 0:
+        raise ValueError("'num_traj' must be positive when provided.")
+    if video_fps <= 0:
+        raise ValueError("'video_fps' must be positive.")
+
+    config_start_state: np.ndarray | None = None
+    if use_config_start:
+        if raw_config is None:
+            raise ValueError("'raw_config' is required when 'use_config_start' is enabled.")
+        config_start_state = simulator.validate_state(
+            _extract_config_start_state(system=system, raw_config=raw_config)
+        ).copy()
+
+    if num_traj is not None:
+        planned_rollouts = int(num_traj)
+    elif len(initial_state_specs) > 0:
+        planned_rollouts = max(len(seed_specs), len(initial_state_specs))
+    else:
+        planned_rollouts = len(seed_specs)
 
     if len(initial_state_specs) > 0:
-        num_traj = max(len(seed_specs), len(initial_state_specs))
         print(
             "simulating "
-            f"{num_traj} trajectories "
+            f"{planned_rollouts} trajectories "
             f"({len(initial_state_specs)} explicit initial states + seeded/RNG fallback)..."
         )
-        initial_state_plan: list[tuple[Any, str, int | list[int] | None]] = [
-            (
-                simulator.validate_state(initial_state_specs[idx]).copy(),
-                "provided",
-                seed_specs[idx] if idx < len(seed_specs) else None,
-            )
-            if idx < len(initial_state_specs)
-            else ((seed_specs[idx], "seeded", seed_specs[idx]) if idx < len(seed_specs) else (None, "rng_fallback", None))
-            for idx in range(num_traj)
-        ]
+        initial_state_plan: list[tuple[Any, str, int | list[int] | None]] = []
+        for idx in range(planned_rollouts):
+            if idx == 0 and config_start_state is not None:
+                initial_state_plan.append(
+                    (config_start_state.copy(), "config_start", seed_specs[idx] if idx < len(seed_specs) else None)
+                )
+            elif idx < len(initial_state_specs):
+                initial_state_plan.append(
+                    (
+                        simulator.validate_state(initial_state_specs[idx]).copy(),
+                        "provided",
+                        seed_specs[idx] if idx < len(seed_specs) else None,
+                    )
+                )
+            elif idx < len(seed_specs):
+                initial_state_plan.append((seed_specs[idx], "seeded", seed_specs[idx]))
+            else:
+                initial_state_plan.append((None, "rng_fallback", None))
     else:
-        num_traj = len(seed_specs)
-        print(f"simulating {num_traj} randomized trajectories...")
-        initial_state_plan = [
-            (seed_spec, "seeded", seed_spec)
-            for seed_spec in seed_specs
-        ]
+        planned_rollouts = len(seed_specs) if num_traj is None else int(num_traj)
+        print(f"simulating {planned_rollouts} trajectories...")
+        initial_state_plan = []
+        for idx in range(planned_rollouts):
+            if idx == 0 and config_start_state is not None:
+                initial_state_plan.append(
+                    (config_start_state.copy(), "config_start", seed_specs[idx] if idx < len(seed_specs) else None)
+                )
+            elif idx < len(seed_specs):
+                initial_state_plan.append((seed_specs[idx], "seeded", seed_specs[idx]))
+            else:
+                initial_state_plan.append((None, "rng_fallback", None))
 
     for rollout_idx, (initial_state_spec, initial_state_source, noise_seed_spec) in enumerate(initial_state_plan, start=1):
         if initial_state_source == "seeded":
             initial_state = sample_initial_state(simulator=simulator, seed_spec=initial_state_spec)
             seed_value = initial_state_spec
-        elif initial_state_source == "provided":
+        elif initial_state_source in {"provided", "config_start"}:
             initial_state = simulator.validate_state(initial_state_spec).copy()
             seed_value = None
         else:
@@ -336,6 +408,19 @@ def run_plotting(
         if reached_goal:
             goals_reached += 1
 
+        if system == "multi_robot":
+            final_state = trajectory[-1]
+            robot_reached_goals = np.asarray(
+                [
+                    robot.is_done(final_state[state_slice])
+                    for robot, state_slice in zip(simulator.simulators, simulator.robot_state_slices)
+                ],
+                dtype=int,
+            )
+            if per_robot_goals_reached is None:
+                per_robot_goals_reached = np.zeros_like(robot_reached_goals)
+            per_robot_goals_reached += robot_reached_goals
+
     system_title = system.replace("_", " ").title()
 
     if len(trajectories) == 0:
@@ -355,14 +440,16 @@ def run_plotting(
         marker="o",
     )
 
-    video_path = save_xy_rollout_video(
-        simulator=simulator,
-        trajectories=trajectories,
-        path_to_output=output_path,
-        title=f"{planner_name.replace('_', ' ').title()} rollout ({system_title})",
-        show_heading=show_heading,
-        fps=12,
-    )
+    video_path = None
+    if video:
+        video_path = save_xy_rollout_video(
+            simulator=simulator,
+            trajectories=trajectories,
+            path_to_output=output_path,
+            title=f"{planner_name.replace('_', ' ').title()} rollout ({system_title})",
+            show_heading=show_heading,
+            fps=video_fps,
+        )
 
     d_safe = float(validated_config.get("d_safe", 0.0))
     distance_report = pairwise_distance_report(
@@ -372,11 +459,17 @@ def run_plotting(
     )
 
     print(f"goal reached in {goals_reached}/{len(trajectories)} successful trajectories")
+    if per_robot_goals_reached is not None:
+        for robot_idx, robot_count in enumerate(per_robot_goals_reached):
+            print(f"robot {robot_idx}: goal reached in {int(robot_count)}/{len(trajectories)} successful trajectories")
     if failed_trajectories > 0:
-        print(f"skipped {failed_trajectories}/{num_traj} trajectories due to planner failure")
+        print(f"skipped {failed_trajectories}/{planned_rollouts} trajectories due to planner failure")
     print(f"plot saved to {output_path}")
-    if video_path is not None:
-        print(f"video saved to {video_path}")
+    if video:
+        if video_path is None:
+            print("video export skipped (missing ffmpeg backend).")
+        else:
+            print(f"video saved to {video_path}")
     if distance_report is not None:
         print(distance_report)
     return output_path
@@ -393,17 +486,20 @@ def main():
         "--system",
         type=str.lower,
         choices=DynamicsFactory.names(),
+        required=True,
         help="name of system class in lower case, e.g. single_integrator, unicycle2, ...",
     )
     parser.add_argument(
         "--planner",
         type=str.lower,
         choices=PlannerFactory.names(),
+        required=True,
         help="name of planner class in lower case, e.g. casadi",
     )
     parser.add_argument(
         "--config",
         type=str,
+        required=True,
         help="path to yaml config file for experiment",
     )
     parser.add_argument(
@@ -427,10 +523,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--num-traj",
+        type=int,
+        default=None,
+        help=(
+            "number of trajectories to attempt. When omitted, the count is inferred from --initial-states "
+            "or --seeds/default seeds."
+        ),
+    )
+    parser.add_argument(
         "--num-steps",
         type=int,
         default=150,
         help="maximum number of simulation steps per trajectory",
+    )
+    parser.add_argument(
+        "--use-config-start",
+        action="store_true",
+        help="use config-defined start state for the first trajectory",
     )
     parser.add_argument(
         "--action-noise-std",
@@ -442,6 +552,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--video",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="export MP4 alongside the PDF plot (default: enabled)",
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=int,
+        default=12,
+        help="video export FPS",
+    )
+    parser.add_argument(
         "--output-path",
         type=str,
         default=None,
@@ -449,6 +571,14 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.num_traj is not None and args.num_traj <= 0:
+        parser.error("--num-traj must be positive when provided.")
+    if args.num_steps <= 0:
+        parser.error("--num-steps must be positive.")
+    if args.video_fps <= 0:
+        parser.error("--video-fps must be positive.")
+
+    raw_config = load_yaml_config(args.config)
     config = load_and_validate_system_config(system_name=args.system, config_path=args.config)
 
     run_plotting(
@@ -459,7 +589,12 @@ def main():
         initial_states=parse_initial_states_argument(args.initial_states),
         num_steps=args.num_steps,
         action_noise_std=args.action_noise_std,
+        num_traj=args.num_traj,
+        use_config_start=args.use_config_start,
+        video=args.video,
+        video_fps=args.video_fps,
         output_path=args.output_path,
+        raw_config=raw_config,
     )
 
 

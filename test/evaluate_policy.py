@@ -30,6 +30,8 @@ from systems.dynamics import DynamicsProtocol
 # Import both policy types
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.factory import make_pre_post_processors
 
 from utils import plot_xy_trajectories, save_xy_rollout_video
 
@@ -169,6 +171,7 @@ def create_policy_input(
     simulator: DynamicsProtocol,
     observation: np.ndarray,
     device: torch.device,
+    add_batch_dim: bool = True,
 ) -> dict[str, torch.Tensor]:
     """
     Dynamically slices the flat observation array based on the
@@ -189,11 +192,14 @@ def create_policy_input(
                     f"Missing observation feature '{feature_name}' in packed frame. "
                     "Check simulator.format_dataset_frame() and dataset schema alignment."
                 )
-            policy_input[feature_name] = torch.as_tensor(
+            feature_tensor = torch.as_tensor(
                 packed_frame[feature_name],
                 dtype=torch.float32,
                 device=device,
-            ).view(1, -1)
+            )
+            if add_batch_dim:
+                feature_tensor = feature_tensor.view(1, -1)
+            policy_input[feature_name] = feature_tensor
 
     return policy_input
 
@@ -287,6 +293,8 @@ def rollout_policy(
     num_steps: int,
     action_noise_std: float = 0.0,
     action_noise_rng: np.random.Generator | None = None,
+    policy_preprocessor=None,
+    policy_postprocessor=None,
 ) -> tuple[np.ndarray, bool, int]:
     """
     Rolls out the neural policy from a given initial state.
@@ -307,10 +315,15 @@ def rollout_policy(
             simulator=simulator,
             observation=observation,
             device=device,
+            add_batch_dim=policy_preprocessor is None,
         )
+        if policy_preprocessor is not None:
+            policy_input = policy_preprocessor(policy_input)
 
         with torch.inference_mode():
             action_tensor = policy.select_action(policy_input)
+        if policy_postprocessor is not None:
+            action_tensor = policy_postprocessor(action_tensor)
 
         action = action_tensor.squeeze(0).cpu().numpy()
         executed_action = apply_execution_noise(
@@ -358,6 +371,8 @@ def run_evaluation(
     print(f"action noise seed: {action_noise_seed}")
 
     # Dynamically load the requested policy
+    policy_preprocessor = None
+    policy_postprocessor = None
     if policy_type == "diffusion":
         policy = DiffusionPolicy.from_pretrained(model_dir)
         policy_display_name = "Diffusion"
@@ -397,6 +412,17 @@ def run_evaluation(
 
     policy.eval()
     policy.to(device)
+
+    if policy_type in {"diffusion", "act"}:
+        policy_cfg = PreTrainedConfig.from_pretrained(model_dir)
+        policy_cfg.device = str(device)
+        policy_preprocessor, policy_postprocessor = make_pre_post_processors(
+            policy_cfg=policy_cfg,
+            pretrained_path=model_dir,
+            preprocessor_overrides={
+                "device_processor": {"device": str(device)},
+            },
+        )
 
     # Instantiate expert planner once and reset it for each rollout.
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
@@ -501,6 +527,8 @@ def run_evaluation(
             num_steps=num_steps,
             action_noise_std=action_noise_std,
             action_noise_rng=policy_action_noise_rng,
+            policy_preprocessor=policy_preprocessor,
+            policy_postprocessor=policy_postprocessor,
         )
 
         policy_final_state = policy_trajectory[-1]

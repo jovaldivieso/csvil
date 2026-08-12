@@ -246,11 +246,14 @@ def collect_dagger_rollouts(
     action_noise_std: float,
     action_noise_seed: int,
     expert_mixing_beta: float,
-    policy_action_fn: Callable[[np.ndarray], np.ndarray],
+    policy_action_fn: Callable[[np.ndarray], np.ndarray] | None,
     policy_reset_fn: Callable[[], None] | None = None,
     frame_builder: Callable[[np.ndarray, np.ndarray], dict[str, object]] | None = None,
 ) -> DaggerEvalMetrics:
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
+    if policy_action_fn is None and expert_mixing_beta < 1.0:
+        raise ValueError("'policy_action_fn' is required when 'expert_mixing_beta' is less than 1.0.")
+
     successful_episodes = 0
     attempted_episodes = 0
     max_attempts = max(trajectories_per_iteration * 3, trajectories_per_iteration)
@@ -293,7 +296,6 @@ def collect_dagger_rollouts(
 
         for step in range(1, steps_per_trajectory + 1):
             observation = simulator.observe(state)
-            policy_action = policy_action_fn(observation)
 
             try:
                 expert_action = expert_planner(observation)
@@ -316,7 +318,10 @@ def collect_dagger_rollouts(
             episode_frames.append(frame_builder(observation, expert_action))
 
             use_expert_action = bool(episode_action_noise_rng.random() < expert_mixing_beta)
-            base_action = expert_action if use_expert_action else policy_action
+            if use_expert_action or policy_action_fn is None:
+                base_action = expert_action
+            else:
+                base_action = policy_action_fn(observation)
             expert_executed_steps += int(use_expert_action)
             total_executed_steps += 1
 

@@ -17,11 +17,13 @@ import yaml
 import draccus
 
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.policies.factory import make_pre_post_processors
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -75,6 +77,7 @@ def create_policy_input(
     observation: np.ndarray,
     observation_feature_names_list: list[str],
     device: torch.device,
+    add_batch_dim: bool = True,
 ) -> dict[str, torch.Tensor]:
     """
     Build policy input tensors according to simulator dataset feature ordering.
@@ -85,14 +88,35 @@ def create_policy_input(
         feature_names=observation_feature_names_list,
     )
 
-    return {
-        feature_name: torch.as_tensor(
+    policy_input: dict[str, torch.Tensor] = {}
+    for feature_name in observation_feature_names_list:
+        feature_tensor = torch.as_tensor(
             packed_features[feature_name],
-                dtype=torch.float32,
-                device=device,
-            ).view(1, -1)
-        for feature_name in observation_feature_names_list
-    }
+            dtype=torch.float32,
+            device=device,
+        )
+        if add_batch_dim:
+            feature_tensor = feature_tensor.view(1, -1)
+        policy_input[feature_name] = feature_tensor
+    return policy_input
+
+
+def load_lerobot_pre_post_processors(
+    policy_cfg: PreTrainedConfig,
+    device: torch.device,
+    pretrained_path: Path | None = None,
+):
+    policy_cfg = copy.deepcopy(policy_cfg)
+    policy_cfg.device = str(device)
+
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_cfg=policy_cfg,
+        pretrained_path=str(pretrained_path) if pretrained_path is not None else None,
+        preprocessor_overrides={
+            "device_processor": {"device": str(device)},
+        },
+    )
+    return preprocessor, postprocessor
 
 
 def load_lerobot_policy(
@@ -538,6 +562,11 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             model_dir=model_dir,
             device=device,
         )
+        eval_preprocessor, eval_postprocessor = load_lerobot_pre_post_processors(
+            policy_cfg=PreTrainedConfig.from_pretrained(str(model_dir)),
+            device=device,
+            pretrained_path=model_dir,
+        )
 
         def action_fn(observation: np.ndarray) -> np.ndarray:
             policy_input = create_policy_input(
@@ -545,9 +574,12 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 observation=observation,
                 observation_feature_names_list=rollout_observation_feature_names,
                 device=device,
+                add_batch_dim=False,
             )
+            policy_input = eval_preprocessor(policy_input)
             with torch.inference_mode():
                 action_tensor = eval_policy.select_action(policy_input)
+            action_tensor = eval_postprocessor(action_tensor)
             return action_tensor.squeeze(0).cpu().numpy()
 
         reset_fn = eval_policy.reset if hasattr(eval_policy, "reset") else None
@@ -643,18 +675,34 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             f"decay_active={'yes' if allow_decay else 'no'}"
         )
 
+        policy: DiffusionPolicy | ACTPolicy | None = None
+        policy_preprocessor = None
+        policy_postprocessor = None
         if previous_pretrained_path is None:
-            policy: DiffusionPolicy | ACTPolicy = build_uninitialized_lerobot_policy(
+            policy = build_uninitialized_lerobot_policy(
                 policy_type=policy_type,
                 policy_config=uninitialized_policy_config,
                 device=device,
             )
-            print("Using uninitialized LeRobot policy for initial aggregation (no pretrained model yet).")
+            policy_preprocessor, policy_postprocessor = load_lerobot_pre_post_processors(
+                policy_cfg=uninitialized_policy_config,
+                device=device,
+                pretrained_path=None,
+            )
+            print(
+                "No pretrained checkpoint yet; using the uninitialized policy and matching processors "
+                "for fresh-mode round-0 aggregation."
+            )
         else:
             policy = load_lerobot_policy(
                 policy_type=policy_type,
                 model_dir=previous_pretrained_path,
                 device=device,
+            )
+            policy_preprocessor, policy_postprocessor = load_lerobot_pre_post_processors(
+                policy_cfg=PreTrainedConfig.from_pretrained(str(previous_pretrained_path)),
+                device=device,
+                pretrained_path=previous_pretrained_path,
             )
 
         if cfg.start_with_aggregation and not cfg.dataset_root.exists():
@@ -667,18 +715,24 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         else:
             dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
         try:
-            def policy_action_fn(observation: np.ndarray) -> np.ndarray:
-                policy_input = create_policy_input(
-                    simulator=simulator,
-                    observation=observation,
-                    observation_feature_names_list=rollout_observation_feature_names,
-                    device=device,
-                )
-                with torch.inference_mode():
-                    action_tensor = policy.select_action(policy_input)
-                return action_tensor.squeeze(0).cpu().numpy()
+            policy_action_fn = None
+            policy_reset_fn = None
+            if policy is not None and policy_preprocessor is not None and policy_postprocessor is not None:
+                def policy_action_fn(observation: np.ndarray) -> np.ndarray:
+                    policy_input = create_policy_input(
+                        simulator=simulator,
+                        observation=observation,
+                        observation_feature_names_list=rollout_observation_feature_names,
+                        device=device,
+                        add_batch_dim=False,
+                    )
+                    policy_input = policy_preprocessor(policy_input)
+                    with torch.inference_mode():
+                        action_tensor = policy.select_action(policy_input)
+                    action_tensor = policy_postprocessor(action_tensor)
+                    return action_tensor.squeeze(0).cpu().numpy()
 
-            policy_reset_fn = policy.reset if hasattr(policy, "reset") else None
+                policy_reset_fn = policy.reset if hasattr(policy, "reset") else None
 
             aggregation_metrics = collect_dagger_rollouts(
                 simulator=simulator,
@@ -695,7 +749,8 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         finally:
             dataset_writer.finalize()
             del dataset_writer
-            del policy
+            if policy is not None:
+                del policy
             gc.collect()
 
         print_rollout_metrics(

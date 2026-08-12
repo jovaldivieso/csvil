@@ -109,7 +109,7 @@ csvil/
 │   │   └── multi_unicycle2_casadi_mlp_config.yaml
 │   ├── models/
 │   │   └── mlp.py             # Custom MLP policy used for BC/DAgger
-│   ├── dagger_evaluation.py   # Shared in-loop DAgger evaluation helpers
+│   ├── dagger.py              # Shared DAgger rollout/evaluation/scheduling helpers
 │   ├── train_dagger.py        # Iterative DAgger for the custom MLP baseline
 │   └── train_lerobot_dagger.py  # LeRobot ACT / Diffusion training and DAgger entrypoint
 ├── planning/
@@ -134,9 +134,7 @@ csvil/
     │   └── multi_robot_dblacam_config.yaml
     ├── collect_expert_data.py    # CLI for expert dataset generation
     ├── evaluate_policy.py        # CLI for rollout/evaluation across policy families
-    ├── plot_expert_trajectories.py  # CLI plotting helper for expert rollouts
-    ├── plot_trajectories.py      # Legacy single-robot plot helper (CasADi/db-lacam)
-    ├── plot_trajectories_multi_robot.py  # Legacy db-lacam multi-robot plot helper
+    ├── plot_expert_trajectories.py  # Canonical single/multi-robot expert analysis CLI (plots + optional MP4)
     └── test_simulator_contracts.py  # Fleet-of-1 and schema consistency tests
 ```
 
@@ -167,6 +165,9 @@ fields are:
 - `initial_position_min_goal_distance`: reject/resample starts too close to the goal
 - `initial_state_seed`: reproducible RNG seed for unseeded resets such as collection and DAgger
 - `action_noise_seed`: deterministic seed used for rollout action-noise sampling
+
+Unicycle2 uses explicit per-dimension tolerances: `pos_tol`, `theta_tol`, `vel_tol`, and `omega_tol`.
+`error_tolerance` is intentionally rejected for `unicycle2` configs.
 
 System configs are now validated through `core/config.py` before simulation/evaluation
 to catch malformed keys and shape mismatches early. Planner-specific keys include:
@@ -497,11 +498,18 @@ round does: aggregate learner rollouts with expert labels, then retrain.
 - `--expert-mix-beta-start` / `--expert-mix-beta-end`: control how often the expert action is executed during aggregation rollouts; set both to `0.0` to recover the old no-mixing behavior
 - `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`
 - `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` for a strict "start decaying only after success is nonzero" gate
-- `--mlp-config`: optional YAML file for MLP architecture, e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [512, 256, 128]`
+- `--mlp-config`: optional YAML file for MLP architecture, e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [256, 256, 128]`
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate` and `aggregation_mean_steps`.
 - After each retrain, deterministic in-loop evaluation reports `eval_success_rate` and `eval_mean_steps`.
 - Evaluation defaults to 10 seeded rollouts; tune with `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, and `--eval-action-noise-std`.
 - `--action-noise-std 0.0`: no noise added to action to perturb the states
+
+If you want expert-only offline training with no DAgger aggregation at all, use one of these two entrypoints with `--dagger-iterations 0` and a precollected expert dataset:
+
+- `learning/train_dagger.py` for the custom MLP baseline
+- `learning/train_lerobot_dagger.py` for LeRobot ACT/Diffusion
+
+If you want to keep the DAgger loop but make aggregation expert-only, keep `--dagger-iterations > 0` and set `--expert-mix-beta-start 1.0` and `--expert-mix-beta-end 1.0` (or the equivalent beta schedule) so rollouts still run but always execute the expert action.
 
 ### Train a diffusion or ACT policy with LeRobot and DAgger
 
@@ -570,7 +578,7 @@ How this loop works:
 - `--expert-mix-beta-start` / `--expert-mix-beta-end`: control expert execution during aggregation rollouts; set both to `0.0` to disable mixing, or use a positive start value and decay to `0.0` for incremental DAgger.
 - `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`.
 - `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` if you want decay to remain off until eval success becomes nonzero.
-- During aggregation, the learner action is executed in simulation while the dataset stores expert (CasADi) corrective labels.
+- During aggregation, the learner or expert action is executed in simulation depending on the mix probability beta, while the dataset always stores expert (CasADi) corrective labels.
 - Dataset appends use `LeRobotDataset.resume(...)` and call `finalize()` each iteration to keep parquet chunks readable.
 
 Optional multi-robot visibility gating can be set in the simulator config:

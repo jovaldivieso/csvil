@@ -29,16 +29,23 @@
             "type": "debugpy",
             "request": "launch",
             "python": "/opt/venv/bin/python",
-            "program": "/workspace/test/plot_trajectories_multi_robot.py",
+            "program": "/workspace/test/plot_expert_trajectories.py",
             "cwd": "/workspace",
             "console": "integratedTerminal",
             "stopOnEntry": false,
             "justMyCode": true,
             "args": [
+                "--system",
+                "multi_robot",
+                "--planner",
+                "dblacam",
                 "--config",
                 "test/config/multi_robot_dblacam_config.yaml",
+                "--num-traj",
+                "1",
                 "--num-steps",
-                "400"
+                "400",
+                "--use-config-start"
             ]
         }
     ]
