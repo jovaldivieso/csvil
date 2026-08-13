@@ -1,14 +1,7 @@
 from .dynamics import DynamicsSimulator
-from .state_space_types import (
-    Euclidean2DAction,
-    SE2PoseAndEuclidean2DObservation,
-    SE2PoseState,
-    SO2State,
-)
 from core.types import VectorSpec, as_vector
 import casadi as ca
 import numpy as np
-import torch
 from typing import Any, Mapping
 
 

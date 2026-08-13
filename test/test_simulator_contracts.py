@@ -12,7 +12,6 @@ from core.factory import DynamicsFactory
 from core.config import ConfigurationError, validate_system_config
 from planning.casadi_planner import CasadiPlanner
 from systems.dynamics import DynamicsProtocol
-from systems.state_space_types import SE2PoseState, SO2State
 
 
 def _build_simulators() -> dict[str, DynamicsProtocol]:
@@ -101,20 +100,30 @@ def _assert_partition(slices: list[slice], total_size: int) -> None:
 
 
 class SimulatorContractTests(unittest.TestCase):
-    def test_lie_group_primitives(self) -> None:
-        source = SO2State.from_angle(0.3)
-        target = SO2State.from_angle(-2.8)
-        relative = source.between(target)
-        self.assertAlmostEqual(relative.log_vee(), source.error_to(target))
+    def test_unicycle1_step_wraps_theta_and_observe_invert_obs_are_so2_consistent(self) -> None:
+        simulator = _build_simulators()["unicycle1"]
+        state = simulator.reset(np.array([0.0, 0.0, np.pi - 0.01], dtype=float))
+        action = np.array([0.0, 1.0], dtype=float)
 
-        pose = SE2PoseState.from_array(np.array([1.2, -0.7, 0.9]))
-        identity = pose.compose(pose.inverse())
-        np.testing.assert_allclose(identity.as_matrix(), np.eye(3), atol=1e-9)
+        next_state = simulator.step(state, action)
+        expected_unwrapped_theta = float(state[2] + action[1] * simulator.dt)
 
-        other_pose = SE2PoseState.from_array(np.array([-0.5, 1.8, -1.1]))
-        relative_pose = pose.between(other_pose)
-        recomposed = relative_pose.compose(pose)
-        np.testing.assert_allclose(recomposed.as_matrix(), other_pose.as_matrix(), atol=1e-9)
+        self.assertGreaterEqual(next_state[2], -np.pi)
+        self.assertLessEqual(next_state[2], np.pi)
+        np.testing.assert_allclose(
+            [np.sin(next_state[2]), np.cos(next_state[2])],
+            [np.sin(expected_unwrapped_theta), np.cos(expected_unwrapped_theta)],
+            atol=1e-9,
+        )
+
+        observation = simulator.observe(next_state)
+        recovered_state = simulator.invert_obs(observation)
+        np.testing.assert_allclose(recovered_state[:2], next_state[:2], atol=1e-9)
+        np.testing.assert_allclose(
+            [np.sin(recovered_state[2]), np.cos(recovered_state[2])],
+            [np.sin(next_state[2]), np.cos(next_state[2])],
+            atol=1e-9,
+        )
 
     def test_fleet_contract_invariants(self) -> None:
         simulators = _build_simulators()
@@ -266,9 +275,11 @@ class SimulatorContractTests(unittest.TestCase):
             recovered_state = simulator.invert_obs(observation)
 
             np.testing.assert_allclose(recovered_state[:2], state[:2], atol=1e-9)
-            recovered_orientation = SO2State.from_angle(recovered_state[2])
-            original_orientation = SO2State.from_angle(state[2])
-            self.assertAlmostEqual(original_orientation.error_to(recovered_orientation), 0.0)
+            np.testing.assert_allclose(
+                [np.sin(recovered_state[2]), np.cos(recovered_state[2])],
+                [np.sin(state[2]), np.cos(state[2])],
+                atol=1e-9,
+            )
 
             if state.shape[0] > 3:
                 np.testing.assert_allclose(recovered_state[3:], state[3:], atol=1e-9)
