@@ -374,13 +374,15 @@ class CasadiPlanner(Planner):
         """Signals the start of a new episode."""
         self.last_X_sol = None
         self.last_U_sol = None
+        self.opti.set_initial(self.X, 0.0)
+        self.opti.set_initial(self.U, 0.0)
         if self.mode == "open_loop":
             self.cached_plan = None
             self.step_idx = 0
 
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         if self.mode == "mpc":
-            x0 = self.sim.invert_obs(obs)
+            x0 = self.sim.invert_obs(obs, validate=False)
             self.opti.set_value(self.x0_param, x0)
             self.opti.set_value(self.goal_param, self.sim.goal_state)
 
@@ -404,7 +406,7 @@ class CasadiPlanner(Planner):
         elif self.mode == "open_loop":
             # Plan once on the first step
             if self.cached_plan is None:
-                x0 = self.sim.invert_obs(obs)
+                x0 = self.sim.invert_obs(obs, validate=False)
                 self.opti.set_value(self.x0_param, x0)
                 self.opti.set_value(self.goal_param, self.sim.goal_state)
 

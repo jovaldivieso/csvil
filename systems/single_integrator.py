@@ -61,23 +61,21 @@ class SingleIntegrator(DynamicsSimulator):
         self.current_action = np.zeros(self.nu, dtype=float)
         return state
 
-    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
-        state = self.validate_state(state)
-        action = self.validate_action(action)
-        state_view = Euclidean2DState.from_array(state)
-        action_view = Euclidean2DAction.from_array(action).clipped(self.max_action)
-        self.current_action = action_view.as_numpy().copy()
-        next_pos = state_view.as_numpy() + action_view.as_numpy() * self.dt
-        return next_pos
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
+        clipped_action = np.clip(action_array, -self.max_action, self.max_action)
+        self.current_action = clipped_action.copy()
+        return state_array + clipped_action * self.dt
 
-    def observe(self, state: np.ndarray) -> np.ndarray:
-        state = self.validate_state(state)
-        obs = np.concatenate([self.goal - state, self.current_action])
-        return self.validate_observation(obs)
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        obs = np.concatenate([self.goal - state_array, self.current_action])
+        return self.validate_observation(obs) if validate else obs
 
-    def is_done(self, state: np.ndarray) -> bool:
-        state = self.validate_state(state)
-        dist = np.linalg.norm(state - self.goal)
+    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        dist = np.linalg.norm(state_array - self.goal)
         return dist < self.error_tolerance
 
     def casadi_dynamics(self, x: Any, u: Any):
@@ -127,10 +125,9 @@ class SingleIntegrator(DynamicsSimulator):
             if np.all((initial_state >= self.environment_min) & (initial_state <= self.environment_max)):
                 return initial_state
 
-    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
-        obs = self.validate_observation(obs)
-        obs_view = Euclidean4DObservation.from_array(obs)
-        return self.goal - obs_view.goal_relative
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+        obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)
+        return self.goal - obs_array[:2]
 
     @property
     def goal_state(self) -> np.ndarray:
@@ -144,14 +141,12 @@ class SingleIntegrator(DynamicsSimulator):
                 size=self.goal.shape[0],
             )
 
-    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, np.ndarray]:
         """Package the observation and action into a dictionary for LeRobot"""
         obs = self.validate_observation(obs)
         action = self.validate_action(action)
-        obs_view = Euclidean4DObservation.from_array(obs)
-        action_view = Euclidean2DAction.from_array(action)
         return {
-            "observation.environment_state": torch.from_numpy(obs_view.goal_relative).float(),
-            "observation.state": torch.from_numpy(obs_view.velocity_like).float(),
-            "action": action_view.as_torch(),
+            "observation.environment_state": np.asarray(obs[:2], dtype=np.float32),
+            "observation.state": np.asarray(obs[2:4], dtype=np.float32),
+            "action": np.asarray(action, dtype=np.float32),
         }

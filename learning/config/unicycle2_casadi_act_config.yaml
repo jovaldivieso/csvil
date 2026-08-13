@@ -2,6 +2,9 @@
 policy:
   type: act
   device: mps
+
+  optimizer_lr: 1e-4
+  optimizer_lr_backbone: 1e-4
   
   # Neural network policy settings
   chunk_size: 16
@@ -35,6 +38,9 @@ policy:
     action:
       shape: [2]
       type: ACTION
+
+optimizer:
+  lr: 1e-4
 
 # Training settings
 steps: 2250

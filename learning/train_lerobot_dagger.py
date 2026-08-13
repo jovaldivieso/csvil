@@ -34,12 +34,14 @@ from learning.dagger import (
     DaggerEvalMetrics,
     ExpertMixBetaController,
     apply_execution_noise,
+    build_observation_feature_pack_cache,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
     observation_feature_names,
-    pack_observation_features,
+    pack_observation_features_from_cache,
     print_rollout_metrics,
     resolve_round_steps,
+    resolve_initial_state_seed,
     set_seed,
     with_seeded_initial_state_config,
 )
@@ -78,26 +80,28 @@ def create_policy_input(
     observation_feature_names_list: list[str],
     device: torch.device,
     add_batch_dim: bool = True,
+    observation_feature_cache=None,
 ) -> dict[str, torch.Tensor]:
     """
     Build policy input tensors according to simulator dataset feature ordering.
     """
-    packed_features = pack_observation_features(
-        simulator=simulator,
-        observation=observation,
-        feature_names=observation_feature_names_list,
-    )
+    if observation_feature_cache is None:
+        observation_feature_cache = build_observation_feature_pack_cache(
+            simulator,
+            observation_feature_names_list,
+        )
 
+    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
     policy_input: dict[str, torch.Tensor] = {}
     for feature_name in observation_feature_names_list:
-        feature_tensor = torch.as_tensor(
-            packed_features[feature_name],
-            dtype=torch.float32,
-            device=device,
-        )
+        feature_tensor = torch.as_tensor(packed_features[feature_name], dtype=torch.float32)
         if add_batch_dim:
             feature_tensor = feature_tensor.view(1, -1)
         policy_input[feature_name] = feature_tensor
+
+    if device.type != "cpu":
+        policy_input = {feature_name: tensor.to(device) for feature_name, tensor in policy_input.items()}
+
     return policy_input
 
 
@@ -498,6 +502,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         base_seed=cfg.seed,
     )
     action_noise_seed = default_action_noise_seed_for_config(seeded_experiment_config)
+    initial_state_seed = resolve_initial_state_seed(seeded_experiment_config, cfg.seed)
     print(f"Action noise seed: {action_noise_seed}")
 
     base_training_config = read_training_config(cfg.lerobot_training_config_path)
@@ -545,8 +550,11 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             f"approx_epochs={initial_epochs:.2f}"
         )
 
-    rollout_observation_feature_names = observation_feature_names(
-        DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
+    rollout_schema_simulator = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
+    rollout_observation_feature_names = observation_feature_names(rollout_schema_simulator)
+    rollout_observation_feature_cache = build_observation_feature_pack_cache(
+        rollout_schema_simulator,
+        rollout_observation_feature_names,
     )
 
     def evaluate_trained_policy(
@@ -576,6 +584,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 observation_feature_names_list=rollout_observation_feature_names,
                 device=device,
                 add_batch_dim=False,
+                observation_feature_cache=rollout_observation_feature_cache,
             )
             policy_input = eval_preprocessor(policy_input)
             with torch.inference_mode():
@@ -717,6 +726,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                         observation_feature_names_list=rollout_observation_feature_names,
                         device=device,
                         add_batch_dim=False,
+                        observation_feature_cache=rollout_observation_feature_cache,
                     )
                     policy_input = policy_preprocessor(policy_input)
                     with torch.inference_mode():
@@ -734,7 +744,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 action_noise_std=cfg.action_noise_std,
                 action_noise_seed=action_noise_seed,
-                initial_state_seed=cfg.seed,
+                initial_state_seed=initial_state_seed,
                 expert_mixing_beta=round_beta,
                 policy_action_fn=policy_action_fn,
                 policy_reset_fn=policy_reset_fn,
@@ -913,10 +923,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--adaptive-beta-recovery",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
             "toggle adaptive recovery on eval regressions: when enabled, beta is increased by one "
-            "schedule step after a success-rate drop; when disabled (default), beta follows a "
+            "schedule step after a success-rate drop; when disabled, beta follows a "
             "monotonic schedule"
         ),
     )

@@ -30,13 +30,15 @@ from learning.dagger import (
     ExpertMixBetaController,
     action_feature_names,
     apply_execution_noise,
+    build_observation_feature_pack_cache,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
     observation_dim_from_features,
     observation_feature_names,
-    pack_observation_features,
+    pack_observation_features_from_cache,
     print_rollout_metrics,
     resolve_round_steps,
+    resolve_initial_state_seed,
     set_seed,
     with_seeded_initial_state_config,
 )
@@ -64,23 +66,19 @@ def flatten_observation_for_policy(
     observation: np.ndarray,
     observation_feature_names_list: list[str],
     device: torch.device,
+    observation_feature_cache,
 ) -> torch.Tensor:
     """
     Pack runtime observation exactly like dataset frames, then flatten for MLP.
     """
-    packed_features = pack_observation_features(
-        simulator=simulator,
-        observation=observation,
-        feature_names=observation_feature_names_list,
-    )
-
-    chunks: list[torch.Tensor] = []
-    for feature_name in observation_feature_names_list:
-        chunks.append(
-            torch.as_tensor(packed_features[feature_name], dtype=torch.float32, device=device).view(-1)
-        )
-
-    return torch.cat(chunks, dim=0).unsqueeze(0)
+    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
+    flattened = np.concatenate(
+        [packed_features[feature_name].reshape(-1) for feature_name in observation_feature_names_list]
+    ).astype(np.float32, copy=False)
+    observation_tensor = torch.as_tensor(flattened, dtype=torch.float32)
+    if device.type != "cpu":
+        observation_tensor = observation_tensor.to(device)
+    return observation_tensor.unsqueeze(0)
 
 
 class LeRobotMLPDataset(Dataset):
@@ -266,6 +264,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
     simulator = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
     device = get_training_device()
     action_noise_seed = default_action_noise_seed_for_config(seeded_experiment_config)
+    initial_state_seed = resolve_initial_state_seed(seeded_experiment_config, cfg.seed)
 
     obs_feature_names = observation_feature_names(simulator)
     act_feature_names = action_feature_names(simulator)
@@ -273,6 +272,8 @@ def run_dagger(cfg: DaggerConfig) -> None:
         raise ValueError("No observation features found in simulator dataset schema.")
     if len(act_feature_names) == 0:
         raise ValueError("No action features found in simulator dataset schema.")
+
+    obs_feature_cache = build_observation_feature_pack_cache(simulator, obs_feature_names)
 
     state_dim = observation_dim_from_features(simulator)
     action_dim = int(simulator.nu)
@@ -374,6 +375,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                     observation,
                     observation_feature_names_list=obs_feature_names,
                     device=device,
+                        observation_feature_cache=obs_feature_cache,
                 )
                 action = policy.select_action(model_input).squeeze(0).cpu().numpy()
             return action
@@ -488,6 +490,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                         observation,
                         observation_feature_names_list=obs_feature_names,
                         device=device,
+                        observation_feature_cache=obs_feature_cache,
                     )
                     return policy.select_action(model_input).squeeze(0).cpu().numpy()
 
@@ -499,7 +502,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 action_noise_std=cfg.action_noise_std,
                 action_noise_seed=action_noise_seed,
-                initial_state_seed=cfg.seed,
+                initial_state_seed=initial_state_seed,
                 expert_mixing_beta=round_beta,
                 policy_action_fn=policy_action_fn,
             )
@@ -636,10 +639,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--adaptive-beta-recovery",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
             "toggle adaptive recovery on eval regressions: when enabled, beta is increased by one "
-            "schedule step after a success-rate drop; when disabled (default), beta follows a "
+            "schedule step after a success-rate drop; when disabled, beta follows a "
             "monotonic schedule"
         ),
     )

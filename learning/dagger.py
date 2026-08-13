@@ -15,6 +15,7 @@ from systems.seed_utils import (
     DEFAULT_MULTI_ROBOT_SEED_STRIDE,
     action_noise_seed_for_rollout,
     action_noise_rng_for_rollout,
+    expert_mixing_seed_for_rollout,
     initial_state_seed_for_rollout,
 )
 
@@ -123,7 +124,7 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def with_seeded_initial_state_config(
@@ -161,6 +162,10 @@ def with_seeded_initial_state_config(
     return seeded_config
 
 
+def resolve_initial_state_seed(config: Mapping[str, object], fallback_seed: int) -> int:
+    return int(config.get("initial_state_seed", fallback_seed))
+
+
 def is_observation_feature(feature_name: str) -> bool:
     return feature_name.startswith("observation.") or ".observation." in feature_name
 
@@ -181,6 +186,104 @@ def action_feature_names(simulator: DynamicsProtocol) -> list[str]:
     ]
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationFeaturePackCache:
+    feature_names: tuple[str, ...]
+    feature_indices: np.ndarray
+    feature_index_slices: tuple[slice, ...]
+
+
+def build_observation_feature_pack_cache(
+    simulator: DynamicsProtocol,
+    feature_names: list[str],
+) -> ObservationFeaturePackCache:
+    dataset_features = simulator.get_dataset_features()
+    schema_observation_features = tuple(
+        feature_name
+        for feature_name in dataset_features.keys()
+        if is_observation_feature(feature_name)
+    )
+    provided_feature_names = tuple(feature_names)
+
+    if provided_feature_names != schema_observation_features:
+        mismatch_index = next(
+            (
+                idx
+                for idx, (expected_name, provided_name) in enumerate(
+                    zip(schema_observation_features, provided_feature_names)
+                )
+                if expected_name != provided_name
+            ),
+            None,
+        )
+        if mismatch_index is not None:
+            mismatch_details = (
+                f"first mismatch at index {mismatch_index}: "
+                f"expected '{schema_observation_features[mismatch_index]}' "
+                f"but got '{provided_feature_names[mismatch_index]}'"
+            )
+        else:
+            mismatch_details = (
+                "feature list lengths differ: "
+                f"expected {len(schema_observation_features)} but got {len(provided_feature_names)}"
+            )
+
+        raise ValueError(
+            "Observation feature ordering does not match simulator dataset schema; "
+            "this can cause silent policy input misalignment. "
+            f"{mismatch_details}"
+        )
+
+    total_dim = observation_dim_from_features(simulator)
+    dummy_obs = np.arange(total_dim, dtype=np.float32)
+    dummy_act = np.zeros(int(simulator.nu), dtype=np.float32)
+    dummy_frame = simulator.format_dataset_frame(dummy_obs, dummy_act)
+
+    feature_indices: list[np.ndarray] = []
+    feature_index_slices: list[slice] = []
+    start = 0
+    for feature_name in provided_feature_names:
+        if feature_name not in dummy_frame:
+            raise KeyError(
+                f"Observation feature '{feature_name}' is missing from simulator dataset formatter."
+            )
+
+        feature_array = np.asarray(dummy_frame[feature_name])
+        if feature_array.ndim == 0:
+            raise ValueError(
+                f"Observation feature '{feature_name}' must be indexable from the formatted frame."
+            )
+
+        feature_index_array = feature_array.astype(int, copy=False).reshape(-1)
+        stop = start + feature_index_array.shape[0]
+        feature_indices.append(feature_index_array)
+        feature_index_slices.append(slice(start, stop))
+        start = stop
+
+    if len(feature_indices) == 0:
+        stacked_feature_indices = np.empty(0, dtype=int)
+    else:
+        stacked_feature_indices = np.concatenate(feature_indices).astype(int, copy=False)
+
+    return ObservationFeaturePackCache(
+        feature_names=provided_feature_names,
+        feature_indices=stacked_feature_indices,
+        feature_index_slices=tuple(feature_index_slices),
+    )
+
+
+def pack_observation_features_from_cache(
+    observation: np.ndarray,
+    feature_cache: ObservationFeaturePackCache,
+) -> dict[str, np.ndarray]:
+    observation_array = np.asarray(observation)
+    packed_values = np.asarray(observation_array[feature_cache.feature_indices], dtype=np.float32)
+    return {
+        feature_name: np.asarray(packed_values[feature_slice], dtype=np.float32)
+        for feature_name, feature_slice in zip(feature_cache.feature_names, feature_cache.feature_index_slices)
+    }
+
+
 def observation_dim_from_features(simulator: DynamicsProtocol) -> int:
     total_dim = 0
     for feature_name, feature_info in simulator.get_dataset_features().items():
@@ -193,79 +296,11 @@ def pack_observation_features(
     simulator: DynamicsProtocol,
     observation: np.ndarray,
     feature_names: list[str],
+    feature_cache: ObservationFeaturePackCache | None = None,
 ) -> dict[str, np.ndarray]:
-    dataset_features = simulator.get_dataset_features()
-    schema_observation_features = [
-        feature_name
-        for feature_name in dataset_features.keys()
-        if is_observation_feature(feature_name)
-    ]
-    if feature_names != schema_observation_features:
-        mismatch_index = next(
-            (
-                idx
-                for idx, (expected_name, provided_name) in enumerate(
-                    zip(schema_observation_features, feature_names)
-                )
-                if expected_name != provided_name
-            ),
-            None,
-        )
-        if mismatch_index is not None:
-            mismatch_details = (
-                f"first mismatch at index {mismatch_index}: "
-                f"expected '{schema_observation_features[mismatch_index]}' "
-                f"but got '{feature_names[mismatch_index]}'"
-            )
-        else:
-            mismatch_details = (
-                "feature list lengths differ: "
-                f"expected {len(schema_observation_features)} but got {len(feature_names)}"
-            )
-
-        raise ValueError(
-            "Observation feature ordering does not match simulator dataset schema; "
-            "this can cause silent policy input misalignment. "
-            f"{mismatch_details}"
-        )
-
-    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
-    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
-
-    missing = [feature_name for feature_name in feature_names if feature_name not in packed_frame]
-    if len(missing) > 0:
-        missing_str = ", ".join(sorted(missing))
-        raise KeyError(
-            f"Missing observation features in packed frame: {missing_str}. "
-            "Check simulator.format_dataset_frame() and dataset schema alignment."
-        )
-
-    packed_observation_features: dict[str, np.ndarray] = {}
-    for feature_name in feature_names:
-        if feature_name not in dataset_features:
-            raise KeyError(
-                f"Observation feature '{feature_name}' is missing from simulator dataset schema."
-            )
-
-        feature_info = dataset_features[feature_name]
-        expected_shape_raw = feature_info.get("shape") if isinstance(feature_info, Mapping) else None
-        if not isinstance(expected_shape_raw, (list, tuple)):
-            raise ValueError(
-                "Simulator dataset schema must define a list/tuple 'shape' for observation feature "
-                f"'{feature_name}'. Got: {expected_shape_raw!r}"
-            )
-
-        expected_shape = tuple(int(dim) for dim in expected_shape_raw)
-        feature_array = np.asarray(packed_frame[feature_name], dtype=np.float32)
-        if feature_array.shape != expected_shape:
-            raise ValueError(
-                f"Observation feature '{feature_name}' shape mismatch: "
-                f"expected {expected_shape}, got {feature_array.shape}."
-            )
-
-        packed_observation_features[feature_name] = feature_array
-
-    return packed_observation_features
+    if feature_cache is None:
+        feature_cache = build_observation_feature_pack_cache(simulator, feature_names)
+    return pack_observation_features_from_cache(observation, feature_cache)
 
 
 def scheduled_expert_mix_beta(
@@ -443,6 +478,11 @@ def collect_dagger_rollouts(
             rollout_index=attempted_episodes,
         )
         episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
+        episode_expert_mixing_seed = expert_mixing_seed_for_rollout(
+            action_noise_seed,
+            rollout_index=attempted_episodes,
+        )
+        episode_expert_mixing_rng = np.random.default_rng(episode_expert_mixing_seed)
         planner_failed = False
 
         if policy_reset_fn is not None:
@@ -455,7 +495,7 @@ def collect_dagger_rollouts(
         episode_frames: list[dict[str, object]] = []
 
         for step in range(1, steps_per_trajectory + 1):
-            observation = simulator.observe(state)
+            observation = simulator.observe(state, validate=False)
 
             try:
                 expert_action = expert_planner(observation)
@@ -477,7 +517,7 @@ def collect_dagger_rollouts(
 
             episode_frames.append(frame_builder(observation, expert_action))
 
-            use_expert_action = bool(episode_action_noise_rng.random() < expert_mixing_beta)
+            use_expert_action = bool(episode_expert_mixing_rng.random() < expert_mixing_beta)
             policy_action = None
             # Keep stateful policies (e.g. ACT/Diffusion with history/action queues)
             # synchronized with environment time even on expert-executed steps.
@@ -496,7 +536,7 @@ def collect_dagger_rollouts(
                 action_noise_std=action_noise_std,
                 rng=episode_action_noise_rng,
             )
-            state = simulator.step(state, executed_action)
+            state = simulator.step(state, executed_action, validate=False)
 
             if simulator.should_terminate_rollout(state):
                 reached_goal = True
@@ -554,7 +594,7 @@ def rollout_policy_with_action_fn(
         return True, 0
 
     for step in range(1, num_steps + 1):
-        observation = simulator.observe(state)
+        observation = simulator.observe(state, validate=False)
         action = action_fn(observation)
         executed_action = apply_execution_noise(
             simulator=simulator,
@@ -562,7 +602,7 @@ def rollout_policy_with_action_fn(
             action_noise_std=action_noise_std,
             rng=action_noise_rng,
         )
-        state = simulator.step(state, executed_action)
+        state = simulator.step(state, executed_action, validate=False)
 
         if simulator.should_terminate_rollout(state):
             return True, step

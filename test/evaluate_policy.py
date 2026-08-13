@@ -172,34 +172,33 @@ def create_policy_input(
     observation: np.ndarray,
     device: torch.device,
     add_batch_dim: bool = True,
+    observation_feature_cache=None,
 ) -> dict[str, torch.Tensor]:
     """
     Dynamically slices the flat observation array based on the
     feature shapes defined by the simulator.
     """
-    policy_input = {}
-    features = simulator.get_dataset_features()
+    from learning.dagger import (  # local import keeps this helper self-contained
+        build_observation_feature_pack_cache,
+        pack_observation_features_from_cache,
+    )
 
-    # Reuse the simulator's dataset packing logic to avoid layout drift between
-    # runtime observations and the tensors seen during training.
-    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
-    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
+    if observation_feature_cache is None:
+        observation_feature_cache = build_observation_feature_pack_cache(
+            simulator,
+            [feature_name for feature_name in simulator.get_dataset_features().keys() if is_observation_feature(feature_name)],
+        )
 
-    for feature_name in features.keys():
-        if is_observation_feature(feature_name):
-            if feature_name not in packed_frame:
-                raise KeyError(
-                    f"Missing observation feature '{feature_name}' in packed frame. "
-                    "Check simulator.format_dataset_frame() and dataset schema alignment."
-                )
-            feature_tensor = torch.as_tensor(
-                packed_frame[feature_name],
-                dtype=torch.float32,
-                device=device,
-            )
-            if add_batch_dim:
-                feature_tensor = feature_tensor.view(1, -1)
-            policy_input[feature_name] = feature_tensor
+    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
+    policy_input: dict[str, torch.Tensor] = {}
+    for feature_name in observation_feature_cache.feature_names:
+        feature_tensor = torch.as_tensor(packed_features[feature_name], dtype=torch.float32)
+        if add_batch_dim:
+            feature_tensor = feature_tensor.view(1, -1)
+        policy_input[feature_name] = feature_tensor
+
+    if device.type != "cpu":
+        policy_input = {feature_name: tensor.to(device) for feature_name, tensor in policy_input.items()}
 
     return policy_input
 
@@ -250,7 +249,7 @@ def rollout_planner(
         return np.asarray(trajectory)
 
     for _ in range(num_steps):
-        obs = simulator.observe(state)
+        obs = simulator.observe(state, validate=False)
         
         try:
             action = planner(obs)
@@ -276,7 +275,7 @@ def rollout_planner(
             action_noise_std=action_noise_std,
             rng=action_noise_rng,
         )
-        state = simulator.step(state, executed_action)
+        state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
         if simulator.should_terminate_rollout(state):
@@ -309,7 +308,7 @@ def rollout_policy(
     policy.reset()
 
     for step in range(1, num_steps + 1):
-        observation = simulator.observe(state)
+        observation = simulator.observe(state, validate=False)
 
         policy_input = create_policy_input(
             simulator=simulator,
@@ -333,7 +332,7 @@ def rollout_policy(
             rng=action_noise_rng,
         )
 
-        state = simulator.step(state, executed_action)
+        state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
         if simulator.should_terminate_rollout(state):
