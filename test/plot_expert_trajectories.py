@@ -222,7 +222,7 @@ def rollout_trajectory(
     planner_failed = False
 
     for _ in range(num_steps):
-        observation = simulator.observe(state)
+        observation = simulator.observe(state, validate=False)
         try:
             action = planner(observation)
         except PlannerSolveError as exc:
@@ -258,7 +258,7 @@ def rollout_trajectory(
         else:
             executed_action = action
 
-        state = simulator.step(state, executed_action)
+        state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
         if simulator.should_terminate_rollout(state):
             reached_goal = True
@@ -325,30 +325,34 @@ def run_plotting(
             _extract_config_start_state(system=system, raw_config=raw_config)
         ).copy()
 
+    explicit_initial_states: list[np.ndarray] = []
+    if config_start_state is not None:
+        explicit_initial_states.append(config_start_state.copy())
+    explicit_initial_states.extend(
+        simulator.validate_state(initial_state_spec).copy() for initial_state_spec in initial_state_specs
+    )
+
     if num_traj is not None:
         planned_rollouts = int(num_traj)
-    elif len(initial_state_specs) > 0:
-        planned_rollouts = max(len(seed_specs), len(initial_state_specs))
+    elif len(explicit_initial_states) > 0:
+        planned_rollouts = max(len(seed_specs), len(explicit_initial_states))
     else:
         planned_rollouts = len(seed_specs)
 
-    if len(initial_state_specs) > 0:
+    if len(explicit_initial_states) > 0:
         print(
             "simulating "
             f"{planned_rollouts} trajectories "
-            f"({len(initial_state_specs)} explicit initial states + seeded/RNG fallback)..."
+            f"({len(explicit_initial_states)} explicit initial states + seeded/RNG fallback)..."
         )
         initial_state_plan: list[tuple[Any, str, int | list[int] | None]] = []
         for idx in range(planned_rollouts):
-            if idx == 0 and config_start_state is not None:
-                initial_state_plan.append(
-                    (config_start_state.copy(), "config_start", seed_specs[idx] if idx < len(seed_specs) else None)
-                )
-            elif idx < len(initial_state_specs):
+            if idx < len(explicit_initial_states):
+                initial_state_source = "config_start" if idx == 0 and config_start_state is not None else "provided"
                 initial_state_plan.append(
                     (
-                        simulator.validate_state(initial_state_specs[idx]).copy(),
-                        "provided",
+                        explicit_initial_states[idx].copy(),
+                        initial_state_source,
                         seed_specs[idx] if idx < len(seed_specs) else None,
                     )
                 )
@@ -361,11 +365,7 @@ def run_plotting(
         print(f"simulating {planned_rollouts} trajectories...")
         initial_state_plan = []
         for idx in range(planned_rollouts):
-            if idx == 0 and config_start_state is not None:
-                initial_state_plan.append(
-                    (config_start_state.copy(), "config_start", seed_specs[idx] if idx < len(seed_specs) else None)
-                )
-            elif idx < len(seed_specs):
+            if idx < len(seed_specs):
                 initial_state_plan.append((seed_specs[idx], "seeded", seed_specs[idx]))
             else:
                 initial_state_plan.append((None, "rng_fallback", None))

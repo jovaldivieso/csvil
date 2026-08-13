@@ -123,6 +123,7 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
 
 
 def with_seeded_initial_state_config(
