@@ -12,9 +12,6 @@ Core design patterns and rationale:
 - **Composite Pattern (Fleet-first system abstraction)**
   `MultiRobotSimulator` is the primary simulator boundary: it composes per-robot simulators and exposes one shared state/action/observation interface. A single robot is treated as the fleet-of-1 case (`num_robots = 1`), so data collection, evaluation, and training all reuse the same path without branching on single- vs multi-agent mode.
 
-- **Immutable Value Objects (Math-first geometric abstraction)**
-  Manifold-valued states are represented as typed, immutable objects such as `SO2State` and `SE2PoseState` instead of mutable raw arrays. This keeps geometric operations explicit, prevents accidental in-place edits, and confines coordinate-chart conversions to clear API boundaries.
-
 - **Protocol-Based Structural Typing (Duck Typing)**
   `DynamicsProtocol` and `PlannerProtocol` define the required runtime contracts in [systems/dynamics.py](systems/dynamics.py) and [planning/planner.py](planning/planner.py). New components integrate by matching those interfaces, which keeps extension work local and avoids deep inheritance coupling.
 
@@ -118,8 +115,10 @@ csvil/
 │   └── dblacam_planner.py     # db-lacam planner implementation
 ├── systems/
 │   ├── dynamics.py            # Base simulator protocol and validation
+│   ├── double_integrator.py   # Example simulator subclass (holonomic)
 │   ├── initial_state_utils.py # Shared initial-state parsing/normalization
 │   ├── multi_robot.py         # Fleet composition wrapper over per-robot simulators
+│   ├── unicycle2.py           # Example simulator subclass (non-holonomic)
 │   └── seed_utils.py          # Seed defaults and deterministic rollout seeding
 ├── outputs/
 │   ├── plots/                 # Evaluation and expert-rollout plots/videos
@@ -751,9 +750,7 @@ Use this as a compact quick reference for current entrypoint flags.
 ## TODO / Roadmap / Brainstorming
 - Open: Observation packing still uses fixed-size concatenation and currently overloads zeros for "robot at same position" vs "robot not observable" in visibility-gated relative slots; transition to variable-neighbor representations with explicit masks (for example Deep Sets / GNN-friendly schema).
 - Open: Add permutation-invariant multi-agent policy models in `learning/models` (Deep Sets and/or GNN, optionally CNN for grid observations) and integrate them into `train_dagger.py` so policies can generalize across variable neighbor counts and neighbor-order permutations instead of relying on fixed concatenation-based MLP inputs.
-- Open: Extend the current coordinate-wise Euclidean/$S^1$ planner residual abstraction to support intrinsic `SO(3)` and `SE(3)` residuals once 3D rigid-body systems and richer manifold-valued states become first-class targets.
 - Open: Extend protocol-level simulator metadata beyond the already-promoted `is_euclidean` field (for example, plotting metadata and coordinate semantics) to remove remaining script-local heuristics.
-- Open: Complete the current refactor toward Lie-group-first internal state handling. For systems with manifold-valued state, represent internal orientation/pose math with SO(2), SE(2), and their Lie algebras/operators wherever we control the code, and confine coordinate-chart conversions (`theta`, flattened pose vectors, concatenated dataset tensors) to explicit boundary adapters for CasADi, LeRobot, OMPL, YAML parsing, and other external APIs.
 - Open: Add optional per-robot state-cost blocks (`Q_diag_per_robot`) with the same normalization rules as `R_weight_per_robot` for heterogeneous fleets.
 - Open: Add structured benchmark suites that report success rate, terminal error, trajectory cost, safety-margin statistics, and solver wall-time across systems and policies.
 - Open: Add repeatable experiment manifests (seed bundles, config snapshots, artifact indexing) for reproducible BC/DAgger/ACT/Diffusion comparisons.
@@ -761,8 +758,6 @@ Use this as a compact quick reference for current entrypoint flags.
 - Open: Plan the transition from 2D validation systems to 3D robotics workflows by introducing a 3D double-integrator baseline and 3D trajectory visualization/evaluation; separate `double_integrator_2d.py` and `double_integrator_3d.py` and removing current `double_integrator.py` (renamed to `double_integrator_2d.py`) and keep factory/config/test coverage consistent across both.
 - Brainstorming: Evaluate a collision-checking abstraction for FCL support (for example, a base `collision_checker.py` analogous to `planning/planner.py`, plus an `fcl_collision_checker.py` implementation), then define how it composes with planners and system configs.
 - Brainstorming: Add composable observer/noise models so training and evaluation can sweep partial observability and sensor corruption systematically (beyond current execution-time action-noise injection).
-- Brainstorming: Build Lie-group-aware inductive bias into the simple MLP baselines, using invariance/equivariance that matches each system's symmetry. For example, SE(2)-equivariant policy structure is a natural target for unicycle systems such as `unicycle2`, instead of treating pose coordinates as generic concatenated scalars.
 - Brainstorming: Extend the planner stack to support OMPL as an additional backend. The expected integration path is straightforward: add an OMPL planner implementation that inherits from `planning/planner.py` and register it through `PlannerFactory`.
-- Brainstorming: Upgrade the CasADi planner formulation to be Lie-group-aware wherever practical. Even if the NLP still uses Euclidean decision variables, the model can move toward SO(2)/SE(2)-consistent residuals, compose/inverse operations, and, where useful, explicit manifold-style constraints for rotation representations rather than relying on raw angle subtraction alone.
 - Brainstorming: Add a safety module similar to GLAS-style barrier-function shielding.
 

@@ -2,15 +2,9 @@ from typing import Any, Mapping
 
 import casadi as ca
 import numpy as np
-import torch
 
 from core.types import VectorSpec, as_vector
 from .dynamics import DynamicsSimulator
-from .state_space_types import (
-    Euclidean2DAction,
-    Euclidean2DState,
-    Euclidean4DObservation,
-)
 
 
 class SingleIntegrator(DynamicsSimulator):

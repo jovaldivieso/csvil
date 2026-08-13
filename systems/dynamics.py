@@ -39,12 +39,11 @@ class DynamicsProtocol(Protocol):
 
         Geometry invariant
         ------------------
-        For manifold-valued systems, internal simulator logic should use the
-        corresponding Lie-group/Lie-algebra operations whenever possible.
-        Flattened chart coordinates (for example ``theta`` or concatenated pose
-        vectors) are boundary representations reserved for interfaces the codebase
-        does not fully control, such as CasADi, LeRobot, YAML/CLI I/O, or other
-        external tool APIs.
+        Internal simulator logic should keep orientation and position handling
+        consistent with each system definition. Flattened coordinates (for example
+        ``theta`` or concatenated pose vectors) are boundary representations used
+        at interfaces the codebase does not fully control, such as CasADi,
+        LeRobot, YAML/CLI I/O, or other external tool APIs.
 
         State-ordering invariant
         ------------------------

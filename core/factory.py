@@ -28,7 +28,7 @@ PLANNER_REGISTRY: dict[str, PlannerBuilder] = {
     "dblacam": DbLacamPlanner,
 }
 
-# SE(2) is the 2D rigid-body task space (x, y, theta), enabling orientation-aware arrow plotting.
+# Systems with heading in their state vector, used for orientation-aware arrow plotting.
 SE2_SYSTEMS: set[str] = {"unicycle1", "unicycle2"}
 
 

@@ -4,7 +4,6 @@ from typing import Any, Iterable, Mapping
 
 import casadi as ca
 import numpy as np
-import torch
 
 from core.types import VectorSpec, as_vector
 from systems.dynamics import DynamicsProtocol, DynamicsSimulator
