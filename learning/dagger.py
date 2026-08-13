@@ -15,6 +15,7 @@ from systems.seed_utils import (
     DEFAULT_MULTI_ROBOT_SEED_STRIDE,
     action_noise_seed_for_rollout,
     action_noise_rng_for_rollout,
+    initial_state_seed_for_rollout,
 )
 
 
@@ -76,11 +77,8 @@ class ExpertMixBetaController:
 
     def _increase_beta(self) -> None:
         delta = self._step_delta()
-        if self.beta_decay_rate is not None:
-            next_beta = self.current_beta + delta
-        else:
-            recovery_direction = -1.0 if float(self.beta_end) > float(self.beta_start) else 1.0
-            next_beta = self.current_beta + recovery_direction * delta
+        # Recovery must always increase expert mixing, independent of decay schedule direction.
+        next_beta = self.current_beta + delta
 
         lower_bound, upper_bound = self._beta_bounds()
         self.current_beta = float(min(max(next_beta, lower_bound), upper_bound))
@@ -396,6 +394,7 @@ def collect_dagger_rollouts(
     steps_per_trajectory: int,
     action_noise_std: float,
     action_noise_seed: int,
+    initial_state_seed: int,
     expert_mixing_beta: float,
     policy_action_fn: Callable[[np.ndarray], np.ndarray] | None,
     policy_reset_fn: Callable[[], None] | None = None,
@@ -428,7 +427,15 @@ def collect_dagger_rollouts(
                 f"Collected {successful_episodes}/{trajectories_per_iteration} episodes."
             )
 
-        state = simulator.reset_random()
+        episode_initial_state_seed = initial_state_seed_for_rollout(
+            initial_state_seed,
+            rollout_index=attempted_episodes,
+        )
+        sampled_initial_state = sample_initial_state(
+            simulator=simulator,
+            seed_spec=episode_initial_state_seed,
+        )
+        state = simulator.reset(sampled_initial_state)
         episode_initial_state = state.copy()
         episode_noise_seed = action_noise_seed_for_rollout(
             action_noise_seed,

@@ -320,7 +320,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
     )
 
-    def train_on_aggregate(label: str) -> None:
+    def train_on_aggregate(label: str, training_round: int) -> None:
         print(f"\n=== {label} ===")
 
         aggregate_dataset = LeRobotDataset(repo_id=cfg.repo_id, root=cfg.dataset_root)
@@ -330,11 +330,14 @@ def run_dagger(cfg: DaggerConfig) -> None:
             action_feature_names=act_feature_names,
         )
 
+        dataloader_generator = torch.Generator()
+        dataloader_generator.manual_seed(int(cfg.seed) + int(training_round))
         train_loader = DataLoader(
             train_dataset,
             batch_size=cfg.batch_size,
             shuffle=True,
             drop_last=False,
+            generator=dataloader_generator,
         )
 
         print(f"Training on {len(train_dataset)} aggregated frames")
@@ -411,7 +414,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
     initial_eval_success_rate: float | None = None
 
     if not cfg.start_with_aggregation:
-        train_on_aggregate("Initial offline training pass")
+        train_on_aggregate("Initial offline training pass", training_round=0)
         last_eval_metrics = evaluate_current_policy("Round 0 evaluation")
         if last_eval_metrics is not None:
             initial_eval_success_rate = last_eval_metrics.success_rate
@@ -496,6 +499,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 action_noise_std=cfg.action_noise_std,
                 action_noise_seed=action_noise_seed,
+                initial_state_seed=cfg.seed,
                 expert_mixing_beta=round_beta,
                 policy_action_fn=policy_action_fn,
             )
@@ -512,10 +516,16 @@ def run_dagger(cfg: DaggerConfig) -> None:
         )
 
         if cfg.start_with_aggregation:
-            train_on_aggregate(f"DAgger round {training_round + 1}/{cfg.dagger_iterations}: retrain")
+            train_on_aggregate(
+                f"DAgger round {training_round + 1}/{cfg.dagger_iterations}: retrain",
+                training_round=training_round,
+            )
             eval_metrics = evaluate_current_policy(f"Round {training_round + 1} evaluation")
         else:
-            train_on_aggregate(f"DAgger refinement {training_round}/{cfg.dagger_iterations}: retrain")
+            train_on_aggregate(
+                f"DAgger refinement {training_round}/{cfg.dagger_iterations}: retrain",
+                training_round=training_round,
+            )
             eval_metrics = evaluate_current_policy(f"Refinement {training_round} evaluation")
 
         beta_controller.update_after_evaluation(

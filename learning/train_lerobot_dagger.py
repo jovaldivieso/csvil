@@ -153,7 +153,7 @@ def list_pretrained_model_dirs(search_root: Path) -> set[Path]:
 def newest_pretrained_model_dir(paths: set[Path]) -> Path | None:
     if len(paths) == 0:
         return None
-    return max(paths, key=lambda p: p.stat().st_mtime)
+    return max(paths, key=lambda p: (p.stat().st_mtime, str(p)))
 
 
 def detect_new_pretrained_model_dir(
@@ -734,6 +734,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 steps_per_trajectory=cfg.steps_per_trajectory,
                 action_noise_std=cfg.action_noise_std,
                 action_noise_seed=action_noise_seed,
+                initial_state_seed=cfg.seed,
                 expert_mixing_beta=round_beta,
                 policy_action_fn=policy_action_fn,
                 policy_reset_fn=policy_reset_fn,
