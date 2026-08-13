@@ -57,6 +57,7 @@ class Unicycle2(DynamicsSimulator):
         # number of states and actions:
         self.nx = 5 
         self.nu = 2 
+        self.obs_dim = 6
 
         # constrains velocity and orientation:
         self.state_lower_bounds = np.array(
@@ -109,13 +110,22 @@ class Unicycle2(DynamicsSimulator):
     def observe(self, state: np.ndarray) -> np.ndarray:
         """
         turns absoulte simulator state into observation,
-        [goal_rel_x, goal_rel_y, rel_theta, velocity, angular velocity]
+        [goal_rel_x, goal_rel_y, sin(rel_theta), cos(rel_theta), velocity, angular velocity]
         """
         state = self.validate_state(state)
         state_view = SE2PoseAndEuclidean2DState.from_array(state)
         rel_pos = self.goal[0:2] - state_view.pose.translation
         rel_theta = state_view.pose.orientation.error_to(SO2State.from_angle(self.goal[2]))
-        obs = np.array([rel_pos[0], rel_pos[1], rel_theta, state_view.v, state_view.omega])
+        obs = np.array(
+            [
+                rel_pos[0],
+                rel_pos[1],
+                np.sin(rel_theta),
+                np.cos(rel_theta),
+                state_view.v,
+                state_view.omega,
+            ]
+        )
         return self.validate_observation(obs)
 
     def invert_obs(self, obs: np.ndarray) -> np.ndarray:
@@ -184,7 +194,8 @@ class Unicycle2(DynamicsSimulator):
         exteroception_names = [
             "goal_rel_x",
             "goal_rel_y",
-            "rel_theta",
+            "sin_rel_theta",
+            "cos_rel_theta",
         ]
 
         proprioception_names = [
@@ -195,7 +206,7 @@ class Unicycle2(DynamicsSimulator):
         return {
             "observation.environment_state": {
                 "dtype": "float32",
-                "shape": (3,),
+                "shape": (4,),
                 "names": exteroception_names,
             },
             "observation.state": {

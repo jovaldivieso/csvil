@@ -31,7 +31,7 @@ policy:
   
   input_features:
     observation.environment_state:
-      shape: [3]
+      shape: [4]
       type: ENV
     observation.state:
       shape: [2]

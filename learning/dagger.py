@@ -471,7 +471,9 @@ def collect_dagger_rollouts(
 
             use_expert_action = bool(episode_action_noise_rng.random() < expert_mixing_beta)
             policy_action = None
-            if should_query_policy and not use_expert_action:
+            # Keep stateful policies (e.g. ACT/Diffusion with history/action queues)
+            # synchronized with environment time even on expert-executed steps.
+            if should_query_policy:
                 policy_action = policy_action_fn(observation)
             if use_expert_action or policy_action is None:
                 base_action = expert_action

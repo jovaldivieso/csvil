@@ -267,29 +267,40 @@ class Euclidean4DObservation:
 
 @dataclass(frozen=True, slots=True)
 class SE2PoseAndEuclidean2DObservation:
-    """Typed view for observations [goal_rel_x, goal_rel_y, rel_theta, v, omega]."""
+    """Typed view for observations [goal_rel_x, goal_rel_y, sin(rel_theta), cos(rel_theta), v, omega]."""
 
     values: np.ndarray
 
     @classmethod
     def from_array(cls, obs: np.ndarray) -> "SE2PoseAndEuclidean2DObservation":
-        return cls(values=as_vector(obs, VectorSpec(name="observation", size=5)))
+        return cls(values=as_vector(obs, VectorSpec(name="observation", size=6)))
 
     @property
     def SE2_pose(self) -> SE2PoseState:
-        return SE2PoseState.from_array(self.values[0:3])
+        rel_theta = self.rel_theta
+        return SE2PoseState.from_array(
+            np.array([self.values[0], self.values[1], rel_theta], dtype=float)
+        )
 
     @property
     def exteroception(self) -> np.ndarray:
-        return self.values[0:3]
+        return self.values[0:4]
 
     @property
     def rel_theta(self) -> float:
+        return float(np.arctan2(self.rel_theta_sin, self.rel_theta_cos))
+
+    @property
+    def rel_theta_sin(self) -> float:
         return float(self.values[2])
 
     @property
+    def rel_theta_cos(self) -> float:
+        return float(self.values[3])
+
+    @property
     def euclidean_2d(self) -> np.ndarray:
-        return self.values[3:5]
+        return self.values[4:6]
 
     def as_numpy(self) -> np.ndarray:
         return self.values

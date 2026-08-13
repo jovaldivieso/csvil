@@ -30,7 +30,7 @@ class Unicycle1(DynamicsSimulator):
         self.max_action = config.get("max_v", 2.0)
         self.nx = 3
         self.nu = 2
-        self.obs_dim = 5
+        self.obs_dim = 6
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
         
@@ -84,7 +84,8 @@ class Unicycle1(DynamicsSimulator):
         state_view = SE2PoseState.from_array(state)
         rel_pos = self.goal[0:2] - state_view.translation
         rel_theta = state_view.orientation.error_to(SE2PoseState.from_array(self.goal).orientation)
-        obs = np.concatenate([rel_pos, [rel_theta], self.current_action])
+        rel_theta_features = np.array([np.sin(rel_theta), np.cos(rel_theta)], dtype=float)
+        obs = np.concatenate([rel_pos, rel_theta_features, self.current_action])
         return self.validate_observation(obs)
 
     def is_done(self, state: np.ndarray) -> bool:
@@ -109,7 +110,8 @@ class Unicycle1(DynamicsSimulator):
         exteroception_names = [
             "goal_rel_x",
             "goal_rel_y",
-            "rel_theta",
+            "sin_rel_theta",
+            "cos_rel_theta",
         ]
 
         proprioception_names = [
@@ -120,7 +122,7 @@ class Unicycle1(DynamicsSimulator):
         return {
             "observation.environment_state": {
                 "dtype": "float32",
-                "shape": (3,),
+                "shape": (4,),
                 "names": exteroception_names,
             },
             "observation.state": {
