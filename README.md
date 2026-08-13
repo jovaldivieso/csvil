@@ -2,10 +2,10 @@
 
 This repository contains a modular pipeline for controller synthesis via imitation learning. The goal is to imitate a computationally expensive motion planner with a faster neural policy for online control.
 
-The current expert planner uses CasADi, but the architecture is designed to plug in additional planner backends (for example, OMPL) with minimal pipeline changes. A separate Docker environment for future work with db-LaCAM is included as well.
+The current expert planner uses CasADi, but the architecture is designed to plug in additional planner backends (for example, OMPL) with minimal code-path changes. A separate Docker environment for work with the db-LaCAM multi-robot global planner is included as well.
 
 Design-wise, the codebase follows a small set of explicit patterns so new systems
-and planners can be added without changing the pipeline shape.
+and planners can typically be added without changing the overall pipeline shape.
 
 Core design patterns and rationale:
 
@@ -25,8 +25,8 @@ Core design patterns and rationale:
   Configs are normalized and validated in `core/config.py`, and vector dimensions are checked at simulator, planner, and learning boundaries. That turns YAML mistakes and shape mismatches into early local failures instead of wasted rollouts, training runs, or corrupted datasets.
 
 In practice, this means most features are implemented once at the fleet level,
-then reused unchanged for single-robot experiments, multi-robot experiments, and
-mixed future extensions.
+then reused across single-robot experiments, multi-robot experiments, and
+mixed future extensions with minimal system-specific changes.
 
 ## Installation & setup
 
@@ -105,13 +105,13 @@ csvil/
 │   │   ├── double_integrator_casadi_act_config.yaml
 │   │   ├── double_integrator_casadi_diffusion_policy_config.yaml
 │   │   ├── multi_double_integrator_casadi_act_config.yaml
-│   │   └── multi_double_integrator_casadi_diffusion_policy_config.yaml
+│   │   ├── multi_double_integrator_casadi_diffusion_policy_config.yaml
+│   │   └── multi_unicycle2_casadi_mlp_config.yaml
 │   ├── models/
 │   │   └── mlp.py             # Custom MLP policy used for BC/DAgger
-│   ├── dagger_evaluation.py   # Shared in-loop DAgger evaluation helpers
+│   ├── dagger.py              # Shared DAgger rollout/evaluation/scheduling helpers
 │   ├── train_dagger.py        # Iterative DAgger for the custom MLP baseline
-│   ├── train_lerobot.py       # LeRobot training entrypoint (ACT / Diffusion)
-│   └── train_lerobot_dagger.py  # Iterative DAgger wrapper for LeRobot policies
+│   └── train_lerobot_dagger.py  # LeRobot ACT / Diffusion training and DAgger entrypoint
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
 │   ├── casadi_planner.py      # CasADi planner implementation
@@ -130,12 +130,11 @@ csvil/
     ├── config/
     │   ├── double_integrator_casadi_config.yaml
     │   ├── multi_double_integrator_casadi_config.yaml
+    │   ├── multi_unicycle2_casadi_config.yaml
     │   └── multi_robot_dblacam_config.yaml
     ├── collect_expert_data.py    # CLI for expert dataset generation
     ├── evaluate_policy.py        # CLI for rollout/evaluation across policy families
-    ├── plot_expert_trajectories.py  # CLI plotting helper for expert rollouts
-    ├── plot_trajectories.py      # Legacy single-robot plot helper (CasADi/db-lacam)
-    ├── plot_trajectories_multi_robot.py  # Legacy db-lacam multi-robot plot helper
+    ├── plot_expert_trajectories.py  # Canonical single/multi-robot expert analysis CLI (plots + optional MP4)
     └── test_simulator_contracts.py  # Fleet-of-1 and schema consistency tests
 ```
 
@@ -146,6 +145,10 @@ The available systems are:
 - `unicycle1`
 - `unicycle2`
 - `multi_robot` (composite fleet, e.g. multiple double integrators)
+
+These cover different dynamics classes under one pipeline shape: holonomic systems
+(`single_integrator`, `double_integrator`) and non-holonomic systems
+(`unicycle1`, `unicycle2`). The current built-in dynamics examples span both fully actuated and underactuated systems.
 
 Available planners are:
 
@@ -162,6 +165,9 @@ fields are:
 - `initial_position_min_goal_distance`: reject/resample starts too close to the goal
 - `initial_state_seed`: reproducible RNG seed for unseeded resets such as collection and DAgger
 - `action_noise_seed`: deterministic seed used for rollout action-noise sampling
+
+Unicycle2 uses explicit per-dimension tolerances: `pos_tol`, `theta_tol`, `vel_tol`, and `omega_tol`.
+`error_tolerance` is intentionally rejected for `unicycle2` configs.
 
 System configs are now validated through `core/config.py` before simulation/evaluation
 to catch malformed keys and shape mismatches early. Planner-specific keys include:
@@ -185,6 +191,12 @@ Canonical multi-robot example:
 - `learning/config/multi_double_integrator_casadi_diffusion_policy_config.yaml`
 - `learning/config/multi_double_integrator_casadi_act_config.yaml`
 
+Canonical multi-robot `unicycle2` + MLP DAgger example:
+
+- `test/config/multi_unicycle2_casadi_config.yaml`
+  (2x homogeneous `unicycle2` robots with shared MPC planner settings and global `d_safe`)
+- `learning/config/multi_unicycle2_casadi_mlp_config.yaml`
+
 ## Pipeline features
 
 ### Generate a motion planning expert dataset
@@ -197,7 +209,8 @@ python test/collect_expert_data.py \
 --system double_integrator \
 --planner casadi \
 --config test/config/double_integrator_casadi_config.yaml \
---action-noise-std 0.0
+--action-noise-std 0.0 \
+--num-traj 100
 ```
 
 If the CasADi solver fails for a rollout, that trajectory is skipped and not
@@ -218,7 +231,8 @@ python test/collect_expert_data.py \
 --system multi_robot \
 --planner casadi \
 --config test/config/multi_double_integrator_casadi_config.yaml \
---action-noise-std 0.0
+--action-noise-std 0.0 \
+--num-traj 100
 ```
 
 Without `--repo-id` / `--local-dir`, the collector uses the default naming
@@ -290,7 +304,9 @@ docker compose run --rm csvil \
 python test/plot_expert_trajectories.py \
 --system double_integrator \
 --planner casadi \
---config test/config/double_integrator_casadi_config.yaml
+--config test/config/double_integrator_casadi_config.yaml \
+--num-steps 150 \
+--action-noise-std 0.03
 ```
 
 For a multi-robot setup:
@@ -301,6 +317,7 @@ python test/plot_expert_trajectories.py \
 --system multi_robot \
 --planner casadi \
 --config test/config/multi_double_integrator_casadi_config.yaml \
+--num-steps 150 \
 --action-noise-std 0.03
 ```
 
@@ -340,39 +357,48 @@ lerobot-dataset-viz \
 --episode-index 0
 ```
 
-### Train a diffusion or ACT policy with LeRobot
+### Train a diffusion or ACT policy with LeRobot and DAgger
 
-Train a diffusion policy or ACT using the matching YAML configuration:
-
-```bash
-docker compose run --rm csvil \
-python learning/train_lerobot.py \
---config learning/config/double_integrator_casadi_diffusion_policy_config.yaml
-```
-
-Multi-robot diffusion config:
+Use the LeRobot DAgger entrypoint for both pure offline training and iterative DAgger.
+For pure offline ACT/Diffusion training on a pre-collected dataset, pass the dataset metadata
+and set `--dagger-iterations 0`:
 
 ```bash
 docker compose run --rm csvil \
-python learning/train_lerobot.py \
---config learning/config/multi_double_integrator_casadi_diffusion_policy_config.yaml
+python learning/train_lerobot_dagger.py \
+--system double_integrator \
+--expert-config test/config/double_integrator_casadi_config.yaml \
+--lerobot-train-config learning/config/double_integrator_casadi_diffusion_policy_config.yaml \
+--repo-id local/double_integrator_casadi_expert \
+--dataset-root data/lerobot_dataset_double_integrator_casadi \
+--dagger-iterations 0
 ```
 
-The training entrypoint now exposes `run_training(config_path)` for programmatic
-use in sweep/automation scripts while preserving the same CLI behavior.
+Multi-robot diffusion config follows the same pattern:
+
+```bash
+docker compose run --rm csvil \
+python learning/train_lerobot_dagger.py \
+--system multi_robot \
+--expert-config test/config/multi_double_integrator_casadi_config.yaml \
+--lerobot-train-config learning/config/multi_double_integrator_casadi_diffusion_policy_config.yaml \
+--repo-id local/multi_robot_casadi_expert \
+--dataset-root data/lerobot_dataset_multi_robot_casadi \
+--dagger-iterations 0
+```
 
 Training outputs and checkpoints are saved in the configured output directory.
 
 ### Train a custom PyTorch based MLP policy with DAgger
 
 Train the custom MLP baseline with a standalone PyTorch DAgger loop.
-It starts from an offline expert dataset, rolls out the learner, queries the expert on visited states, and appends corrective labels to reduce distribution shift.
+It can start from an existing expert dataset or in fresh mode, rolls out the learner, queries the expert on visited states, and appends corrective labels to reduce distribution shift. Expert execution during aggregation can be mixed with the learner via `--expert-mix-beta-start` / `--expert-mix-beta-end`.
 
 ```bash
 docker compose run --rm csvil \
 python learning/train_dagger.py \
 --system double_integrator \
---config test/config/double_integrator_casadi_config.yaml \
+--expert-config test/config/double_integrator_casadi_config.yaml \
 --repo-id local/double_integrator_casadi_expert \
 --dataset-root data/lerobot_dataset_double_integrator_casadi \
 --dagger-iterations 1 \
@@ -382,13 +408,14 @@ python learning/train_dagger.py \
 --action-noise-std 0.0
 ```
 
-Multi-robot MLP policy with DAgger training:
+Multi-robot MLP policy with DAgger training for 2 `double_integrator` systems:
 
 ```bash
 docker compose run --rm csvil \
 python learning/train_dagger.py \
 --system multi_robot \
---config test/config/multi_double_integrator_casadi_config.yaml \
+--expert-config test/config/multi_double_integrator_casadi_config.yaml \
+--mlp-config learning/config/multi_double_integrator_casadi_mlp_config.yaml \
 --repo-id local/multi_robot_casadi_expert \
 --dataset-root data/lerobot_dataset_multi_robot_casadi \
 --dagger-iterations 1 \
@@ -398,15 +425,92 @@ python learning/train_dagger.py \
 --action-noise-std 0.0
 ```
 
+Fresh-start MLP DAgger example that skips a separate offline pretraining stage and only starts decaying expert mixing after evaluation success becomes nonzero:
+
+```bash
+docker compose run --rm csvil \
+python learning/train_dagger.py \
+--system double_integrator \
+--expert-config test/config/double_integrator_casadi_config.yaml \
+--dagger-iterations 5 \
+--trajectories-per-iteration 20 \
+--steps-per-trajectory 150 \
+--target-epochs-per-round 10 \
+--action-noise-std 0.0 \
+--expert-mix-beta-start 0.5 \
+--expert-mix-beta-decay-rate 0.1 \
+--expert-mix-decay-after-success-rate 0.0
+```
+
+Fresh-start `unicycle2` MLP DAgger example:
+
+```bash
+docker compose run --rm csvil \
+python learning/train_dagger.py \
+--system unicycle2 \
+--expert-config test/config/unicycle2_casadi_config.yaml \
+--dagger-iterations 10 \
+--trajectories-per-iteration 20 \
+--steps-per-trajectory 200 \
+--target-epochs-per-round 10 \
+--action-noise-std 0.0 \
+--expert-mix-beta-start 0.5 \
+--expert-mix-beta-decay-rate 0.1 \
+--expert-mix-decay-after-success-rate 0.0
+```
+
+Observed result for the command above:
+
+- `Round 10 evaluation: eval_success_rate=100.0% eval_mean_steps=139.70 eval_min_steps=70 eval_max_steps=169 episodes=10`
+- `Saved checkpoints: outputs/train_dagger/mlp_dagger_checkpoint.pt and outputs/train_dagger/mlp_dagger_iter_009.pt`
+
+Single-trajectory evaluation command used to verify the checkpoint:
+
+```bash
+docker compose run --rm csvil \
+python test/evaluate_policy.py \
+--system unicycle2 \
+--policy-type mlp \
+--config test/config/unicycle2_casadi_config.yaml \
+--model-dir outputs/train_dagger/mlp_dagger_checkpoint.pt \
+--num-steps 200 \
+--action-noise-std 0.0 \
+--seeds "[0]" \
+--initial-states '[
+  [[-0.5, 0.5, 0.78, 0.0, 0.0]]
+]'
+```
+
+Observed summary for the command above:
+
+- `policy_successes: 1/1`
+- `success_rate: 1.0000`
+- `mean_policy_steps: 153.000`
+- `mean_expert_steps: 131.000`
+- `mean_policy_goal_error_l2: 0.034745`
+- `mean_expert_goal_error_l2: 0.043021`
+
 `--dagger-iterations` means the number of refinement rounds, where each
 round does: aggregate learner rollouts with expert labels, then retrain.
 
 - `--dagger-iterations 0`: pure offline training only (no aggregation)
 - `--dagger-iterations 1`: one aggregate + retrain refinement
+- `--expert-mix-beta-start` / `--expert-mix-beta-end`: control how often the expert action is executed during aggregation rollouts; set both to `0.0` to recover the old no-mixing behavior
+- `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`
+- `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` for a strict "start decaying only after success is nonzero" gate
+- `--adaptive-beta-recovery`: optional (default `true`); when enabled, beta increases by one schedule step after an eval-success regression; when disabled, beta follows monotonic decay
+- `--mlp-config`: optional YAML file for MLP architecture, e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [256, 256, 128]`
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate` and `aggregation_mean_steps`.
 - After each retrain, deterministic in-loop evaluation reports `eval_success_rate` and `eval_mean_steps`.
 - Evaluation defaults to 10 seeded rollouts; tune with `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, and `--eval-action-noise-std`.
 - `--action-noise-std 0.0`: no noise added to action to perturb the states
+
+If you want expert-only offline training with no DAgger aggregation at all, use one of these two entrypoints with `--dagger-iterations 0` and a precollected expert dataset:
+
+- `learning/train_dagger.py` for the custom MLP baseline
+- `learning/train_lerobot_dagger.py` for LeRobot ACT/Diffusion
+
+If you want to keep the DAgger loop but make aggregation expert-only, keep `--dagger-iterations > 0` and set `--expert-mix-beta-start 1.0` and `--expert-mix-beta-end 1.0` (or the equivalent beta schedule) so rollouts still run but always execute the expert action.
 
 ### Train a diffusion or ACT policy with LeRobot and DAgger
 
@@ -416,7 +520,7 @@ LeRobot policies can also be used with DAgger training:
 docker compose run --rm csvil \
 python learning/train_lerobot_dagger.py \
 --system double_integrator \
---experiment-config test/config/double_integrator_casadi_config.yaml \
+--expert-config test/config/double_integrator_casadi_config.yaml \
 --lerobot-train-config learning/config/double_integrator_casadi_act_config.yaml \
 --repo-id local/double_integrator_casadi_expert \
 --dataset-root data/lerobot_dataset_double_integrator_casadi \
@@ -427,13 +531,48 @@ python learning/train_lerobot_dagger.py \
 --action-noise-std 0.0
 ```
 
+Recommended incremental DAgger recipe for ACT/Diffusion: skip separate offline pretraining, reuse the current expert dataset, and let DAgger handle the first training pass and later refinements.
+
+```bash
+docker compose run --rm csvil \
+python learning/train_lerobot_dagger.py \
+--system double_integrator \
+--expert-config test/config/double_integrator_casadi_config.yaml \
+--lerobot-train-config learning/config/double_integrator_casadi_act_config.yaml \
+--repo-id local/double_integrator_casadi_expert \
+--dataset-root data/lerobot_dataset_double_integrator_casadi \
+--dagger-iterations 5 \
+--trajectories-per-iteration 20 \
+--steps-per-trajectory 150 \
+--target-epochs-per-round 10 \
+--action-noise-std 0.0 \
+--expert-mix-beta-start 0.6
+```
+
+Fresh-start `unicycle2` ACT + DAgger example:
+
+```bash
+python learning/train_lerobot_dagger.py \
+--system unicycle2 \
+--expert-config test/config/unicycle2_casadi_config.yaml \
+--lerobot-train-config learning/config/unicycle2_casadi_act_config.yaml \
+--dagger-iterations 10 \
+--trajectories-per-iteration 100 \
+--steps-per-trajectory 200 \
+--target-epochs-per-round 10 \
+--action-noise-std 0.0 \
+--expert-mix-beta-start 0.5 \
+--expert-mix-beta-decay-rate 0.1 \
+--expert-mix-decay-after-success-rate 0.0
+```
+
 or
 
 ```bash
 docker compose run --rm csvil \
 python learning/train_lerobot_dagger.py \
 --system multi_robot \
---experiment-config test/config/multi_double_integrator_casadi_config.yaml \
+--expert-config test/config/multi_double_integrator_casadi_config.yaml \
 --lerobot-train-config learning/config/multi_double_integrator_casadi_act_config.yaml \
 --repo-id local/multi_double_integrator_casadi_expert \
 --dataset-root data/lerobot_dataset_multi_robot_casadi \
@@ -447,13 +586,18 @@ python learning/train_lerobot_dagger.py \
 How this loop works:
 
 - Initial pass trains from scratch unless `--initial-pretrained-path` is provided.
+- Offline ACT/Diffusion pretraining is optional; if you already have an expert dataset, you can use `train_lerobot_dagger.py --dagger-iterations 0` for a pure offline pass or let DAgger perform the first training pass directly.
 - Round 0 uses the fixed `steps` value from `--lerobot-train-config` (for example `steps: 12000` for ACT).
 - Refinement rounds (1+) aggregate expert labels, then retrain with `policy.pretrained_path` set to the latest checkpoint.
 - Refinement retraining steps are sized with `--target-epochs-per-round`; `--max-train-steps` applies as a hard cap.
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate` / `aggregation_mean_steps`.
 - After each retrain, deterministic in-loop evaluation reports `eval_success_rate` / `eval_mean_steps`.
 - Evaluation defaults to 10 seeded rollouts; tune with `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, and `--eval-action-noise-std`.
-- During aggregation, the learner action is executed in simulation while the dataset stores expert (CasADi) corrective labels.
+- `--expert-mix-beta-start` / `--expert-mix-beta-end`: control expert execution during aggregation rollouts; set both to `0.0` to disable mixing, or use a positive start value and decay to `0.0` for incremental DAgger.
+- `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`.
+- `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` if you want decay to remain off until eval success becomes nonzero.
+- `--adaptive-beta-recovery`: optional (default `true`); when enabled, beta increases by one schedule step after an eval-success regression; when disabled, beta follows monotonic decay.
+- During aggregation, the learner or expert action is executed in simulation depending on the mix probability beta, while the dataset always stores expert (CasADi) corrective labels.
 - Dataset appends use `LeRobotDataset.resume(...)` and call `finalize()` each iteration to keep parquet chunks readable.
 
 Optional multi-robot visibility gating can be set in the simulator config:
@@ -569,9 +713,8 @@ Use this compact sequence for most experiments:
 
 1. Collect expert data: see `Generate a motion planning expert dataset`.
 2. Train one policy family:
-   - MLP + DAgger: `learning/train_dagger.py`
-   - ACT/Diffusion: `learning/train_lerobot.py`
-   - ACT/Diffusion + DAgger: `learning/train_lerobot_dagger.py`
+  - MLP + DAgger: `learning/train_dagger.py`
+  - ACT/Diffusion offline or with DAgger: `learning/train_lerobot_dagger.py`
 3. Evaluate with `test/evaluate_policy.py` using the canonical template above.
 
 For robust model selection, prefer multi-seed evaluation (for example 30 seeds)
@@ -582,7 +725,7 @@ execution functions (`run_evaluation`, `run_plotting`, `run_collection`) so they
 
 ### CLI argument quick reference
 
-Use this as a compact source of truth for current entrypoint flags.
+Use this as a compact quick reference for current entrypoint flags.
 
 - `test/collect_expert_data.py`
   - required workflow args: `--system`, `--planner`, `--config`
@@ -594,21 +737,22 @@ Use this as a compact source of truth for current entrypoint flags.
 - `test/evaluate_policy.py`
   - required workflow args: `--system`, `--policy-type`, `--config`, `--model-dir`
   - optional rollout args: `--num-steps`, `--seeds`, `--initial-states`, `--action-noise-std`, `--output-path`
-- `learning/train_lerobot.py`
-  - required args: `--config`
 - `learning/train_dagger.py`
-  - required args: `--system`, `--config`, `--repo-id`, `--dataset-root`
-  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`
+  - required args: `--system`, `--expert-config`
+  - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
+  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`, `--adaptive-beta-recovery`
   - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 - `learning/train_lerobot_dagger.py`
-  - required args: `--system`, `--experiment-config`, `--lerobot-train-config`, `--repo-id`, `--dataset-root`
-  - optional DAgger args: `--planner`, `--policy-type`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`
+  - required args: `--system`, `--expert-config`, `--lerobot-train-config`
+  - optional dataset args: `--repo-id`, `--dataset-root` (provide both with `--dagger-iterations 0` for pure offline training; omit both for fresh DAgger mode)
+  - optional DAgger args: `--planner`, `--policy-type`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`, `--adaptive-beta-recovery`
   - optional training/eval args: `--train-output-root`, `--initial-pretrained-path`, `--seed`, `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--max-train-steps`, `--allow-push-to-hub`
 
 ## TODO / Roadmap / Brainstorming
 - Open: Observation packing still uses fixed-size concatenation and currently overloads zeros for "robot at same position" vs "robot not observable" in visibility-gated relative slots; transition to variable-neighbor representations with explicit masks (for example Deep Sets / GNN-friendly schema).
 - Open: Add permutation-invariant multi-agent policy models in `learning/models` (Deep Sets and/or GNN, optionally CNN for grid observations) and integrate them into `train_dagger.py` so policies can generalize across variable neighbor counts and neighbor-order permutations instead of relying on fixed concatenation-based MLP inputs.
-- Open: Extend protocol-level simulator metadata beyond the already-promoted `has_heading` field (for example, plotting metadata and coordinate semantics) to remove remaining script-local heuristics.
+- Open: Extend the current coordinate-wise Euclidean/$S^1$ planner residual abstraction to support intrinsic `SO(3)` and `SE(3)` residuals once 3D rigid-body systems and richer manifold-valued states become first-class targets.
+- Open: Extend protocol-level simulator metadata beyond the already-promoted `is_euclidean` field (for example, plotting metadata and coordinate semantics) to remove remaining script-local heuristics.
 - Open: Complete the current refactor toward Lie-group-first internal state handling. For systems with manifold-valued state, represent internal orientation/pose math with SO(2), SE(2), and their Lie algebras/operators wherever we control the code, and confine coordinate-chart conversions (`theta`, flattened pose vectors, concatenated dataset tensors) to explicit boundary adapters for CasADi, LeRobot, OMPL, YAML parsing, and other external APIs.
 - Open: Add optional per-robot state-cost blocks (`Q_diag_per_robot`) with the same normalization rules as `R_weight_per_robot` for heterogeneous fleets.
 - Open: Add structured benchmark suites that report success rate, terminal error, trajectory cost, safety-margin statistics, and solver wall-time across systems and policies.

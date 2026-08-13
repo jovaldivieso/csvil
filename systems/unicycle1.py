@@ -30,7 +30,7 @@ class Unicycle1(DynamicsSimulator):
         self.max_action = config.get("max_v", 2.0)
         self.nx = 3
         self.nu = 2
-        self.obs_dim = 5
+        self.obs_dim = 6
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
         self.current_action = np.zeros(self.nu, dtype=float)
         
@@ -53,41 +53,49 @@ class Unicycle1(DynamicsSimulator):
         return as_vector(observation, VectorSpec(name="observation", size=self.obs_dim))
 
     @property
-    def has_heading(self) -> bool:
-        return True
+    def is_euclidean(self) -> bool:
+        return False
+
+    @property
+    def angular_state_indices(self) -> tuple[int, ...]:
+        return (2,)
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray:
         state = super().reset(initial_state)
         self.current_action = np.zeros(self.nu, dtype=float)
         return state
 
-    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
-        state = self.validate_state(state)
-        action = self.validate_action(action)
-        state_view = SE2PoseState.from_array(state)
-        action_view = Euclidean2DAction.from_array(action).clipped(self.max_action)
-        self.current_action = action_view.as_numpy().copy()
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
+        clipped_action = np.clip(action_array, -self.max_action, self.max_action)
+        self.current_action = clipped_action.copy()
 
-        v = action_view.first
-        omega = action_view.second
-        body_frame_velocity = np.array([v, 0.0], dtype=float)
-        next_pos = state_view.translation + state_view.orientation.act(body_frame_velocity) * self.dt
-        next_orientation = state_view.orientation.compose(SO2State.from_angle(omega * self.dt))
-        return np.concatenate([next_pos, [next_orientation.angle]])
+        x, y, theta = state_array
+        v, omega = clipped_action
+        next_x = x + v * np.cos(theta) * self.dt
+        next_y = y + v * np.sin(theta) * self.dt
+        next_theta = np.arctan2(np.sin(theta + omega * self.dt), np.cos(theta + omega * self.dt))
+        return np.array([next_x, next_y, next_theta], dtype=float)
 
-    def observe(self, state: np.ndarray) -> np.ndarray:
-        state = self.validate_state(state)
-        state_view = SE2PoseState.from_array(state)
-        rel_pos = self.goal[0:2] - state_view.translation
-        rel_theta = state_view.orientation.error_to(SE2PoseState.from_array(self.goal).orientation)
-        obs = np.concatenate([rel_pos, [rel_theta], self.current_action])
-        return self.validate_observation(obs)
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        rel_pos = self.goal[0:2] - state_array[:2]
+        rel_theta = np.arctan2(np.sin(self.goal[2] - state_array[2]), np.cos(self.goal[2] - state_array[2]))
+        obs = np.array([
+            rel_pos[0],
+            rel_pos[1],
+            np.sin(rel_theta),
+            np.cos(rel_theta),
+            self.current_action[0],
+            self.current_action[1],
+        ], dtype=float)
+        return self.validate_observation(obs) if validate else obs
 
-    def is_done(self, state: np.ndarray) -> bool:
-        state = self.validate_state(state)
-        state_view = SE2PoseState.from_array(state)
-        pos_error = np.linalg.norm(state_view.translation - self.goal[0:2])
-        theta_error = abs(state_view.orientation.error_to(SE2PoseState.from_array(self.goal).orientation))
+    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        pos_error = np.linalg.norm(state_array[:2] - self.goal[0:2])
+        theta_error = abs(np.arctan2(np.sin(self.goal[2] - state_array[2]), np.cos(self.goal[2] - state_array[2])))
         return (pos_error < self.error_tolerance and
                 theta_error < self.error_tolerance)
 
@@ -105,7 +113,8 @@ class Unicycle1(DynamicsSimulator):
         exteroception_names = [
             "goal_rel_x",
             "goal_rel_y",
-            "rel_theta",
+            "sin_rel_theta",
+            "cos_rel_theta",
         ]
 
         proprioception_names = [
@@ -116,7 +125,7 @@ class Unicycle1(DynamicsSimulator):
         return {
             "observation.environment_state": {
                 "dtype": "float32",
-                "shape": (3,),
+                "shape": (4,),
                 "names": exteroception_names,
             },
             "observation.state": {
@@ -144,14 +153,14 @@ class Unicycle1(DynamicsSimulator):
                 theta = rng.uniform(-np.pi, np.pi)
                 return np.array([pos[0], pos[1], theta])
 
-    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
-        obs = self.validate_observation(obs)
-        obs_view = SE2PoseAndEuclidean2DObservation.from_array(obs)
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+        obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)
+        rel_theta = np.arctan2(obs_array[2], obs_array[3])
         return np.array([
-            self.goal[0] - obs_view.exteroception[0],
-            self.goal[1] - obs_view.exteroception[1],
-            self.goal[2] - obs_view.rel_theta,
-        ])
+            self.goal[0] - obs_array[0],
+            self.goal[1] - obs_array[1],
+            self.goal[2] - rel_theta,
+        ], dtype=float)
 
     @property
     def goal_state(self) -> np.ndarray:
@@ -167,16 +176,12 @@ class Unicycle1(DynamicsSimulator):
             goal_theta = rng.uniform(low=-np.pi, high=np.pi)
             self.goal = np.array([goal_pos[0], goal_pos[1], goal_theta])
 
-    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, np.ndarray]:
         """Package the observation and action into a dictionary for LeRobot"""
         obs = self.validate_observation(obs)
         action = self.validate_action(action)
-        obs_view = SE2PoseAndEuclidean2DObservation.from_array(obs)
-        action_view = Euclidean2DAction.from_array(action)
         return {
-            "observation.environment_state":
-            torch.from_numpy(obs_view.exteroception).float(),
-            "observation.state":
-            torch.from_numpy(obs_view.euclidean_2d).float(),
-            "action": action_view.as_torch(),
+            "observation.environment_state": np.asarray(obs[:4], dtype=np.float32),
+            "observation.state": np.asarray(obs[4:6], dtype=np.float32),
+            "action": np.asarray(action, dtype=np.float32),
         }

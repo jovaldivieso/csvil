@@ -30,6 +30,8 @@ from systems.dynamics import DynamicsProtocol
 # Import both policy types
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.factory import make_pre_post_processors
 
 from utils import plot_xy_trajectories, save_xy_rollout_video
 
@@ -40,6 +42,31 @@ def default_evaluation_output_path(system: str, policy_type: str) -> str:
 
 def is_observation_feature(feature_name: str) -> bool:
     return feature_name.startswith("observation.") or ".observation." in feature_name
+
+
+def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, ...]:
+    """Infer hidden layer widths from MLP Sequential Linear layer weights."""
+    linear_layers: list[tuple[int, int]] = []
+    for key, value in state_dict.items():
+        if key.startswith("network.") and key.endswith(".weight"):
+            parts = key.split(".")
+            if len(parts) != 3:
+                continue
+            try:
+                layer_idx = int(parts[1])
+            except ValueError:
+                continue
+            if value.ndim != 2:
+                continue
+            linear_layers.append((layer_idx, int(value.shape[0])))
+
+    if len(linear_layers) < 2:
+        # Fallback to historical default for legacy checkpoints.
+        return (256, 256, 128)
+
+    linear_layers.sort(key=lambda item: item[0])
+    # Last Linear maps to action_dim; preceding ones are hidden widths.
+    return tuple(out_dim for _, out_dim in linear_layers[:-1])
 
 
 def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
@@ -144,31 +171,34 @@ def create_policy_input(
     simulator: DynamicsProtocol,
     observation: np.ndarray,
     device: torch.device,
+    add_batch_dim: bool = True,
+    observation_feature_cache=None,
 ) -> dict[str, torch.Tensor]:
     """
     Dynamically slices the flat observation array based on the
     feature shapes defined by the simulator.
     """
-    policy_input = {}
-    features = simulator.get_dataset_features()
+    from learning.dagger import (  # local import keeps this helper self-contained
+        build_observation_feature_pack_cache,
+        pack_observation_features_from_cache,
+    )
 
-    # Reuse the simulator's dataset packing logic to avoid layout drift between
-    # runtime observations and the tensors seen during training.
-    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
-    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
+    if observation_feature_cache is None:
+        observation_feature_cache = build_observation_feature_pack_cache(
+            simulator,
+            [feature_name for feature_name in simulator.get_dataset_features().keys() if is_observation_feature(feature_name)],
+        )
 
-    for feature_name in features.keys():
-        if is_observation_feature(feature_name):
-            if feature_name not in packed_frame:
-                raise KeyError(
-                    f"Missing observation feature '{feature_name}' in packed frame. "
-                    "Check simulator.format_dataset_frame() and dataset schema alignment."
-                )
-            policy_input[feature_name] = torch.as_tensor(
-                packed_frame[feature_name],
-                dtype=torch.float32,
-                device=device,
-            ).view(1, -1)
+    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
+    policy_input: dict[str, torch.Tensor] = {}
+    for feature_name in observation_feature_cache.feature_names:
+        feature_tensor = torch.as_tensor(packed_features[feature_name], dtype=torch.float32)
+        if add_batch_dim:
+            feature_tensor = feature_tensor.view(1, -1)
+        policy_input[feature_name] = feature_tensor
+
+    if device.type != "cpu":
+        policy_input = {feature_name: tensor.to(device) for feature_name, tensor in policy_input.items()}
 
     return policy_input
 
@@ -219,7 +249,7 @@ def rollout_planner(
         return np.asarray(trajectory)
 
     for _ in range(num_steps):
-        obs = simulator.observe(state)
+        obs = simulator.observe(state, validate=False)
         
         try:
             action = planner(obs)
@@ -245,7 +275,7 @@ def rollout_planner(
             action_noise_std=action_noise_std,
             rng=action_noise_rng,
         )
-        state = simulator.step(state, executed_action)
+        state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
         if simulator.should_terminate_rollout(state):
@@ -262,6 +292,8 @@ def rollout_policy(
     num_steps: int,
     action_noise_std: float = 0.0,
     action_noise_rng: np.random.Generator | None = None,
+    policy_preprocessor=None,
+    policy_postprocessor=None,
 ) -> tuple[np.ndarray, bool, int]:
     """
     Rolls out the neural policy from a given initial state.
@@ -276,16 +308,21 @@ def rollout_policy(
     policy.reset()
 
     for step in range(1, num_steps + 1):
-        observation = simulator.observe(state)
+        observation = simulator.observe(state, validate=False)
 
         policy_input = create_policy_input(
             simulator=simulator,
             observation=observation,
             device=device,
+            add_batch_dim=policy_preprocessor is None,
         )
+        if policy_preprocessor is not None:
+            policy_input = policy_preprocessor(policy_input)
 
         with torch.inference_mode():
             action_tensor = policy.select_action(policy_input)
+        if policy_postprocessor is not None:
+            action_tensor = policy_postprocessor(action_tensor)
 
         action = action_tensor.squeeze(0).cpu().numpy()
         executed_action = apply_execution_noise(
@@ -295,7 +332,7 @@ def rollout_policy(
             rng=action_noise_rng,
         )
 
-        state = simulator.step(state, executed_action)
+        state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
         if simulator.should_terminate_rollout(state):
@@ -333,6 +370,8 @@ def run_evaluation(
     print(f"action noise seed: {action_noise_seed}")
 
     # Dynamically load the requested policy
+    policy_preprocessor = None
+    policy_postprocessor = None
     if policy_type == "diffusion":
         policy = DiffusionPolicy.from_pretrained(model_dir)
         policy_display_name = "Diffusion"
@@ -347,13 +386,24 @@ def run_evaluation(
         )
         action_dim = int(simulator.nu)
 
-        policy = MLPPolicy(state_dim=state_dim, action_dim=action_dim)
-
         checkpoint = torch.load(model_dir, map_location=device)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            policy.load_state_dict(checkpoint["model_state_dict"])
+            state_dict = checkpoint["model_state_dict"]
+            hidden_dims_raw = checkpoint.get("hidden_dims")
+            if isinstance(hidden_dims_raw, list) and len(hidden_dims_raw) > 0:
+                hidden_dims = tuple(int(width) for width in hidden_dims_raw)
+            else:
+                hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
         else:
-            policy.load_state_dict(checkpoint)
+            state_dict = checkpoint
+            hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+
+        policy = MLPPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dims=hidden_dims,
+        )
+        policy.load_state_dict(state_dict)
 
         policy_display_name = "MLP"
     else:
@@ -361,6 +411,17 @@ def run_evaluation(
 
     policy.eval()
     policy.to(device)
+
+    if policy_type in {"diffusion", "act"}:
+        policy_cfg = PreTrainedConfig.from_pretrained(model_dir)
+        policy_cfg.device = str(device)
+        policy_preprocessor, policy_postprocessor = make_pre_post_processors(
+            policy_cfg=policy_cfg,
+            pretrained_path=model_dir,
+            preprocessor_overrides={
+                "device_processor": {"device": str(device)},
+            },
+        )
 
     # Instantiate expert planner once and reset it for each rollout.
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
@@ -465,6 +526,8 @@ def run_evaluation(
             num_steps=num_steps,
             action_noise_std=action_noise_std,
             action_noise_rng=policy_action_noise_rng,
+            policy_preprocessor=policy_preprocessor,
+            policy_postprocessor=policy_postprocessor,
         )
 
         policy_final_state = policy_trajectory[-1]
@@ -550,7 +613,7 @@ def run_evaluation(
     trajectory_colors = ["tab:blue"] * num_expert + ["tab:orange"] * num_policy
     trajectory_line_styles = ["--"] * num_expert + ["-"] * num_policy
 
-    show_heading = simulator.has_heading
+    show_heading = not simulator.is_euclidean
 
     plot_xy_trajectories(
         simulator=simulator,

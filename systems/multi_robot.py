@@ -137,8 +137,26 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.d_safe = float(self.config.get("d_safe", 0.0))
 
     @property
-    def has_heading(self) -> bool:
-        return any(bool(sub_sim.has_heading) for sub_sim in self.simulators)
+    def is_euclidean(self) -> bool:
+        return all(bool(sub_sim.is_euclidean) for sub_sim in self.simulators)
+
+    @property
+    def angular_state_indices(self) -> tuple[int, ...]:
+        global_indices: list[int] = []
+        for sub_sim, state_slice in zip(self.simulators, self.robot_state_slices):
+            local_indices = tuple(getattr(sub_sim, "angular_state_indices", ()))
+            local_state_dim = int(sub_sim.nx)
+
+            for local_idx_raw in local_indices:
+                local_idx = int(local_idx_raw)
+                if local_idx < 0 or local_idx >= local_state_dim:
+                    raise ValueError(
+                        f"Sub-simulator {type(sub_sim).__name__} declares invalid angular_state_indices "
+                        f"entry {local_idx} for local state dimension {local_state_dim}."
+                    )
+                global_indices.append(int(state_slice.start) + local_idx)
+
+        return tuple(global_indices)
 
     @staticmethod
     def _observation_feature_dims(simulator: DynamicsProtocol) -> tuple[int, int]:
@@ -166,17 +184,17 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         return env_dim, proprio_dim
 
-    def _split_state(self, state: np.ndarray) -> list[np.ndarray]:
-        state = self.validate_state(state)
-        return [state[s].copy() for s in self.robot_state_slices]
+    def _split_state(self, state: np.ndarray, validate: bool = True) -> list[np.ndarray]:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        return [state_array[s].copy() for s in self.robot_state_slices]
 
-    def _split_action(self, action: np.ndarray) -> list[np.ndarray]:
-        action = self.validate_action(action)
-        return [action[s].copy() for s in self.robot_action_slices]
+    def _split_action(self, action: np.ndarray, validate: bool = True) -> list[np.ndarray]:
+        action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
+        return [action_array[s].copy() for s in self.robot_action_slices]
 
-    def _split_observation(self, observation: np.ndarray) -> list[np.ndarray]:
-        observation = self.validate_observation(observation)
-        return [observation[s].copy() for s in self.robot_observation_slices]
+    def _split_observation(self, observation: np.ndarray, validate: bool = True) -> list[np.ndarray]:
+        observation_array = self.validate_observation(observation) if validate else np.asarray(observation, dtype=float)
+        return [observation_array[s].copy() for s in self.robot_observation_slices]
 
     def _base_observation_from_augmented(self, robot_id: int, robot_obs: np.ndarray) -> np.ndarray:
         """Drop relative-to-other-robot terms and reconstruct base per-robot observation.
@@ -201,7 +219,7 @@ class MultiRobotSimulator(DynamicsSimulator):
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray:
         state = self.validate_state(initial_state)
-        split_state = self._split_state(state)
+        split_state = self._split_state(state, validate=False)
         for sim, robot_state in zip(self.simulators, split_state):
             sim.reset(robot_state)
         self.state = state.copy()
@@ -209,11 +227,11 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.reset_rollout_termination()
         return self.state
 
-    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
-        split_state = self._split_state(state)
-        split_action = self._split_action(action)
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        split_state = self._split_state(state, validate=validate)
+        split_action = self._split_action(action, validate=validate)
         next_parts = [
-            sim.step(robot_state, robot_action)
+            sim.step(robot_state, robot_action, validate=False)
             for sim, robot_state, robot_action in zip(self.simulators, split_state, split_action)
         ]
         next_state = np.concatenate(next_parts)
@@ -221,8 +239,8 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.time += 1
         return next_state
 
-    def observe(self, state: np.ndarray) -> np.ndarray:
-        split_state = self._split_state(state)
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+        split_state = self._split_state(state, validate=validate)
         positions = []
         for robot_idx, robot_state in enumerate(split_state):
             if robot_state.shape[0] < 2:
@@ -233,7 +251,7 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         observations: list[np.ndarray] = []
         for robot_idx, (sim, robot_state) in enumerate(zip(self.simulators, split_state)):
-            base_obs = sim.observe(robot_state)
+            base_obs = sim.observe(robot_state, validate=False)
             env_dim = self.robot_env_dims[robot_idx]
             base_env = base_obs[:env_dim]
             base_proprio = base_obs[env_dim:]
@@ -255,11 +273,12 @@ class MultiRobotSimulator(DynamicsSimulator):
             else:
                 observations.append(np.concatenate([base_env, base_proprio]))
 
-        return self.validate_observation(np.concatenate(observations))
+        observation = np.concatenate(observations)
+        return self.validate_observation(observation) if validate else observation
 
-    def is_done(self, state: np.ndarray) -> bool:
-        split_state = self._split_state(state)
-        return all(sim.is_done(robot_state) for sim, robot_state in zip(self.simulators, split_state))
+    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+        split_state = self._split_state(state, validate=validate)
+        return all(sim.is_done(robot_state, validate=False) for sim, robot_state in zip(self.simulators, split_state))
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any:
         next_parts = []
@@ -382,13 +401,14 @@ class MultiRobotSimulator(DynamicsSimulator):
             f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
         )
 
-    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
-        split_obs = self._split_observation(obs)
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+        split_obs = self._split_observation(obs, validate=validate)
         states = []
         for robot_id, (sim, robot_obs) in enumerate(zip(self.simulators, split_obs)):
             base_obs = self._base_observation_from_augmented(robot_id, robot_obs)
-            states.append(sim.invert_obs(base_obs))
-        return self.validate_state(np.concatenate(states))
+            states.append(sim.invert_obs(base_obs, validate=False))
+        state = np.concatenate(states)
+        return self.validate_state(state) if validate else state
 
     @property
     def goal_state(self) -> np.ndarray:
@@ -399,9 +419,9 @@ class MultiRobotSimulator(DynamicsSimulator):
         split_obs = self._split_observation(obs)
         split_action = self._split_action(action)
 
-        env_tensors: list[torch.Tensor] = []
-        state_tensors: list[torch.Tensor] = []
-        action_tensors: list[torch.Tensor] = []
+        env_tensors: list[np.ndarray] = []
+        state_tensors: list[np.ndarray] = []
+        action_tensors: list[np.ndarray] = []
         for robot_id, (sim, robot_obs, robot_action) in enumerate(
             zip(self.simulators, split_obs, split_action)
         ):
@@ -412,12 +432,12 @@ class MultiRobotSimulator(DynamicsSimulator):
             proprio_start = env_end
             proprio_end = proprio_start + proprio_dim
 
-            env_tensors.append(torch.as_tensor(robot_obs[:env_end], dtype=torch.float32))
-            state_tensors.append(torch.as_tensor(robot_obs[proprio_start:proprio_end], dtype=torch.float32))
-            action_tensors.append(torch.as_tensor(robot_action, dtype=torch.float32))
+            env_tensors.append(np.asarray(robot_obs[:env_end], dtype=np.float32))
+            state_tensors.append(np.asarray(robot_obs[proprio_start:proprio_end], dtype=np.float32))
+            action_tensors.append(np.asarray(robot_action, dtype=np.float32))
 
         return {
-            "observation.environment_state": torch.cat(env_tensors),
-            "observation.state": torch.cat(state_tensors),
-            "action": torch.cat(action_tensors),
+            "observation.environment_state": np.concatenate(env_tensors),
+            "observation.state": np.concatenate(state_tensors),
+            "action": np.concatenate(action_tensors),
         }

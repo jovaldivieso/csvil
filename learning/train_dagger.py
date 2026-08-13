@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import gc
-import math
 import os
-import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,31 +13,44 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-try:
-    from tqdm.auto import tqdm
-except Exception:  # pragma: no cover - fallback for minimal environments
-    tqdm = None
+from tqdm.auto import tqdm
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from core.config import load_and_validate_system_config
+from core.config import (
+    load_and_validate_mlp_architecture_config,
+    load_and_validate_system_config,
+)
 from core.factory import DynamicsFactory, PlannerFactory
-from learning.dagger_evaluation import (
+from learning.dagger import (
     DaggerEvalMetrics,
+    ExpertMixBetaController,
+    action_feature_names,
     apply_execution_noise,
+    build_observation_feature_pack_cache,
+    collect_dagger_rollouts,
     evaluate_policy_rollouts,
+    observation_dim_from_features,
+    observation_feature_names,
+    pack_observation_features_from_cache,
+    print_rollout_metrics,
+    resolve_round_steps,
+    resolve_initial_state_seed,
+    set_seed,
+    with_seeded_initial_state_config,
 )
 from learning.models.mlp import MLPPolicy
-from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
-    action_noise_seed_for_rollout,
     default_action_noise_seed_for_config,
 )
+
+
+DEFAULT_MLP_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 128)
 
 
 def get_training_device() -> torch.device:
@@ -49,72 +61,24 @@ def get_training_device() -> torch.device:
     return torch.device("cpu")
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def observation_feature_names(simulator: DynamicsProtocol) -> list[str]:
-    def is_observation_feature(name: str) -> bool:
-        return name.startswith("observation.") or ".observation." in name
-
-    return [
-        feature_name
-        for feature_name in simulator.get_dataset_features().keys()
-        if is_observation_feature(feature_name)
-    ]
-
-
-def action_feature_names(simulator: DynamicsProtocol) -> list[str]:
-    def is_action_feature(name: str) -> bool:
-        return name == "action" or name.endswith(".action")
-
-    return [
-        feature_name
-        for feature_name in simulator.get_dataset_features().keys()
-        if is_action_feature(feature_name)
-    ]
-
-
-def observation_dim_from_features(simulator: DynamicsProtocol) -> int:
-    def is_observation_feature(name: str) -> bool:
-        return name.startswith("observation.") or ".observation." in name
-
-    total_dim = 0
-    for feature_name, feature_info in simulator.get_dataset_features().items():
-        if is_observation_feature(feature_name):
-            total_dim += int(feature_info["shape"][0])
-    return total_dim
-
-
 def flatten_observation_for_policy(
     simulator: DynamicsProtocol,
     observation: np.ndarray,
+    observation_feature_names_list: list[str],
     device: torch.device,
+    observation_feature_cache,
 ) -> torch.Tensor:
     """
     Pack runtime observation exactly like dataset frames, then flatten for MLP.
     """
-    features = simulator.get_dataset_features()
-
-    def is_observation_feature(name: str) -> bool:
-        return name.startswith("observation.") or ".observation." in name
-
-    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
-    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
-
-    chunks: list[torch.Tensor] = []
-    for feature_name in features.keys():
-        if is_observation_feature(feature_name):
-            if feature_name not in packed_frame:
-                raise KeyError(
-                    f"Missing observation feature '{feature_name}' in packed frame. "
-                    "Check simulator.format_dataset_frame() and dataset schema alignment."
-                )
-            chunks.append(torch.as_tensor(packed_frame[feature_name], dtype=torch.float32, device=device).view(-1))
-
-    return torch.cat(chunks, dim=0).unsqueeze(0)
+    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
+    flattened = np.concatenate(
+        [packed_features[feature_name].reshape(-1) for feature_name in observation_feature_names_list]
+    ).astype(np.float32, copy=False)
+    observation_tensor = torch.as_tensor(flattened, dtype=torch.float32)
+    if device.type != "cpu":
+        observation_tensor = observation_tensor.to(device)
+    return observation_tensor.unsqueeze(0)
 
 
 class LeRobotMLPDataset(Dataset):
@@ -146,11 +110,17 @@ class DaggerConfig:
     experiment_config: Mapping[str, Any]
     repo_id: str
     dataset_root: Path
+    start_with_aggregation: bool
     planner_name: str
     dagger_iterations: int
     trajectories_per_iteration: int
     steps_per_trajectory: int
     action_noise_std: float
+    expert_mix_beta_start: float
+    expert_mix_beta_end: float
+    expert_mix_beta_decay_rate: float | None
+    expert_mix_decay_after_success_rate: float | None
+    adaptive_beta_recovery: bool
     target_epochs_per_round: float
     eval_episodes: int
     eval_steps: int | None
@@ -158,15 +128,32 @@ class DaggerConfig:
     eval_action_noise_std: float
     batch_size: int
     learning_rate: float
+    mlp_hidden_dims: tuple[int, ...]
     checkpoint_dir: Path
     seed: int
     max_train_steps: int | None
+
+
+def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
+    if mlp_config_path is None:
+        return DEFAULT_MLP_HIDDEN_DIMS
+
+    validated = load_and_validate_mlp_architecture_config(mlp_config_path)
+    return validated.hidden_dims
 
 
 def default_checkpoint_dir_for_system(system: str) -> Path:
     if system == "multi_robot":
         return Path("outputs/train_dagger_multi_robot")
     return Path("outputs/train_dagger")
+
+
+def default_repo_id_for_system(system: str, timestamp: int) -> str:
+    return f"local/{system}_dagger_{timestamp}"
+
+
+def default_dataset_root_for_system(system: str, timestamp: int) -> Path:
+    return Path(f"data/lerobot_dataset_{system}_dagger_{timestamp}")
 
 
 def train_policy_steps(
@@ -230,143 +217,14 @@ def train_policy_steps(
     return running_loss / float(num_steps)
 
 
-def resolve_round_steps(
-    num_frames: int,
-    batch_size: int,
-    target_epochs_per_round: float,
-    max_train_steps: int | None,
-) -> tuple[int, float]:
-    if num_frames <= 0:
-        raise ValueError("Training dataset must contain at least one frame.")
-    if batch_size <= 0:
-        raise ValueError("'batch_size' must be positive.")
-    if target_epochs_per_round <= 0:
-        raise ValueError("'target_epochs_per_round' must be positive.")
-
-    steps = math.ceil(float(target_epochs_per_round) * float(num_frames) / float(batch_size))
-    if max_train_steps is not None:
-        steps = min(steps, int(max_train_steps))
-    if steps <= 0:
-        raise ValueError("Per-round training steps must remain positive.")
-
-    approx_epochs = float(steps) * float(batch_size) / float(num_frames)
-    return steps, approx_epochs
-
-
-def collect_dagger_data(
-    simulator: DynamicsProtocol,
-    expert_planner: PlannerProtocol,
-    policy: MLPPolicy,
-    dataset_writer: LeRobotDataset,
-    trajectories_per_iteration: int,
-    steps_per_trajectory: int,
-    device: torch.device,
-    action_noise_std: float,
-    action_noise_seed: int,
-) -> DaggerEvalMetrics:
-    """
-    Roll out learner policy, query expert at visited states, aggregate labels.
-    """
-    successful_episodes = 0
-    attempted_episodes = 0
-    max_attempts = max(trajectories_per_iteration * 3, trajectories_per_iteration)
-    reached_goal_count = 0
-    steps_taken: list[int] = []
-
-    policy.eval()
-
-    while successful_episodes < trajectories_per_iteration:
-        attempted_episodes += 1
-        if attempted_episodes > max_attempts:
-            raise RuntimeError(
-                "Too many failed DAgger rollout attempts. "
-                f"Collected {successful_episodes}/{trajectories_per_iteration} episodes."
-            )
-
-        state = simulator.reset_random()
-        episode_initial_state = state.copy()
-        episode_noise_seed = action_noise_seed_for_rollout(
-            action_noise_seed,
-            rollout_index=attempted_episodes,
-        )
-        episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
-        planner_failed = False
-        expert_planner.reset()
-
-        reached_goal = False
-        rollout_steps = steps_per_trajectory
-        episode_frames: list[dict[str, object]] = []
-
-        for step in range(1, steps_per_trajectory + 1):
-            observation = simulator.observe(state)
-
-            with torch.inference_mode():
-                model_input = flatten_observation_for_policy(simulator, observation, device=device)
-                policy_action = policy.select_action(model_input).squeeze(0).cpu().numpy()
-
-            try:
-                expert_action = expert_planner(observation)
-            except PlannerSolveError as exc:
-                print(
-                    "Skipping episode due to planner failure "
-                    f"(attempt={attempted_episodes}, step={step}, action_noise_std={action_noise_std:.6f}, "
-                    f"noise_seed={episode_noise_seed})."
-                )
-                print(
-                    "Planner failure context: "
-                    f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
-                    f"current_state={np.array2string(np.asarray(state), precision=6)}, "
-                    f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
-                )
-                print(f"Underlying solver error: {exc}")
-                planner_failed = True
-                break
-
-            frame_data = simulator.format_dataset_frame(observation, expert_action)
-            frame_data["task"] = "reach target"
-            episode_frames.append(frame_data)
-
-            # Environment advances with noisy learner action; labels remain clean expert corrections.
-            executed_action = apply_execution_noise(
-                simulator=simulator,
-                action=policy_action,
-                action_noise_std=action_noise_std,
-                rng=episode_action_noise_rng,
-            )
-            state = simulator.step(state, executed_action)
-
-            if simulator.should_terminate_rollout(state):
-                reached_goal = True
-                rollout_steps = step
-                break
-
-        if planner_failed:
-            continue
-
-        for frame_data in episode_frames:
-            dataset_writer.add_frame(frame_data)
-        dataset_writer.save_episode()
-        successful_episodes += 1
-        reached_goal_count += int(reached_goal)
-        steps_taken.append(int(rollout_steps))
-
-        if successful_episodes % 10 == 0:
-            print(
-                "Collected "
-                f"{successful_episodes}/{trajectories_per_iteration} trajectories"
-            )
-
-    return DaggerEvalMetrics(
-        success_rate=float(reached_goal_count) / float(successful_episodes),
-        mean_steps=float(np.mean(np.asarray(steps_taken, dtype=float))),
-        min_steps=min(steps_taken),
-        max_steps=max(steps_taken),
-        num_episodes=successful_episodes,
-    )
-
-
 def run_dagger(cfg: DaggerConfig) -> None:
     set_seed(cfg.seed)
+
+    seeded_experiment_config = with_seeded_initial_state_config(
+        system_name=cfg.system,
+        config=cfg.experiment_config,
+        base_seed=cfg.seed,
+    )
 
     if cfg.dagger_iterations < 0:
         raise ValueError("'dagger_iterations' must be non-negative.")
@@ -376,6 +234,15 @@ def run_dagger(cfg: DaggerConfig) -> None:
         raise ValueError("'steps_per_trajectory' must be positive.")
     if cfg.action_noise_std < 0:
         raise ValueError("'action_noise_std' must be non-negative.")
+    if not (0.0 <= cfg.expert_mix_beta_start <= 1.0):
+        raise ValueError("'expert_mix_beta_start' must be in [0, 1].")
+    if not (0.0 <= cfg.expert_mix_beta_end <= 1.0):
+        raise ValueError("'expert_mix_beta_end' must be in [0, 1].")
+    if cfg.expert_mix_beta_decay_rate is not None and cfg.expert_mix_beta_decay_rate < 0:
+        raise ValueError("'expert_mix_beta_decay_rate' must be non-negative when provided.")
+    if cfg.expert_mix_decay_after_success_rate is not None:
+        if not (0.0 <= cfg.expert_mix_decay_after_success_rate <= 1.0):
+            raise ValueError("'expert_mix_decay_after_success_rate' must be in [0, 1] when provided.")
     if cfg.target_epochs_per_round <= 0:
         raise ValueError("'target_epochs_per_round' must be positive.")
     if cfg.eval_episodes < 0:
@@ -391,12 +258,13 @@ def run_dagger(cfg: DaggerConfig) -> None:
     if cfg.max_train_steps is not None and cfg.max_train_steps <= 0:
         raise ValueError("'max_train_steps' must be positive when provided.")
 
-    if not cfg.dataset_root.exists():
+    if not cfg.dataset_root.exists() and not cfg.start_with_aggregation:
         raise FileNotFoundError(f"Dataset root does not exist: {cfg.dataset_root}")
 
-    simulator = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
+    simulator = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
     device = get_training_device()
-    action_noise_seed = default_action_noise_seed_for_config(cfg.experiment_config)
+    action_noise_seed = default_action_noise_seed_for_config(seeded_experiment_config)
+    initial_state_seed = resolve_initial_state_seed(seeded_experiment_config, cfg.seed)
 
     obs_feature_names = observation_feature_names(simulator)
     act_feature_names = action_feature_names(simulator)
@@ -405,10 +273,16 @@ def run_dagger(cfg: DaggerConfig) -> None:
     if len(act_feature_names) == 0:
         raise ValueError("No action features found in simulator dataset schema.")
 
+    obs_feature_cache = build_observation_feature_pack_cache(simulator, obs_feature_names)
+
     state_dim = observation_dim_from_features(simulator)
     action_dim = int(simulator.nu)
 
-    policy = MLPPolicy(state_dim=state_dim, action_dim=action_dim).to(device)
+    policy = MLPPolicy(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        hidden_dims=cfg.mlp_hidden_dims,
+    ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate)
 
     cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -419,7 +293,27 @@ def run_dagger(cfg: DaggerConfig) -> None:
     print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
     print(f"Evaluation action noise std: {cfg.eval_action_noise_std:.6f}")
     print(f"Action noise seed: {action_noise_seed}")
-    print("Initial offline training pass starts from the current expert dataset.")
+    if cfg.expert_mix_beta_decay_rate is not None:
+        print(
+            "Expert execution mixing schedule: "
+            f"beta_start={cfg.expert_mix_beta_start:.3f}, "
+            f"beta_decay_rate={cfg.expert_mix_beta_decay_rate:.3f}/round, "
+            f"beta_floor=0.000, "
+            f"decay_after_eval_success={cfg.expert_mix_decay_after_success_rate if cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
+        )
+    else:
+        print(
+            "Expert execution mixing schedule: "
+            f"beta_start={cfg.expert_mix_beta_start:.3f}, "
+            f"beta_end={cfg.expert_mix_beta_end:.3f}, "
+            f"decay_rounds={cfg.dagger_iterations}, "
+            f"decay_after_eval_success={cfg.expert_mix_decay_after_success_rate if cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
+        )
+    print(f"MLP hidden dims: {list(cfg.mlp_hidden_dims)}")
+    if cfg.start_with_aggregation:
+        print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
+    else:
+        print("Initial offline training pass starts from the current expert dataset.")
 
     print(
         "Epoch-target schedule: "
@@ -427,7 +321,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
     )
 
-    def train_on_aggregate(label: str) -> None:
+    def train_on_aggregate(label: str, training_round: int) -> None:
         print(f"\n=== {label} ===")
 
         aggregate_dataset = LeRobotDataset(repo_id=cfg.repo_id, root=cfg.dataset_root)
@@ -437,11 +331,14 @@ def run_dagger(cfg: DaggerConfig) -> None:
             action_feature_names=act_feature_names,
         )
 
+        dataloader_generator = torch.Generator()
+        dataloader_generator.manual_seed(int(cfg.seed) + int(training_round))
         train_loader = DataLoader(
             train_dataset,
             batch_size=cfg.batch_size,
             shuffle=True,
             drop_last=False,
+            generator=dataloader_generator,
         )
 
         print(f"Training on {len(train_dataset)} aggregated frames")
@@ -464,16 +361,22 @@ def run_dagger(cfg: DaggerConfig) -> None:
         )
         print(f"  mean_step_loss={step_loss:.6f}")
 
-    def evaluate_current_policy(label: str) -> None:
+    def evaluate_current_policy(label: str) -> DaggerEvalMetrics | None:
         if cfg.eval_episodes == 0:
-            return
+            return None
 
-        eval_simulator = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
+        eval_simulator = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
         eval_steps = cfg.eval_steps if cfg.eval_steps is not None else cfg.steps_per_trajectory
 
         def action_fn(observation: np.ndarray) -> np.ndarray:
             with torch.inference_mode():
-                model_input = flatten_observation_for_policy(eval_simulator, observation, device=device)
+                model_input = flatten_observation_for_policy(
+                    eval_simulator,
+                    observation,
+                    observation_feature_names_list=obs_feature_names,
+                    device=device,
+                        observation_feature_cache=obs_feature_cache,
+                )
                 action = policy.select_action(model_input).squeeze(0).cpu().numpy()
             return action
 
@@ -488,8 +391,9 @@ def run_dagger(cfg: DaggerConfig) -> None:
             action_noise_seed=action_noise_seed,
         )
         if metrics is None:
-            return
+            return None
         print_rollout_metrics(label=label, prefix="eval", metrics=metrics)
+        return metrics
 
     def save_checkpoints(training_round: int) -> None:
         checkpoint_data = {
@@ -498,6 +402,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
             "optimizer_state_dict": optimizer.state_dict(),
             "state_dim": state_dim,
             "action_dim": action_dim,
+            "hidden_dims": list(cfg.mlp_hidden_dims),
             "obs_feature_names": obs_feature_names,
             "system": cfg.system,
         }
@@ -508,36 +413,98 @@ def run_dagger(cfg: DaggerConfig) -> None:
         torch.save(checkpoint_data, iteration_checkpoint)
         print(f"Saved checkpoints: {latest_checkpoint} and {iteration_checkpoint}")
 
-    train_on_aggregate("Initial offline training pass")
-    evaluate_current_policy("Round 0 evaluation")
-    save_checkpoints(training_round=0)
+    initial_eval_success_rate: float | None = None
 
-    if cfg.dagger_iterations == 0:
-        print("No DAgger refinements requested (--dagger-iterations 0).")
-        return
+    if not cfg.start_with_aggregation:
+        train_on_aggregate("Initial offline training pass", training_round=0)
+        last_eval_metrics = evaluate_current_policy("Round 0 evaluation")
+        if last_eval_metrics is not None:
+            initial_eval_success_rate = last_eval_metrics.success_rate
+        save_checkpoints(training_round=0)
 
-    for refinement in range(1, cfg.dagger_iterations + 1):
-        print(f"\n=== DAgger refinement {refinement}/{cfg.dagger_iterations}: aggregate ===")
+        if cfg.dagger_iterations == 0:
+            print("No DAgger refinements requested (--dagger-iterations 0).")
+            return
 
-        simulator_for_rollout = DynamicsFactory.create(system_name=cfg.system, config=cfg.experiment_config)
+        refinement_round_indices = range(1, cfg.dagger_iterations + 1)
+    else:
+        if cfg.dagger_iterations == 0:
+            raise ValueError(
+                "Fresh DAgger mode requires at least one aggregation round; "
+                "set --dagger-iterations to a positive value."
+            )
+        refinement_round_indices = range(0, cfg.dagger_iterations)
+
+    beta_controller = ExpertMixBetaController(
+        beta_start=cfg.expert_mix_beta_start,
+        beta_end=cfg.expert_mix_beta_end,
+        decay_rounds=max(1, cfg.dagger_iterations),
+        beta_decay_rate=cfg.expert_mix_beta_decay_rate,
+        decay_after_success_rate=cfg.expert_mix_decay_after_success_rate,
+        adaptive_recovery=cfg.adaptive_beta_recovery,
+    )
+
+    if cfg.expert_mix_decay_after_success_rate is not None and initial_eval_success_rate is not None:
+        beta_controller.prime_from_evaluation(initial_eval_success_rate)
+
+    for training_round in refinement_round_indices:
+        if cfg.start_with_aggregation:
+            print(
+                f"\n=== DAgger round {training_round + 1}/{cfg.dagger_iterations}: aggregate ==="
+            )
+        else:
+            print(
+                f"\n=== DAgger refinement {training_round}/{cfg.dagger_iterations}: aggregate ==="
+            )
+
+        simulator_for_rollout = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
         expert_planner = PlannerFactory.create(
             planner_name=cfg.planner_name,
             simulator=simulator_for_rollout,
-            config=cfg.experiment_config,
+            config=seeded_experiment_config,
         )
-        dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
+
+        round_beta = beta_controller.current_beta
+
+        print(
+            "Aggregation execution policy: "
+            f"expert_beta={round_beta:.3f}, "
+            f"decay_active={'yes' if beta_controller.decay_active else 'no'}"
+        )
+
+        if cfg.start_with_aggregation and not cfg.dataset_root.exists():
+            dataset_writer = LeRobotDataset.create(
+                repo_id=cfg.repo_id,
+                fps=int(1 / simulator_for_rollout.dt),
+                root=cfg.dataset_root,
+                features=simulator_for_rollout.get_dataset_features(),
+            )
+        else:
+            dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
 
         try:
-            aggregation_metrics = collect_dagger_data(
+            def policy_action_fn(observation: np.ndarray) -> np.ndarray:
+                with torch.inference_mode():
+                    model_input = flatten_observation_for_policy(
+                        simulator_for_rollout,
+                        observation,
+                        observation_feature_names_list=obs_feature_names,
+                        device=device,
+                        observation_feature_cache=obs_feature_cache,
+                    )
+                    return policy.select_action(model_input).squeeze(0).cpu().numpy()
+
+            aggregation_metrics = collect_dagger_rollouts(
                 simulator=simulator_for_rollout,
                 expert_planner=expert_planner,
-                policy=policy,
                 dataset_writer=dataset_writer,
                 trajectories_per_iteration=cfg.trajectories_per_iteration,
                 steps_per_trajectory=cfg.steps_per_trajectory,
-                device=device,
                 action_noise_std=cfg.action_noise_std,
                 action_noise_seed=action_noise_seed,
+                initial_state_seed=initial_state_seed,
+                expert_mixing_beta=round_beta,
+                policy_action_fn=policy_action_fn,
             )
         finally:
             # LeRobot writes parquet chunks lazily; finalize guarantees readable footers.
@@ -546,25 +513,28 @@ def run_dagger(cfg: DaggerConfig) -> None:
             gc.collect()
 
         print_rollout_metrics(
-            label=f"Refinement {refinement} aggregation",
+            label=f"Round {training_round + 1} aggregation" if cfg.start_with_aggregation else f"Refinement {training_round} aggregation",
             prefix="aggregation",
             metrics=aggregation_metrics,
         )
 
-        train_on_aggregate(f"DAgger refinement {refinement}/{cfg.dagger_iterations}: retrain")
-        evaluate_current_policy(f"Refinement {refinement} evaluation")
-        save_checkpoints(training_round=refinement)
+        if cfg.start_with_aggregation:
+            train_on_aggregate(
+                f"DAgger round {training_round + 1}/{cfg.dagger_iterations}: retrain",
+                training_round=training_round,
+            )
+            eval_metrics = evaluate_current_policy(f"Round {training_round + 1} evaluation")
+        else:
+            train_on_aggregate(
+                f"DAgger refinement {training_round}/{cfg.dagger_iterations}: retrain",
+                training_round=training_round,
+            )
+            eval_metrics = evaluate_current_policy(f"Refinement {training_round} evaluation")
 
-
-def print_rollout_metrics(label: str, prefix: str, metrics: DaggerEvalMetrics) -> None:
-    print(
-        f"{label}: {prefix}_success_rate={100.0 * metrics.success_rate:.1f}% "
-        f"{prefix}_mean_steps={metrics.mean_steps:.2f} "
-        f"{prefix}_min_steps={metrics.min_steps} {prefix}_max_steps={metrics.max_steps} "
-        f"episodes={metrics.num_episodes}"
-    )
-
-
+        beta_controller.update_after_evaluation(
+            eval_metrics.success_rate if eval_metrics is not None else None
+        )
+        save_checkpoints(training_round=training_round)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a custom MLP policy with DAgger")
     parser.add_argument(
@@ -575,22 +545,26 @@ def parse_args() -> argparse.Namespace:
         help="name of system class, e.g. single_integrator, unicycle2, ...",
     )
     parser.add_argument(
-        "--config",
+        "--expert-config",
+        dest="expert_config",
         type=str,
         required=True,
-        help="path to yaml config file for experiment",
+        help="path to simulator/planner experiment YAML config",
     )
     parser.add_argument(
         "--repo-id",
         type=str,
-        required=True,
+        default=None,
         help="LeRobot dataset repository id stored in metadata (e.g. local/double_integrator_casadi_expert)",
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        required=True,
-        help="path to the existing local LeRobot dataset root",
+        default=None,
+        help=(
+            "path to local LeRobot dataset root. If both --dataset-root and --repo-id are omitted, "
+            "fresh DAgger mode auto-creates them and starts with aggregation from a randomly initialized policy"
+        ),
     )
     parser.add_argument(
         "--planner",
@@ -630,6 +604,49 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--expert-mix-beta-start",
+        type=float,
+        default=0.8,
+        help=(
+            "initial probability of executing the expert action during aggregation rollouts; "
+            "set start=end to disable decay, set start=end=0.0 for policy only behavior"
+        ),
+    )
+    parser.add_argument(
+        "--expert-mix-beta-end",
+        type=float,
+        default=0.0,
+        help="final expert-action probability at the last DAgger aggregation round",
+    )
+    parser.add_argument(
+        "--expert-mix-beta-decay-rate",
+        type=float,
+        default=None,
+        help=(
+            "optional additive expert-mix decay per aggregation round (beta_t = max(0, beta_start - rate*t)); "
+            "when set, this overrides --expert-mix-beta-end"
+        ),
+    )
+    parser.add_argument(
+        "--expert-mix-decay-after-success-rate",
+        type=float,
+        default=None,
+        help=(
+            "optional gate: start beta decay only after latest eval success_rate exceeds this threshold "
+            "(e.g. 0.0)"
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-beta-recovery",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "toggle adaptive recovery on eval regressions: when enabled, beta is increased by one "
+            "schedule step after a success-rate drop; when disabled, beta follows a "
+            "monotonic schedule"
+        ),
+    )
+    parser.add_argument(
         "--target-epochs-per-round",
         type=float,
         default=30.0,
@@ -662,7 +679,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=64,
         help="mini-batch size for MLP training",
     )
     parser.add_argument(
@@ -670,6 +687,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1e-3,
         help="learning rate for Adam optimizer",
+    )
+    parser.add_argument(
+        "--mlp-config",
+        type=Path,
+        default=None,
+        help=(
+            "optional YAML config for MLP architecture; expected key 'model.hidden_dims' "
+            "(or top-level 'hidden_dims'), e.g. [512, 256, 128]"
+        ),
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -700,22 +726,42 @@ def main() -> None:
     args = parse_args()
     validated_config = load_and_validate_system_config(
         system_name=args.system,
-        config_path=args.config,
+        config_path=args.expert_config,
     )
     checkpoint_dir = args.checkpoint_dir
     if checkpoint_dir is None:
         checkpoint_dir = default_checkpoint_dir_for_system(args.system)
+    mlp_hidden_dims = load_mlp_hidden_dims(args.mlp_config)
+
+    if (args.repo_id is None) != (args.dataset_root is None):
+        raise ValueError("Provide both --repo-id and --dataset-root together, or omit both for fresh DAgger mode.")
+
+    if args.repo_id is None and args.dataset_root is None:
+        timestamp = time.time_ns()
+        repo_id = default_repo_id_for_system(args.system, timestamp)
+        dataset_root = default_dataset_root_for_system(args.system, timestamp)
+        start_with_aggregation = True
+    else:
+        repo_id = str(args.repo_id)
+        dataset_root = Path(args.dataset_root)
+        start_with_aggregation = False
 
     cfg = DaggerConfig(
         system=args.system,
         experiment_config=validated_config,
-        repo_id=args.repo_id,
-        dataset_root=args.dataset_root,
+        repo_id=repo_id,
+        dataset_root=dataset_root,
+        start_with_aggregation=start_with_aggregation,
         planner_name=args.planner,
         dagger_iterations=args.dagger_iterations,
         trajectories_per_iteration=args.trajectories_per_iteration,
         steps_per_trajectory=args.steps_per_trajectory,
         action_noise_std=args.action_noise_std,
+        expert_mix_beta_start=args.expert_mix_beta_start,
+        expert_mix_beta_end=args.expert_mix_beta_end,
+        expert_mix_beta_decay_rate=args.expert_mix_beta_decay_rate,
+        expert_mix_decay_after_success_rate=args.expert_mix_decay_after_success_rate,
+        adaptive_beta_recovery=args.adaptive_beta_recovery,
         target_epochs_per_round=args.target_epochs_per_round,
         eval_episodes=args.eval_episodes,
         eval_steps=args.eval_steps,
@@ -723,6 +769,7 @@ def main() -> None:
         eval_action_noise_std=args.eval_action_noise_std,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        mlp_hidden_dims=mlp_hidden_dims,
         checkpoint_dir=checkpoint_dir,
         seed=args.seed,
         max_train_steps=args.max_train_steps,

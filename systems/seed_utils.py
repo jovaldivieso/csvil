@@ -11,6 +11,9 @@ DEFAULT_SINGLE_ROBOT_SEED = 1
 DEFAULT_MULTI_ROBOT_SEED_BASE = 1
 DEFAULT_MULTI_ROBOT_SEED_STRIDE = 100
 DEFAULT_ACTION_NOISE_SEED = 0
+_ACTION_NOISE_STREAM_ID = 1
+_INITIAL_STATE_STREAM_ID = 2
+_EXPERT_MIXING_STREAM_ID = 3
 
 
 def default_seed_argument_for_simulator(
@@ -38,7 +41,50 @@ def action_noise_seed_for_rollout(
     seed_spec: int | list[int] | None = None,
     rollout_index: int | None = None,
 ) -> int:
-    entropy = [int(base_seed)]
+    return _derived_rollout_seed(
+        base_seed,
+        stream_id=_ACTION_NOISE_STREAM_ID,
+        seed_spec=seed_spec,
+        rollout_index=rollout_index,
+    )
+
+
+def initial_state_seed_for_rollout(
+    base_seed: int,
+    *,
+    seed_spec: int | list[int] | None = None,
+    rollout_index: int | None = None,
+) -> int:
+    return _derived_rollout_seed(
+        base_seed,
+        stream_id=_INITIAL_STATE_STREAM_ID,
+        seed_spec=seed_spec,
+        rollout_index=rollout_index,
+    )
+
+
+def expert_mixing_seed_for_rollout(
+    base_seed: int,
+    *,
+    seed_spec: int | list[int] | None = None,
+    rollout_index: int | None = None,
+) -> int:
+    return _derived_rollout_seed(
+        base_seed,
+        stream_id=_EXPERT_MIXING_STREAM_ID,
+        seed_spec=seed_spec,
+        rollout_index=rollout_index,
+    )
+
+
+def _derived_rollout_seed(
+    base_seed: int,
+    *,
+    stream_id: int,
+    seed_spec: int | list[int] | None = None,
+    rollout_index: int | None = None,
+) -> int:
+    entropy = [int(base_seed), int(stream_id)]
     if seed_spec is not None:
         if isinstance(seed_spec, int):
             entropy.append(int(seed_spec))

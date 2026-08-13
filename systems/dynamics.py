@@ -7,6 +7,7 @@ from core.types import VectorSpec, as_vector
 
 
 DEFAULT_DONE_HOLD_STEPS = 5
+DEFAULT_INITIAL_STATE_SEED = 0
 
 
 @runtime_checkable
@@ -59,7 +60,8 @@ class DynamicsProtocol(Protocol):
     nu: int
     obs_dim: int
     max_action: float
-    has_heading: bool
+    is_euclidean: bool
+    angular_state_indices: tuple[int, ...]
     num_robots: int
     simulators: list["DynamicsProtocol"]
     robot_state_slices: list[slice]
@@ -71,11 +73,11 @@ class DynamicsProtocol(Protocol):
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray: ...
 
-    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray: ...
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
-    def observe(self, state: np.ndarray) -> np.ndarray: ...
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
-    def is_done(self, state: np.ndarray) -> bool: ...
+    def is_done(self, state: np.ndarray, validate: bool = True) -> bool: ...
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any: ...
 
@@ -95,7 +97,7 @@ class DynamicsProtocol(Protocol):
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None: ...
 
-    def invert_obs(self, obs: np.ndarray) -> np.ndarray: ...
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
     @property
     def goal_state(self) -> np.ndarray: ...
@@ -130,7 +132,10 @@ class DynamicsSimulator(ABC):
         self.state = None
         self.time = 0
         self.dt = config.get("dt", 0.05)
-        self._sampling_rng = np.random.default_rng(config.get("initial_state_seed"))
+        initial_state_seed = config.get("initial_state_seed", DEFAULT_INITIAL_STATE_SEED)
+        if initial_state_seed is None:
+            initial_state_seed = DEFAULT_INITIAL_STATE_SEED
+        self._sampling_rng = np.random.default_rng(int(initial_state_seed))
         self._rollout_done_counter = 0
         self._early_rollout_termination_enabled = True
 
@@ -153,7 +158,9 @@ class DynamicsSimulator(ABC):
                 "Initial-state sampling requires the maximum initial radius to exceed the minimum goal distance."
             )
 
-        radius = rng.uniform(effective_radius_min, radius_max)
+        # Sample uniformly with respect to planar area on the annulus, not uniformly in radius.
+        radius_sq = rng.uniform(effective_radius_min**2, radius_max**2)
+        radius = float(np.sqrt(radius_sq))
         angle = rng.uniform(0.0, 2.0 * np.pi)
         return np.array([radius * np.cos(angle), radius * np.sin(angle)], dtype=float)
 
@@ -177,7 +184,7 @@ class DynamicsSimulator(ABC):
         if hold_steps <= 0:
             raise ValueError("'done_hold_steps' must be a positive integer.")
 
-        if self.is_done(state):
+        if self.is_done(state, validate=False):
             self._rollout_done_counter += 1
         else:
             self._rollout_done_counter = 0
@@ -185,9 +192,14 @@ class DynamicsSimulator(ABC):
         return self._rollout_done_counter >= hold_steps
 
     @property
-    def has_heading(self) -> bool:
-        """Whether the simulator state/goal semantics include orientation (theta)."""
-        return False
+    def is_euclidean(self) -> bool:
+        """Whether squared Euclidean residuals are valid across all state coordinates."""
+        return True
+
+    @property
+    def angular_state_indices(self) -> tuple[int, ...]:
+        """Local state coordinates whose planner residuals should use wrapped angular distance."""
+        return ()
 
     @property
     def num_robots(self) -> int:
@@ -251,12 +263,12 @@ class DynamicsSimulator(ABC):
         return as_vector(observation, VectorSpec(name="observation", size=int(self.obs_dim)))
 
     @abstractmethod
-    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         """Get next state"""
         pass
 
     @abstractmethod
-    def observe(self, state: np.ndarray) -> np.ndarray:
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
         """Get observation"""
         pass
 
@@ -286,7 +298,7 @@ class DynamicsSimulator(ABC):
         pass
 
     @abstractmethod
-    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
         """Reconstruct absolute state from observation (inverse of observe())"""
         pass
 
@@ -315,9 +327,9 @@ class DynamicsSimulator(ABC):
         state = self.reset(initial_state)
 
         for _ in range(num_steps):
-            obs = self.observe(state)
+            obs = self.observe(state, validate=False)
             action = policy_fn(obs)  # Call your motion planner here
-            state = self.step(state, action)
+            state = self.step(state, action, validate=False)
             states.append(state.copy())
             observations.append(obs)
             actions.append(action)

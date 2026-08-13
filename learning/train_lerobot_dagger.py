@@ -3,11 +3,10 @@ from __future__ import annotations
 import argparse
 import copy
 import gc
-import math
 import os
-import random
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -15,29 +14,56 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 import yaml
+import draccus
 
+from lerobot.configs.train import TrainPipelineConfig
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.policies.factory import make_pre_post_processors
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
-from learning.dagger_evaluation import (
+from learning.dagger import (
     DaggerEvalMetrics,
+    ExpertMixBetaController,
     apply_execution_noise,
+    build_observation_feature_pack_cache,
+    collect_dagger_rollouts,
     evaluate_policy_rollouts,
+    observation_feature_names,
+    pack_observation_features_from_cache,
+    print_rollout_metrics,
+    resolve_round_steps,
+    resolve_initial_state_seed,
+    set_seed,
+    with_seeded_initial_state_config,
 )
-from learning.train_lerobot import run_training
-from planning.casadi_planner import PlannerSolveError
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
-    action_noise_seed_for_rollout,
     default_action_noise_seed_for_config,
 )
+
+
+def run_training(config_path: str) -> None:
+    lerobot_training_config_path = os.path.abspath(config_path)
+    print(f"Loading LeRobot config from: {lerobot_training_config_path}")
+
+    train_pipeline_config = draccus.parse(
+        config_class=TrainPipelineConfig,
+        config_path=lerobot_training_config_path,
+    )
+
+    from lerobot.scripts.lerobot_train import train
+
+    train(train_pipeline_config)
 
 
 def get_inference_device() -> torch.device:
@@ -48,44 +74,53 @@ def get_inference_device() -> torch.device:
     return torch.device("cpu")
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def is_observation_feature(feature_name: str) -> bool:
-    return feature_name.startswith("observation.") or ".observation." in feature_name
-
-
 def create_policy_input(
     simulator: DynamicsProtocol,
     observation: np.ndarray,
+    observation_feature_names_list: list[str],
     device: torch.device,
+    add_batch_dim: bool = True,
+    observation_feature_cache=None,
 ) -> dict[str, torch.Tensor]:
     """
     Build policy input tensors according to simulator dataset feature ordering.
     """
+    if observation_feature_cache is None:
+        observation_feature_cache = build_observation_feature_pack_cache(
+            simulator,
+            observation_feature_names_list,
+        )
+
+    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
     policy_input: dict[str, torch.Tensor] = {}
-    features = simulator.get_dataset_features()
+    for feature_name in observation_feature_names_list:
+        feature_tensor = torch.as_tensor(packed_features[feature_name], dtype=torch.float32)
+        if add_batch_dim:
+            feature_tensor = feature_tensor.view(1, -1)
+        policy_input[feature_name] = feature_tensor
 
-    dummy_action = np.zeros(int(simulator.nu), dtype=np.float32)
-    packed_frame = simulator.format_dataset_frame(observation, dummy_action)
-
-    for feature_name in features.keys():
-        if is_observation_feature(feature_name):
-            if feature_name not in packed_frame:
-                raise KeyError(
-                    f"Missing observation feature '{feature_name}' in packed frame. "
-                    "Check simulator.format_dataset_frame() and dataset schema alignment."
-                )
-            policy_input[feature_name] = torch.as_tensor(
-                packed_frame[feature_name],
-                dtype=torch.float32,
-                device=device,
-            ).view(1, -1)
+    if device.type != "cpu":
+        policy_input = {feature_name: tensor.to(device) for feature_name, tensor in policy_input.items()}
 
     return policy_input
+
+
+def load_lerobot_pre_post_processors(
+    policy_cfg: PreTrainedConfig,
+    device: torch.device,
+    pretrained_path: Path | None = None,
+):
+    policy_cfg = copy.deepcopy(policy_cfg)
+    policy_cfg.device = str(device)
+
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_cfg=policy_cfg,
+        pretrained_path=str(pretrained_path) if pretrained_path is not None else None,
+        preprocessor_overrides={
+            "device_processor": {"device": str(device)},
+        },
+    )
+    return preprocessor, postprocessor
 
 
 def load_lerobot_policy(
@@ -122,7 +157,7 @@ def list_pretrained_model_dirs(search_root: Path) -> set[Path]:
 def newest_pretrained_model_dir(paths: set[Path]) -> Path | None:
     if len(paths) == 0:
         return None
-    return max(paths, key=lambda p: p.stat().st_mtime)
+    return max(paths, key=lambda p: (p.stat().st_mtime, str(p)))
 
 
 def detect_new_pretrained_model_dir(
@@ -243,6 +278,88 @@ def infer_policy_type(
     return normalized
 
 
+def load_policy_config_from_training_config(
+    training_config_path: Path,
+    policy_type: str,
+):
+    raw_config = read_training_config(training_config_path)
+
+    # Full LeRobot train config path (dataset + policy + training fields)
+    if "dataset" in raw_config and "policy" in raw_config:
+        with draccus.config_type("yaml"):
+            train_cfg = draccus.parse(
+                config_class=TrainPipelineConfig,
+                config_path=str(training_config_path),
+                args=[],
+            )
+
+        policy_cfg = train_cfg.policy
+        if policy_cfg is None:
+            raise ValueError("LeRobot training config does not define a policy section.")
+        return policy_cfg
+
+    # Policy-only config path (used in this repository for some ACT/Diffusion configs)
+    policy_section = raw_config.get("policy")
+    if isinstance(policy_section, Mapping):
+        policy_dict = dict(policy_section)
+    else:
+        policy_dict = dict(raw_config)
+
+    normalized = policy_type.strip().lower()
+    policy_dict.setdefault("type", normalized)
+    policy_dict.pop("type", None)
+
+    temp_path = write_training_config(policy_dict)
+    try:
+        with draccus.config_type("yaml"):
+            if normalized == "act":
+                return draccus.parse(
+                    config_class=ACTConfig,
+                    config_path=str(temp_path),
+                    args=[],
+                )
+            if normalized == "diffusion":
+                return draccus.parse(
+                    config_class=DiffusionConfig,
+                    config_path=str(temp_path),
+                    args=[],
+                )
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    raise ValueError("'policy_type' must be one of {'act', 'diffusion'}.")
+
+
+def build_uninitialized_lerobot_policy(
+    policy_type: str,
+    policy_config,
+    device: torch.device,
+) -> DiffusionPolicy | ACTPolicy:
+    uninitialized_policy_config = copy.deepcopy(policy_config)
+    uninitialized_policy_config.pretrained_path = None
+    uninitialized_policy_config.device = str(device)
+
+    normalized = policy_type.strip().lower()
+    if normalized == "diffusion":
+        policy = DiffusionPolicy(config=uninitialized_policy_config)
+    elif normalized == "act":
+        policy = ACTPolicy(config=uninitialized_policy_config)
+    else:
+        raise ValueError("'policy_type' must be one of {'diffusion', 'act'}.")
+
+    policy.eval()
+    policy.to(device)
+    return policy
+
+
+def default_repo_id_for_system(system: str, timestamp: int) -> str:
+    return f"local/{system}_lerobot_dagger_{timestamp}"
+
+
+def default_dataset_root_for_system(system: str, timestamp: int) -> Path:
+    return Path(f"data/lerobot_dataset_{system}_lerobot_dagger_{timestamp}")
+
+
 def run_training_round(
     *,
     base_training_config: Mapping[str, Any],
@@ -285,126 +402,6 @@ def run_training_round(
     return trained_model_dir
 
 
-def collect_lerobot_dagger_data(
-    simulator: DynamicsProtocol,
-    expert_planner: PlannerProtocol,
-    policy: DiffusionPolicy | ACTPolicy,
-    dataset_writer: LeRobotDataset,
-    trajectories_per_iteration: int,
-    steps_per_trajectory: int,
-    device: torch.device,
-    action_noise_std: float,
-    action_noise_seed: int,
-) -> DaggerEvalMetrics:
-    """
-    Roll out LeRobot policy, query expert at visited states, append corrective labels.
-    """
-    successful_episodes = 0
-    attempted_episodes = 0
-    max_attempts = max(trajectories_per_iteration * 3, trajectories_per_iteration)
-    reached_goal_count = 0
-    steps_taken: list[int] = []
-
-    while successful_episodes < trajectories_per_iteration:
-        attempted_episodes += 1
-        if attempted_episodes > max_attempts:
-            raise RuntimeError(
-                "Too many failed DAgger rollout attempts. "
-                f"Collected {successful_episodes}/{trajectories_per_iteration} episodes."
-            )
-
-        state = simulator.reset_random()
-        episode_initial_state = state.copy()
-        episode_noise_seed = action_noise_seed_for_rollout(
-            action_noise_seed,
-            rollout_index=attempted_episodes,
-        )
-        episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
-        planner_failed = False
-
-        if hasattr(policy, "reset"):
-            policy.reset()
-        if hasattr(expert_planner, "reset"):
-            expert_planner.reset()
-
-        reached_goal = False
-        rollout_steps = steps_per_trajectory
-        episode_frames: list[dict[str, object]] = []
-
-        for step in range(1, steps_per_trajectory + 1):
-            observation = simulator.observe(state)
-
-            policy_input = create_policy_input(
-                simulator=simulator,
-                observation=observation,
-                device=device,
-            )
-
-            with torch.inference_mode():
-                action_tensor = policy.select_action(policy_input)
-            policy_action = action_tensor.squeeze(0).cpu().numpy()
-
-            try:
-                expert_action = expert_planner(observation)
-            except PlannerSolveError as exc:
-                print(
-                    "Skipping episode due to planner failure "
-                    f"(attempt={attempted_episodes}, step={step}, action_noise_std={action_noise_std:.6f}, "
-                    f"noise_seed={episode_noise_seed})."
-                )
-                print(
-                    "Planner failure context: "
-                    f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
-                    f"current_state={np.array2string(np.asarray(state), precision=6)}, "
-                    f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
-                )
-                print(f"Underlying solver error: {exc}")
-                planner_failed = True
-                break
-
-            frame_data = simulator.format_dataset_frame(observation, expert_action)
-            frame_data["task"] = "reach target"
-            episode_frames.append(frame_data)
-
-            # Environment advances with noisy learner action; labels remain clean expert corrections.
-            executed_action = apply_execution_noise(
-                simulator=simulator,
-                action=policy_action,
-                action_noise_std=action_noise_std,
-                rng=episode_action_noise_rng,
-            )
-            state = simulator.step(state, executed_action)
-
-            if simulator.should_terminate_rollout(state):
-                reached_goal = True
-                rollout_steps = step
-                break
-
-        if planner_failed:
-            continue
-
-        for frame_data in episode_frames:
-            dataset_writer.add_frame(frame_data)
-        dataset_writer.save_episode()
-        successful_episodes += 1
-        reached_goal_count += int(reached_goal)
-        steps_taken.append(int(rollout_steps))
-
-        if successful_episodes % 10 == 0:
-            print(
-                "Collected "
-                f"{successful_episodes}/{trajectories_per_iteration} trajectories"
-            )
-
-    return DaggerEvalMetrics(
-        success_rate=float(reached_goal_count) / float(successful_episodes),
-        mean_steps=float(np.mean(np.asarray(steps_taken, dtype=float))),
-        min_steps=min(steps_taken),
-        max_steps=max(steps_taken),
-        num_episodes=successful_episodes,
-    )
-
-
 @dataclass(frozen=True)
 class LeRobotDaggerConfig:
     system: str
@@ -412,11 +409,17 @@ class LeRobotDaggerConfig:
     lerobot_training_config_path: Path
     repo_id: str
     dataset_root: Path
+    start_with_aggregation: bool
     planner_name: str
     dagger_iterations: int
     trajectories_per_iteration: int
     steps_per_trajectory: int
     action_noise_std: float
+    expert_mix_beta_start: float
+    expert_mix_beta_end: float
+    expert_mix_beta_decay_rate: float | None
+    expert_mix_decay_after_success_rate: float | None
+    adaptive_beta_recovery: bool
     train_output_root: Path
     seed: int
     policy_type: str | None
@@ -428,29 +431,6 @@ class LeRobotDaggerConfig:
     eval_seed_start: int
     eval_action_noise_std: float
     max_train_steps: int | None
-
-
-def resolve_round_steps(
-    num_frames: int,
-    batch_size: int,
-    target_epochs_per_round: float,
-    max_train_steps: int | None,
-) -> tuple[int, float]:
-    if num_frames <= 0:
-        raise ValueError("Training dataset must contain at least one frame.")
-    if batch_size <= 0:
-        raise ValueError("'batch_size' must be positive.")
-    if target_epochs_per_round <= 0:
-        raise ValueError("'target_epochs_per_round' must be positive.")
-
-    steps = math.ceil(float(target_epochs_per_round) * float(num_frames) / float(batch_size))
-    if max_train_steps is not None:
-        steps = min(steps, int(max_train_steps))
-
-    if steps <= 0:
-        raise ValueError("Per-round training steps must remain positive.")
-    approx_epochs = float(steps) * float(batch_size) / float(num_frames)
-    return steps, approx_epochs
 
 
 def dataset_frame_count(repo_id: str, dataset_root: Path) -> int:
@@ -467,6 +447,15 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         raise ValueError("'steps_per_trajectory' must be positive.")
     if cfg.action_noise_std < 0:
         raise ValueError("'action_noise_std' must be non-negative.")
+    if not (0.0 <= cfg.expert_mix_beta_start <= 1.0):
+        raise ValueError("'expert_mix_beta_start' must be in [0, 1].")
+    if not (0.0 <= cfg.expert_mix_beta_end <= 1.0):
+        raise ValueError("'expert_mix_beta_end' must be in [0, 1].")
+    if cfg.expert_mix_beta_decay_rate is not None and cfg.expert_mix_beta_decay_rate < 0:
+        raise ValueError("'expert_mix_beta_decay_rate' must be non-negative when provided.")
+    if cfg.expert_mix_decay_after_success_rate is not None:
+        if not (0.0 <= cfg.expert_mix_decay_after_success_rate <= 1.0):
+            raise ValueError("'expert_mix_decay_after_success_rate' must be in [0, 1] when provided.")
     if cfg.target_epochs_per_round <= 0:
         raise ValueError("'target_epochs_per_round' must be positive.")
     if cfg.eval_episodes < 0:
@@ -478,7 +467,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
     if cfg.max_train_steps is not None and cfg.max_train_steps <= 0:
         raise ValueError("'max_train_steps' must be positive when provided.")
 
-    if not cfg.dataset_root.exists():
+    if not cfg.dataset_root.exists() and not cfg.start_with_aggregation:
         raise FileNotFoundError(f"Dataset root does not exist: {cfg.dataset_root}")
 
     set_seed(cfg.seed)
@@ -486,12 +475,34 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
     print(f"Running LeRobot DAgger on device: {device}")
     print(f"Aggregation action noise std: {cfg.action_noise_std:.6f}")
     print(f"Evaluation action noise std: {cfg.eval_action_noise_std:.6f}")
+    if cfg.expert_mix_beta_decay_rate is not None:
+        print(
+            "Expert execution mixing schedule: "
+            f"beta_start={cfg.expert_mix_beta_start:.3f}, "
+            f"beta_decay_rate={cfg.expert_mix_beta_decay_rate:.3f}/round, "
+            f"beta_floor=0.000, "
+            f"decay_after_eval_success={cfg.expert_mix_decay_after_success_rate if cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
+        )
+    else:
+        print(
+            "Expert execution mixing schedule: "
+            f"beta_start={cfg.expert_mix_beta_start:.3f}, "
+            f"beta_end={cfg.expert_mix_beta_end:.3f}, "
+            f"decay_rounds={cfg.dagger_iterations}, "
+            f"decay_after_eval_success={cfg.expert_mix_decay_after_success_rate if cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
+        )
 
     validated_experiment_config = load_and_validate_system_config(
         system_name=cfg.system,
         config_path=str(cfg.experiment_config_path),
     )
-    action_noise_seed = default_action_noise_seed_for_config(validated_experiment_config)
+    seeded_experiment_config = with_seeded_initial_state_config(
+        system_name=cfg.system,
+        config=validated_experiment_config,
+        base_seed=cfg.seed,
+    )
+    action_noise_seed = default_action_noise_seed_for_config(seeded_experiment_config)
+    initial_state_seed = resolve_initial_state_seed(seeded_experiment_config, cfg.seed)
     print(f"Action noise seed: {action_noise_seed}")
 
     base_training_config = read_training_config(cfg.lerobot_training_config_path)
@@ -500,7 +511,7 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         raise ValueError("LeRobot training config must define a positive 'batch_size'.")
 
     initial_round_steps = int(base_training_config.get("steps", 0))
-    if initial_round_steps <= 0:
+    if not cfg.start_with_aggregation and initial_round_steps <= 0:
         raise ValueError(
             "LeRobot training config must define a positive 'steps' value for round-0 training."
         )
@@ -510,46 +521,75 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
         f"target_epochs={cfg.target_epochs_per_round:.2f}, "
         f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
     )
-    print(
-        "Initial round schedule: "
-        f"fixed optimizer_steps from config={initial_round_steps}"
-    )
+    if cfg.start_with_aggregation:
+        print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
+    else:
+        print(
+            "Initial round schedule: "
+            f"fixed optimizer_steps from config={initial_round_steps}"
+        )
 
     policy_type = infer_policy_type(cfg.policy_type, base_training_config)
-
-    initial_num_frames = dataset_frame_count(repo_id=cfg.repo_id, dataset_root=cfg.dataset_root)
-    initial_epochs = (
-        float(initial_round_steps) * float(base_batch_size) / float(initial_num_frames)
+    uninitialized_policy_config = load_policy_config_from_training_config(
+        training_config_path=cfg.lerobot_training_config_path,
+        policy_type=policy_type,
     )
-    print(
-        "Initial round dataset schedule: "
-        f"frames={initial_num_frames}, optimizer_steps={initial_round_steps}, "
-        f"approx_epochs={initial_epochs:.2f}"
+    if uninitialized_policy_config.type != policy_type:
+        raise ValueError(
+            "Policy type mismatch between inferred CLI/base config and parsed LeRobot config: "
+            f"expected '{policy_type}', got '{uninitialized_policy_config.type}'."
+        )
+    if not cfg.start_with_aggregation:
+        initial_num_frames = dataset_frame_count(repo_id=cfg.repo_id, dataset_root=cfg.dataset_root)
+        initial_epochs = (
+            float(initial_round_steps) * float(base_batch_size) / float(initial_num_frames)
+        )
+        print(
+            "Initial round dataset schedule: "
+            f"frames={initial_num_frames}, optimizer_steps={initial_round_steps}, "
+            f"approx_epochs={initial_epochs:.2f}"
+        )
+
+    rollout_schema_simulator = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
+    rollout_observation_feature_names = observation_feature_names(rollout_schema_simulator)
+    rollout_observation_feature_cache = build_observation_feature_pack_cache(
+        rollout_schema_simulator,
+        rollout_observation_feature_names,
     )
 
     def evaluate_trained_policy(
         label: str,
         model_dir: Path,
-    ) -> None:
+    ) -> DaggerEvalMetrics | None:
         if cfg.eval_episodes == 0:
-            return
+            return None
 
-        eval_simulator = DynamicsFactory.create(system_name=cfg.system, config=validated_experiment_config)
+        eval_simulator = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
         eval_steps = cfg.eval_steps if cfg.eval_steps is not None else cfg.steps_per_trajectory
         eval_policy = load_lerobot_policy(
             policy_type=policy_type,
             model_dir=model_dir,
             device=device,
         )
+        eval_preprocessor, eval_postprocessor = load_lerobot_pre_post_processors(
+            policy_cfg=PreTrainedConfig.from_pretrained(str(model_dir)),
+            device=device,
+            pretrained_path=model_dir,
+        )
 
         def action_fn(observation: np.ndarray) -> np.ndarray:
             policy_input = create_policy_input(
                 simulator=eval_simulator,
                 observation=observation,
+                observation_feature_names_list=rollout_observation_feature_names,
                 device=device,
+                add_batch_dim=False,
+                observation_feature_cache=rollout_observation_feature_cache,
             )
+            policy_input = eval_preprocessor(policy_input)
             with torch.inference_mode():
                 action_tensor = eval_policy.select_action(policy_input)
+            action_tensor = eval_postprocessor(action_tensor)
             return action_tensor.squeeze(0).cpu().numpy()
 
         reset_fn = eval_policy.reset if hasattr(eval_policy, "reset") else None
@@ -564,67 +604,164 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             action_noise_seed=action_noise_seed,
         )
         if metrics is None:
-            return
+            return None
         print_rollout_metrics(label=label, prefix="eval", metrics=metrics)
         del eval_policy
         gc.collect()
+        return metrics
 
-    print("\n=== Initial LeRobot training pass (no aggregation) ===")
-    previous_pretrained_path = run_training_round(
-        base_training_config=base_training_config,
-        dataset_root=cfg.dataset_root,
-        repo_id=cfg.repo_id,
-        pretrained_path=cfg.initial_pretrained_path,
-        disable_push_to_hub=cfg.disable_push_to_hub,
-        train_output_root=cfg.train_output_root,
-        steps_override=initial_round_steps,
+    previous_pretrained_path: Path | None = cfg.initial_pretrained_path
+    initial_eval_success_rate: float | None = None
+    if not cfg.start_with_aggregation:
+        print("\n=== Initial LeRobot training pass (no aggregation) ===")
+        previous_pretrained_path = run_training_round(
+            base_training_config=base_training_config,
+            dataset_root=cfg.dataset_root,
+            repo_id=cfg.repo_id,
+            pretrained_path=cfg.initial_pretrained_path,
+            disable_push_to_hub=cfg.disable_push_to_hub,
+            train_output_root=cfg.train_output_root,
+            steps_override=initial_round_steps,
+        )
+        initial_eval_metrics = evaluate_trained_policy(
+            label="Round 0 evaluation",
+            model_dir=previous_pretrained_path,
+        )
+        if initial_eval_metrics is not None:
+            initial_eval_success_rate = initial_eval_metrics.success_rate
+        if cfg.dagger_iterations == 0:
+            print("No DAgger refinements requested (--dagger-iterations 0).")
+            print("\nLeRobot DAgger loop complete.")
+            return
+
+        round_indices = range(1, cfg.dagger_iterations + 1)
+    else:
+        if cfg.dagger_iterations == 0:
+            raise ValueError(
+                "Fresh DAgger mode requires at least one aggregation round; "
+                "set --dagger-iterations to a positive value."
+            )
+        round_indices = range(0, cfg.dagger_iterations)
+
+    beta_controller = ExpertMixBetaController(
+        beta_start=cfg.expert_mix_beta_start,
+        beta_end=cfg.expert_mix_beta_end,
+        decay_rounds=max(1, cfg.dagger_iterations),
+        beta_decay_rate=cfg.expert_mix_beta_decay_rate,
+        decay_after_success_rate=cfg.expert_mix_decay_after_success_rate,
+        adaptive_recovery=cfg.adaptive_beta_recovery,
     )
-    evaluate_trained_policy(
-        label="Round 0 evaluation",
-        model_dir=previous_pretrained_path,
-    )
 
-    if cfg.dagger_iterations == 0:
-        print("No DAgger refinements requested (--dagger-iterations 0).")
-        print("\nLeRobot DAgger loop complete.")
-        return
+    if cfg.expert_mix_decay_after_success_rate is not None and initial_eval_success_rate is not None:
+        beta_controller.prime_from_evaluation(initial_eval_success_rate)
 
-    for refinement in range(1, cfg.dagger_iterations + 1):
-        print(f"\n=== DAgger refinement {refinement}/{cfg.dagger_iterations} ===")
+    for round_index in round_indices:
+        if cfg.start_with_aggregation:
+            print(f"\n=== DAgger round {round_index + 1}/{cfg.dagger_iterations} ===")
+        else:
+            print(f"\n=== DAgger refinement {round_index}/{cfg.dagger_iterations} ===")
 
-        simulator = DynamicsFactory.create(system_name=cfg.system, config=validated_experiment_config)
+        simulator = DynamicsFactory.create(system_name=cfg.system, config=seeded_experiment_config)
         expert_planner = PlannerFactory.create(
             planner_name=cfg.planner_name,
             simulator=simulator,
-            config=validated_experiment_config,
-        )
-        policy = load_lerobot_policy(
-            policy_type=policy_type,
-            model_dir=previous_pretrained_path,
-            device=device,
+            config=seeded_experiment_config,
         )
 
-        dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
+        round_beta = beta_controller.current_beta
+
+        print(
+            "Aggregation execution policy: "
+            f"expert_beta={round_beta:.3f}, "
+            f"decay_active={'yes' if beta_controller.decay_active else 'no'}"
+        )
+
+        policy: DiffusionPolicy | ACTPolicy | None = None
+        policy_preprocessor = None
+        policy_postprocessor = None
+        if previous_pretrained_path is None:
+            policy = build_uninitialized_lerobot_policy(
+                policy_type=policy_type,
+                policy_config=uninitialized_policy_config,
+                device=device,
+            )
+            policy_preprocessor, policy_postprocessor = load_lerobot_pre_post_processors(
+                policy_cfg=uninitialized_policy_config,
+                device=device,
+                pretrained_path=None,
+            )
+            print(
+                "No pretrained checkpoint yet; using the uninitialized policy and matching processors "
+                "for fresh-mode round-0 aggregation."
+            )
+        else:
+            policy = load_lerobot_policy(
+                policy_type=policy_type,
+                model_dir=previous_pretrained_path,
+                device=device,
+            )
+            policy_preprocessor, policy_postprocessor = load_lerobot_pre_post_processors(
+                policy_cfg=PreTrainedConfig.from_pretrained(str(previous_pretrained_path)),
+                device=device,
+                pretrained_path=previous_pretrained_path,
+            )
+
+        if cfg.start_with_aggregation and not cfg.dataset_root.exists():
+            dataset_writer = LeRobotDataset.create(
+                repo_id=cfg.repo_id,
+                fps=int(1 / simulator.dt),
+                root=cfg.dataset_root,
+                features=simulator.get_dataset_features(),
+            )
+        else:
+            dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
         try:
-            aggregation_metrics = collect_lerobot_dagger_data(
+            policy_action_fn = None
+            policy_reset_fn = None
+            if policy is not None and policy_preprocessor is not None and policy_postprocessor is not None:
+                def policy_action_fn(observation: np.ndarray) -> np.ndarray:
+                    policy_input = create_policy_input(
+                        simulator=simulator,
+                        observation=observation,
+                        observation_feature_names_list=rollout_observation_feature_names,
+                        device=device,
+                        add_batch_dim=False,
+                        observation_feature_cache=rollout_observation_feature_cache,
+                    )
+                    policy_input = policy_preprocessor(policy_input)
+                    with torch.inference_mode():
+                        action_tensor = policy.select_action(policy_input)
+                    action_tensor = policy_postprocessor(action_tensor)
+                    return action_tensor.squeeze(0).cpu().numpy()
+
+                policy_reset_fn = policy.reset if hasattr(policy, "reset") else None
+
+            aggregation_metrics = collect_dagger_rollouts(
                 simulator=simulator,
                 expert_planner=expert_planner,
-                policy=policy,
                 dataset_writer=dataset_writer,
                 trajectories_per_iteration=cfg.trajectories_per_iteration,
                 steps_per_trajectory=cfg.steps_per_trajectory,
-                device=device,
                 action_noise_std=cfg.action_noise_std,
                 action_noise_seed=action_noise_seed,
+                initial_state_seed=initial_state_seed,
+                expert_mixing_beta=round_beta,
+                policy_action_fn=policy_action_fn,
+                policy_reset_fn=policy_reset_fn,
             )
         finally:
             dataset_writer.finalize()
             del dataset_writer
-            del policy
+            if policy is not None:
+                del policy
             gc.collect()
 
         print_rollout_metrics(
-            label=f"Refinement {refinement} aggregation",
+            label=(
+                f"Round {round_index + 1} aggregation"
+                if cfg.start_with_aggregation
+                else f"Refinement {round_index} aggregation"
+            ),
             prefix="aggregation",
             metrics=aggregation_metrics,
         )
@@ -651,23 +788,19 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
             train_output_root=cfg.train_output_root,
             steps_override=refinement_steps,
         )
-        evaluate_trained_policy(
-            label=f"Refinement {refinement} evaluation",
+        eval_metrics = evaluate_trained_policy(
+            label=(
+                f"Round {round_index + 1} evaluation"
+                if cfg.start_with_aggregation
+                else f"Refinement {round_index} evaluation"
+            ),
             model_dir=previous_pretrained_path,
+        )
+        beta_controller.update_after_evaluation(
+            eval_metrics.success_rate if eval_metrics is not None else None
         )
 
     print("\nLeRobot DAgger loop complete.")
-
-
-def print_rollout_metrics(label: str, prefix: str, metrics: DaggerEvalMetrics) -> None:
-    print(
-        f"{label}: {prefix}_success_rate={100.0 * metrics.success_rate:.1f}% "
-        f"{prefix}_mean_steps={metrics.mean_steps:.2f} "
-        f"{prefix}_min_steps={metrics.min_steps} {prefix}_max_steps={metrics.max_steps} "
-        f"episodes={metrics.num_episodes}"
-    )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Iterative DAgger for LeRobot ACT/Diffusion policies"
@@ -680,7 +813,8 @@ def parse_args() -> argparse.Namespace:
         help="name of system class, e.g. single_integrator, multi_robot, ...",
     )
     parser.add_argument(
-        "--experiment-config",
+        "--expert-config",
+        dest="expert_config",
         type=Path,
         required=True,
         help="path to simulator/planner experiment YAML config",
@@ -694,14 +828,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repo-id",
         type=str,
-        required=True,
-        help="LeRobot dataset repository id stored in metadata",
+        default=None,
+        help=(
+            "LeRobot dataset repository id stored in metadata. If both --repo-id and --dataset-root "
+            "are omitted, fresh DAgger mode auto-creates them"
+        ),
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        required=True,
-        help="path to existing local LeRobot dataset root",
+        default=None,
+        help=(
+            "path to local LeRobot dataset root. If both --dataset-root and --repo-id are omitted, "
+            "fresh DAgger mode auto-creates them and starts with aggregation"
+        ),
     )
     parser.add_argument(
         "--planner",
@@ -745,6 +885,49 @@ def parse_args() -> argparse.Namespace:
         help=(
             "std-dev of Gaussian action noise applied during DAgger rollout execution; "
             "expert labels remain noise-free"
+        ),
+    )
+    parser.add_argument(
+        "--expert-mix-beta-start",
+        type=float,
+        default=0.8,
+        help=(
+            "initial probability of executing the expert action during aggregation rollouts; "
+            "set start=end to disable decay, set start=end=0.0 for pre-mixing behavior"
+        ),
+    )
+    parser.add_argument(
+        "--expert-mix-beta-end",
+        type=float,
+        default=0.0,
+        help="final expert-action probability at the last DAgger aggregation round",
+    )
+    parser.add_argument(
+        "--expert-mix-beta-decay-rate",
+        type=float,
+        default=None,
+        help=(
+            "optional additive expert-mix decay per aggregation round (beta_t = max(0, beta_start - rate*t)); "
+            "when set, this overrides --expert-mix-beta-end"
+        ),
+    )
+    parser.add_argument(
+        "--expert-mix-decay-after-success-rate",
+        type=float,
+        default=None,
+        help=(
+            "optional gate: start beta decay only after latest eval success_rate exceeds this threshold "
+            "(e.g. 0.0)"
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-beta-recovery",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "toggle adaptive recovery on eval regressions: when enabled, beta is increased by one "
+            "schedule step after a success-rate drop; when disabled, beta follows a "
+            "monotonic schedule"
         ),
     )
     parser.add_argument(
@@ -817,17 +1000,36 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if (args.repo_id is None) != (args.dataset_root is None):
+        raise ValueError("Provide both --repo-id and --dataset-root together, or omit both for fresh DAgger mode.")
+
+    if args.repo_id is None and args.dataset_root is None:
+        timestamp = time.time_ns()
+        repo_id = default_repo_id_for_system(args.system, timestamp)
+        dataset_root = default_dataset_root_for_system(args.system, timestamp)
+        start_with_aggregation = True
+    else:
+        repo_id = str(args.repo_id)
+        dataset_root = Path(args.dataset_root)
+        start_with_aggregation = False
+
     cfg = LeRobotDaggerConfig(
         system=args.system,
-        experiment_config_path=args.experiment_config,
+        experiment_config_path=args.expert_config,
         lerobot_training_config_path=args.lerobot_train_config,
-        repo_id=args.repo_id,
-        dataset_root=args.dataset_root,
+        repo_id=repo_id,
+        dataset_root=dataset_root,
+        start_with_aggregation=start_with_aggregation,
         planner_name=args.planner,
         dagger_iterations=args.dagger_iterations,
         trajectories_per_iteration=args.trajectories_per_iteration,
         steps_per_trajectory=args.steps_per_trajectory,
         action_noise_std=args.action_noise_std,
+        expert_mix_beta_start=args.expert_mix_beta_start,
+        expert_mix_beta_end=args.expert_mix_beta_end,
+        expert_mix_beta_decay_rate=args.expert_mix_beta_decay_rate,
+        expert_mix_decay_after_success_rate=args.expert_mix_decay_after_success_rate,
+        adaptive_beta_recovery=args.adaptive_beta_recovery,
         train_output_root=args.train_output_root,
         seed=args.seed,
         policy_type=args.policy_type,

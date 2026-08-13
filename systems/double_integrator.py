@@ -41,32 +41,27 @@ class DoubleIntegrator(DynamicsSimulator):
             )
         )
 
-    def step(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
-        state = self.validate_state(state)
-        action = self.validate_action(action)
-        state_view = Euclidean4DState.from_array(state)
-        action_view = Euclidean2DAction.from_array(action).clipped(self.max_action)
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
+        clipped_action = np.clip(action_array, -self.max_action, self.max_action)
 
-        next_pos = (
-            state_view.position
-            + state_view.velocity * self.dt
-            + 0.5 * action_view.as_numpy() * (self.dt**2)
-        )
-        next_vel = state_view.velocity + action_view.as_numpy() * self.dt
+        position = state_array[:2]
+        velocity = state_array[2:4]
+        next_pos = position + velocity * self.dt + 0.5 * clipped_action * (self.dt**2)
+        next_vel = velocity + clipped_action * self.dt
         return np.concatenate([next_pos, next_vel])
 
-    def observe(self, state: np.ndarray) -> np.ndarray:
-        state = self.validate_state(state)
-        state_view = Euclidean4DState.from_array(state)
-        obs = np.concatenate([self.goal - state_view.position, state_view.velocity])
-        return self.validate_observation(obs)
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        obs = np.concatenate([self.goal - state_array[:2], state_array[2:4]])
+        return self.validate_observation(obs) if validate else obs
 
-    def is_done(self, state: np.ndarray) -> bool:
-        state = self.validate_state(state)
-        state_view = Euclidean4DState.from_array(state)
+    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         # Must reach goal and stop moving
-        dist = np.linalg.norm(state_view.position - self.goal)
-        speed = np.linalg.norm(state_view.velocity)
+        dist = np.linalg.norm(state_array[:2] - self.goal)
+        speed = np.linalg.norm(state_array[2:4])
         return dist < self.error_tolerance and speed < self.error_tolerance
 
     def casadi_dynamics(self, x: Any, u: Any):
@@ -116,11 +111,10 @@ class DoubleIntegrator(DynamicsSimulator):
         start_pos = self.goal + offset
         return np.array([start_pos[0], start_pos[1], 0.0, 0.0])
 
-    def invert_obs(self, obs: np.ndarray) -> np.ndarray:
-        obs = self.validate_observation(obs)
-        obs_view = Euclidean4DObservation.from_array(obs)
-        absolute_pos = self.goal - obs_view.goal_relative
-        return np.concatenate([absolute_pos, obs_view.velocity_like])
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+        obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)
+        absolute_pos = self.goal - obs_array[:2]
+        return np.concatenate([absolute_pos, obs_array[2:4]])
 
     @property
     def goal_state(self) -> np.ndarray:
@@ -134,15 +128,12 @@ class DoubleIntegrator(DynamicsSimulator):
                 size=self.goal.shape[0],
             )
 
-    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, torch.Tensor]:
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, np.ndarray]:
         """Package the observation and action into a dictionary for LeRobot"""
         obs = self.validate_observation(obs)
         action = self.validate_action(action)
-        obs_view = Euclidean4DObservation.from_array(obs)
-        action_view = Euclidean2DAction.from_array(action)
         return {
-            "observation.environment_state":
-            torch.from_numpy(obs_view.goal_relative).float(),
-            "observation.state": torch.from_numpy(obs_view.velocity_like).float(),
-            "action": action_view.as_torch(),
+            "observation.environment_state": np.asarray(obs[:2], dtype=np.float32),
+            "observation.state": np.asarray(obs[2:4], dtype=np.float32),
+            "action": np.asarray(action, dtype=np.float32),
         }

@@ -182,24 +182,75 @@ class SimulatorContractTests(unittest.TestCase):
                 f"{name}: action feature sum {action_feature_dim} != nu {simulator.nu}",
             )
 
-    def test_heading_metadata_contract(self) -> None:
+    def test_geometry_metadata_contract(self) -> None:
         simulators = _build_simulators()
-        expected_has_heading = {
-            "single_integrator": False,
-            "double_integrator": False,
-            "unicycle1": True,
-            "unicycle2": True,
-            "multi_robot": False,
+        expected_is_euclidean = {
+            "single_integrator": True,
+            "double_integrator": True,
+            "unicycle1": False,
+            "unicycle2": False,
+            "multi_robot": True,
         }
 
-        for name, expected in expected_has_heading.items():
+        for name, expected in expected_is_euclidean.items():
             self.assertIn(name, simulators)
             simulator = simulators[name]
             self.assertEqual(
-                bool(simulator.has_heading),
+                bool(simulator.is_euclidean),
                 expected,
-                f"{name}: has_heading mismatch",
+                f"{name}: is_euclidean mismatch",
             )
+
+    def test_angular_state_indices_contract(self) -> None:
+        simulators = _build_simulators()
+        expected_angular_state_indices = {
+            "single_integrator": (),
+            "double_integrator": (),
+            "unicycle1": (2,),
+            "unicycle2": (2,),
+            "multi_robot": (),
+        }
+
+        for name, expected in expected_angular_state_indices.items():
+            self.assertIn(name, simulators)
+            simulator = simulators[name]
+            self.assertEqual(
+                tuple(simulator.angular_state_indices),
+                expected,
+                f"{name}: angular_state_indices mismatch",
+            )
+
+    def test_multi_robot_non_euclidean_geometry_metadata(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": 0.05,
+                "d_safe": 0.1,
+                "robots": [
+                    {
+                        "system": "unicycle2",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [0.0, 0.0, 0.0],
+                            "randomize_goal": False,
+                            "randomize_initial_velocity": False,
+                        },
+                    },
+                    {
+                        "system": "unicycle2",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [1.0, -1.0, 0.0],
+                            "randomize_goal": False,
+                            "randomize_initial_velocity": False,
+                        },
+                    },
+                ],
+            },
+        )
+
+        self.assertFalse(bool(simulator.is_euclidean))
+        self.assertEqual(tuple(simulator.angular_state_indices), (2, 7))
 
     def test_heading_system_boundary_roundtrip_preserves_so2_state(self) -> None:
         simulators = _build_simulators()
@@ -295,6 +346,32 @@ class SimulatorContractTests(unittest.TestCase):
         self.assertEqual(validated["goal_position_bounds"], [-1.0, 1.0])
         self.assertTrue(np.all(simulator.goal[:2] >= -1.0))
         self.assertTrue(np.all(simulator.goal[:2] <= 1.0))
+
+    def test_planar_start_offset_is_area_uniform_on_annulus(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="single_integrator",
+            config={
+                "dt": 0.05,
+                "goal": [0.0, 0.0],
+                "randomize_goal": False,
+            },
+        )
+
+        radius_min = 0.25
+        radius_max = 1.0
+        rng = np.random.default_rng(17)
+        radii_sq = []
+        for _ in range(4000):
+            offset = simulator.sample_planar_start_offset(
+                rng,
+                radius_bounds=(radius_min, radius_max),
+                min_goal_distance=radius_min,
+            )
+            radii_sq.append(float(np.dot(offset, offset)))
+
+        empirical_mean = float(np.mean(np.asarray(radii_sq, dtype=float)))
+        expected_mean = 0.5 * (radius_min**2 + radius_max**2)
+        self.assertAlmostEqual(empirical_mean, expected_mean, delta=0.02)
 
     def test_seeded_reset_random_respects_configured_start_region(self) -> None:
         def position_distance_to_goal(simulator: DynamicsProtocol, state: np.ndarray) -> float:

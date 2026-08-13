@@ -7,6 +7,7 @@ randomize_goal: false
 db_lacam:
   mode: open_loop
   time_limit_ms: 60000
+  algorithm_config: planning/dblacam_algorithm_default.yaml
 
   environment:
     min: [-6.0, -6.0]

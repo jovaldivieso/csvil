@@ -7,6 +7,9 @@ from typing import Any, Mapping
 import yaml
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 class ConfigurationError(ValueError):
     """Raised when an experiment configuration is missing or malformed."""
 
@@ -86,7 +89,10 @@ class Unicycle2SystemConfig:
     max_accel: float = 0.25
     max_speed: float = 0.5
     max_omega: float = 0.5
-    error_tolerance: float = 0.05
+    pos_tol: float = 0.05
+    theta_tol: float = 0.05
+    vel_tol: float = 0.05
+    omega_tol: float = 0.05
     goal_sampling: GoalSamplingConfig = GoalSamplingConfig()
     initial_state_sampling: InitialStateSamplingConfig = InitialStateSamplingConfig(
         position_radius_bounds=(0.05, 1.0),
@@ -98,6 +104,7 @@ class Unicycle2SystemConfig:
 class MultiRobotMemberConfig:
     system: str
     config: dict[str, Any]
+    start: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +115,11 @@ class MultiRobotSystemConfig:
     inter_robot_visibility_radius: float | tuple[float, ...] = float("inf")
     error_tolerance: float = 0.05
     initial_state_seed: int | None = None
+
+
+@dataclass(frozen=True)
+class MLPArchitectureConfig:
+    hidden_dims: tuple[int, ...] = (256, 256, 128)
 
 
 def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
@@ -122,6 +134,43 @@ def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ConfigurationError(f"Expected YAML mapping in {path}, got {type(data).__name__}.")
     return data
+
+
+def validate_mlp_architecture_config(raw_config: Mapping[str, Any]) -> MLPArchitectureConfig:
+    """Validate MLP architecture YAML for custom DAgger training."""
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ConfigurationError(
+            "MLP config must be a mapping with either a top-level 'hidden_dims' key "
+            "or a nested 'model.hidden_dims' key."
+        )
+
+    hidden_dims_raw = model_section.get("hidden_dims")
+    if hidden_dims_raw is None:
+        raise ConfigurationError(
+            "Missing 'hidden_dims' in MLP config. "
+            "Expected e.g. model: {hidden_dims: [256, 256, 128]}."
+        )
+    if not isinstance(hidden_dims_raw, list) or len(hidden_dims_raw) == 0:
+        raise ConfigurationError("'hidden_dims' must be a non-empty list of positive integers.")
+
+    hidden_dims: list[int] = []
+    for idx, width in enumerate(hidden_dims_raw):
+        if isinstance(width, bool) or not isinstance(width, int):
+            raise ConfigurationError(
+                f"'hidden_dims[{idx}]' must be int, got {type(width).__name__}."
+            )
+        if width <= 0:
+            raise ConfigurationError(f"'hidden_dims[{idx}]' must be positive.")
+        hidden_dims.append(int(width))
+
+    return MLPArchitectureConfig(hidden_dims=tuple(hidden_dims))
+
+
+def load_and_validate_mlp_architecture_config(config_path: str | Path) -> MLPArchitectureConfig:
+    """Load and validate custom MLP architecture YAML."""
+    raw = load_yaml_config(config_path)
+    return validate_mlp_architecture_config(raw)
 
 
 def _float(config: Mapping[str, Any], key: str, default: float) -> float:
@@ -220,12 +269,12 @@ def _positive_vector(raw: Any, key: str, size: int) -> tuple[float, ...]:
 def _initial_state_sampling(
     raw_config: Mapping[str, Any],
     *,
-    error_tolerance: float,
+    default_min_goal_distance: float,
 ) -> InitialStateSamplingConfig:
     min_goal_distance = _float(
         raw_config,
         "initial_position_min_goal_distance",
-        error_tolerance,
+        default_min_goal_distance,
     )
     if min_goal_distance < 0:
         raise ConfigurationError("'initial_position_min_goal_distance' must be non-negative.")
@@ -263,6 +312,264 @@ def _goal_sampling(raw_config: Mapping[str, Any]) -> GoalSamplingConfig:
     if lower >= upper:
         raise ConfigurationError("'goal_position_bounds[0]' must be smaller than 'goal_position_bounds[1]'.")
     return GoalSamplingConfig(position_bounds=position_bounds)
+
+
+def _state_dimension_for_system(system_name: str) -> int:
+    if system_name == "single_integrator":
+        return 2
+    if system_name == "double_integrator":
+        return 4
+    if system_name == "unicycle1":
+        return 3
+    if system_name == "unicycle2":
+        return 5
+    raise ConfigurationError(f"Unknown system '{system_name}' when validating robot start state.")
+
+
+def _require_only_known_keys(raw: Mapping[str, Any], allowed_keys: set[str], *, context: str) -> None:
+    unknown_keys = sorted(key for key in raw.keys() if key not in allowed_keys)
+    if unknown_keys:
+        formatted = ", ".join(f"'{key}'" for key in unknown_keys)
+        raise ConfigurationError(f"Unknown keys in {context}: {formatted}.")
+
+
+def _allowed_system_config_keys(system_name: str) -> set[str]:
+    common_keys = {
+        "dt",
+        "horizon",
+        "mode",
+        "Q_diag",
+        "R_weight",
+        "R_diag",
+        "terminal_cost_multiplier",
+        "collision_slack_penalty_weight",
+        "initial_state_seed",
+        "action_noise_seed",
+        "done_hold_steps",
+        "environment",
+        "db_lacam",
+        "start",
+    }
+
+    if system_name == "single_integrator":
+        return common_keys | {
+            "goal",
+            "randomize_goal",
+            "max_vel",
+            "error_tolerance",
+            "goal_position_bounds",
+            "initial_position_min_goal_distance",
+            "initial_position_radius_bounds",
+        }
+    if system_name == "double_integrator":
+        return common_keys | {
+            "goal",
+            "randomize_goal",
+            "max_accel",
+            "error_tolerance",
+            "goal_position_bounds",
+            "initial_position_min_goal_distance",
+            "initial_position_radius_bounds",
+        }
+    if system_name == "unicycle1":
+        return common_keys | {
+            "goal",
+            "randomize_goal",
+            "max_v",
+            "error_tolerance",
+            "goal_position_bounds",
+            "initial_position_min_goal_distance",
+            "initial_position_radius_bounds",
+        }
+    if system_name == "unicycle2":
+        return common_keys | {
+            "goal",
+            "randomize_goal",
+            "randomize_initial_velocity",
+            "max_accel",
+            "max_speed",
+            "max_omega",
+            "error_tolerance",
+            "pos_tol",
+            "theta_tol",
+            "vel_tol",
+            "omega_tol",
+            "goal_position_bounds",
+            "initial_position_min_goal_distance",
+            "initial_position_radius_bounds",
+        }
+    raise ConfigurationError(f"Unknown system '{system_name}' when validating YAML keys.")
+
+
+def _allowed_multi_robot_keys() -> set[str]:
+    return {
+        "dt",
+        "d_safe",
+        "robots",
+        "inter_robot_visibility_radius",
+        "error_tolerance",
+        "initial_state_seed",
+        "action_noise_seed",
+        "done_hold_steps",
+        "horizon",
+        "mode",
+        "Q_diag",
+        "R_weight",
+        "R_diag",
+        "R_weight_per_robot",
+        "terminal_cost_multiplier",
+        "collision_slack_penalty_weight",
+        "environment",
+        "db_lacam",
+    }
+
+
+def _allowed_multi_robot_entry_keys() -> set[str]:
+    return {"system", "start", "config"}
+
+
+def _validate_environment_config(raw_environment: Any, *, key_name: str) -> dict[str, Any]:
+    if not isinstance(raw_environment, Mapping):
+        raise ConfigurationError(f"'{key_name}' must be a mapping.")
+
+    if "min" not in raw_environment or "max" not in raw_environment:
+        raise ConfigurationError(f"'{key_name}' must define both 'min' and 'max'.")
+
+    environment_min = _vector(raw_environment, "min", 2, (-6.0, -6.0))
+    environment_max = _vector(raw_environment, "max", 2, (6.0, 6.0))
+    if environment_min[0] >= environment_max[0] or environment_min[1] >= environment_max[1]:
+        raise ConfigurationError(f"'{key_name}.min' must be strictly smaller than '{key_name}.max'.")
+
+    obstacles = raw_environment.get("obstacles", [])
+    if not isinstance(obstacles, list):
+        raise ConfigurationError(f"'{key_name}.obstacles' must be a list.")
+
+    validated_environment: dict[str, Any] = {
+        "min": list(environment_min),
+        "max": list(environment_max),
+        "obstacles": list(obstacles),
+    }
+    return validated_environment
+
+
+def _resolve_existing_path(
+    raw_path: str,
+    *,
+    field_name: str,
+    config_dir: Path | None,
+    expect_dir: bool = False,
+    expect_file: bool = False,
+) -> Path:
+    if expect_dir and expect_file:
+        raise ConfigurationError(
+            f"'{field_name}' cannot require both a file and a directory."
+        )
+
+    path = Path(raw_path).expanduser()
+
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        if config_dir is not None:
+            candidates.append(config_dir / path)
+        candidates.append(_REPO_ROOT / path)
+        candidates.append(Path.cwd() / path)
+
+    for candidate in candidates:
+        if expect_dir:
+            if candidate.is_dir():
+                return candidate.resolve()
+        elif expect_file:
+            if candidate.is_file():
+                return candidate.resolve()
+        elif candidate.exists():
+            return candidate.resolve()
+
+    kind = "directory" if expect_dir else "file" if expect_file else "path"
+    raise ConfigurationError(f"'{field_name}' does not exist ({kind}): {raw_path}")
+
+
+def _validate_db_lacam_config(
+    raw_config: Mapping[str, Any],
+    *,
+    config_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    raw_db_lacam = raw_config.get("db_lacam")
+    if raw_db_lacam is None:
+        return None
+    if not isinstance(raw_db_lacam, Mapping):
+        raise ConfigurationError("'db_lacam' must be a mapping.")
+
+    mode = raw_db_lacam.get("mode", "replan")
+    if not isinstance(mode, str):
+        raise ConfigurationError("'db_lacam.mode' must be a string.")
+    mode = mode.lower()
+    if mode not in {"replan", "open_loop"}:
+        raise ConfigurationError("'db_lacam.mode' must be one of {'replan', 'open_loop'}.")
+
+    validated_db_lacam: dict[str, Any] = {"mode": mode}
+
+    replan_freq = raw_db_lacam.get("replan_freq", 5)
+    if not isinstance(replan_freq, int) or isinstance(replan_freq, bool) or replan_freq <= 0:
+        raise ConfigurationError("'db_lacam.replan_freq' must be a positive integer.")
+    validated_db_lacam["replan_freq"] = int(replan_freq)
+
+    time_limit_ms = raw_db_lacam.get("time_limit_ms", 60_000)
+    if not isinstance(time_limit_ms, int) or isinstance(time_limit_ms, bool) or time_limit_ms <= 0:
+        raise ConfigurationError("'db_lacam.time_limit_ms' must be a positive integer.")
+    validated_db_lacam["time_limit_ms"] = int(time_limit_ms)
+
+    algorithm_config = raw_db_lacam.get("algorithm_config")
+    if not isinstance(algorithm_config, str) or algorithm_config.strip() == "":
+        raise ConfigurationError("'db_lacam.algorithm_config' is required and must be a non-empty string.")
+    validated_db_lacam["algorithm_config"] = str(
+        _resolve_existing_path(
+            algorithm_config,
+            field_name="db_lacam.algorithm_config",
+            config_dir=config_dir,
+            expect_file=True,
+        )
+    )
+
+    executable = raw_db_lacam.get("executable")
+    if executable is not None:
+        if not isinstance(executable, str) or executable.strip() == "":
+            raise ConfigurationError("'db_lacam.executable' must be a non-empty string when provided.")
+        validated_db_lacam["executable"] = str(
+            _resolve_existing_path(
+                executable,
+                field_name="db_lacam.executable",
+                config_dir=config_dir,
+                expect_file=True,
+            )
+        )
+
+    cwd = raw_db_lacam.get("cwd")
+    if cwd is not None:
+        if not isinstance(cwd, str) or cwd.strip() == "":
+            raise ConfigurationError("'db_lacam.cwd' must be a non-empty string when provided.")
+        validated_db_lacam["cwd"] = str(
+            _resolve_existing_path(
+                cwd,
+                field_name="db_lacam.cwd",
+                config_dir=config_dir,
+                expect_dir=True,
+            )
+        )
+
+    raise_planning_error = raw_db_lacam.get("raise_planning_error", True)
+    if not isinstance(raise_planning_error, bool):
+        raise ConfigurationError("'db_lacam.raise_planning_error' must be bool.")
+    validated_db_lacam["raise_planning_error"] = raise_planning_error
+
+    if "environment" in raw_db_lacam:
+        validated_db_lacam["environment"] = _validate_environment_config(
+            raw_db_lacam["environment"],
+            key_name="db_lacam.environment",
+        )
+
+    return validated_db_lacam
 
 
 def _parse_r_weight_per_robot(
@@ -303,6 +610,36 @@ def _parse_r_weight_per_robot(
         )
 
     return tuple(normalized)
+
+
+def _validate_multi_robot_start(
+    robot_idx: int,
+    robot_system: str,
+    robot_entry: Mapping[str, Any],
+    robot_cfg_raw: Mapping[str, Any],
+) -> tuple[float, ...] | None:
+    expected_dim = _state_dimension_for_system(robot_system)
+
+    start_from_top = robot_entry.get("start")
+    start_from_cfg = robot_cfg_raw.get("start")
+
+    if start_from_top is None and start_from_cfg is None:
+        return None
+
+    validated_start: tuple[float, ...] | None = None
+
+    if start_from_top is not None:
+        validated_start = _vector(robot_entry, "start", expected_dim, tuple([0.0] * expected_dim))
+
+    if start_from_cfg is not None:
+        cfg_start = _vector(robot_cfg_raw, "start", expected_dim, tuple([0.0] * expected_dim))
+        if validated_start is not None and cfg_start != validated_start:
+            raise ConfigurationError(
+                f"'robots[{robot_idx}].start' and 'robots[{robot_idx}].config.start' must match when both are provided."
+            )
+        validated_start = cfg_start
+
+    return validated_start
 
 
 def _validate_planner(
@@ -360,37 +697,26 @@ def _validate_planner(
         raise ConfigurationError("'collision_slack_penalty_weight' must be positive.")
     return planner
 
-def _preserve_environment_config(raw_config: Mapping[str, Any], config_out: dict[str, Any]) -> None:
-    environment = raw_config.get("environment")
-
-    if environment is None:
-        return
-    if not isinstance(environment, Mapping):
-        raise ConfigurationError("'environment' must be a mapping.")
-
-    config_out["environment"] = dict(environment)
-    
-def _preserve_db_lacam_config(raw_config: Mapping[str, Any], config_out: dict[str, Any]) -> None:
-    
-    db_lacam_config = raw_config.get("db_lacam")
-
-    if db_lacam_config is None:
-        return
-
-    if not isinstance(db_lacam_config, Mapping):
-        raise ConfigurationError("'db_lacam' must be a mapping.")
-
-    config_out["db_lacam"] = dict(db_lacam_config)
-    
 def load_and_validate_system_config(system_name: str, config_path: str | Path) -> dict[str, Any]:
     """Load YAML config and return a validated config dictionary for a system."""
     raw = load_yaml_config(config_path)
-    return validate_system_config(system_name=system_name, raw_config=raw)
+    return validate_system_config(
+        system_name=system_name,
+        raw_config=raw,
+        config_dir=Path(config_path).expanduser().resolve().parent,
+    )
 
 
-def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> dict[str, Any]:
+def validate_system_config(
+    system_name: str,
+    raw_config: Mapping[str, Any],
+    *,
+    config_dir: Path | None = None,
+) -> dict[str, Any]:
     """Validate system and planner fields, returning normalized config values."""
     if system_name == "multi_robot":
+        _require_only_known_keys(raw_config, _allowed_multi_robot_keys(), context="'multi_robot' config")
+
         dt = _float(raw_config, "dt", 0.05)
         if dt <= 0:
             raise ConfigurationError("'dt' must be positive.")
@@ -447,6 +773,8 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
                     f"'robots[{robot_idx}]' must be a mapping with keys 'system' and 'config'."
                 )
 
+            _require_only_known_keys(robot_entry, _allowed_multi_robot_entry_keys(), context=f"'robots[{robot_idx}]'")
+
             robot_system = robot_entry.get("system")
             if not isinstance(robot_system, str):
                 raise ConfigurationError(f"'robots[{robot_idx}].system' must be a string.")
@@ -458,12 +786,33 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             if not isinstance(robot_cfg_raw, Mapping):
                 raise ConfigurationError(f"'robots[{robot_idx}].config' must be a mapping.")
 
+            _require_only_known_keys(
+                robot_cfg_raw,
+                _allowed_system_config_keys(robot_system),
+                context=f"'robots[{robot_idx}].config'",
+            )
+
+            robot_start = _validate_multi_robot_start(
+                robot_idx=robot_idx,
+                robot_system=robot_system,
+                robot_entry=robot_entry,
+                robot_cfg_raw=robot_cfg_raw,
+            )
+
             robot_cfg_with_dt = dict(robot_cfg_raw)
             robot_cfg_with_dt.setdefault("dt", dt)
 
-            validated_robot_cfg = validate_system_config(robot_system, robot_cfg_with_dt)
+            validated_robot_cfg = validate_system_config(
+                robot_system,
+                robot_cfg_with_dt,
+                config_dir=config_dir,
+            )
             members.append(
-                MultiRobotMemberConfig(system=robot_system, config=validated_robot_cfg)
+                MultiRobotMemberConfig(
+                    system=robot_system,
+                    config=validated_robot_cfg,
+                    start=robot_start,
+                )
             )
 
             q_diag = validated_robot_cfg.get("Q_diag")
@@ -499,6 +848,7 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
                 {
                     "system": member.system,
                     "config": member.config,
+                    **({"start": list(member.start)} if member.start is not None else {}),
                 }
                 for member in fleet_cfg.robots
             ],
@@ -532,9 +882,15 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         )
         if len(planner_cfg.r_weight_per_robot) > 0:
             config_out["R_weight_per_robot"] = [list(values) for values in planner_cfg.r_weight_per_robot]
-        
-        _preserve_environment_config(raw_config, config_out)
-        _preserve_db_lacam_config(raw_config, config_out)
+
+        if "environment" in raw_config:
+            config_out["environment"] = _validate_environment_config(raw_config["environment"], key_name="environment")
+
+        validated_db_lacam = _validate_db_lacam_config(raw_config, config_dir=config_dir)
+        if validated_db_lacam is not None:
+            config_out["db_lacam"] = validated_db_lacam
+            if "environment" not in config_out and "environment" in validated_db_lacam:
+                config_out["environment"] = validated_db_lacam["environment"]
         
         return config_out
 
@@ -542,9 +898,6 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
     if dt <= 0:
         raise ConfigurationError("'dt' must be positive.")
 
-    error_tolerance = _float(raw_config, "error_tolerance", 0.05)
-    if error_tolerance <= 0:
-        raise ConfigurationError("'error_tolerance' must be positive.")
     done_hold_steps = _optional_positive_int(raw_config, "done_hold_steps")
     action_noise_seed = _resolved_action_noise_seed(raw_config)
 
@@ -552,10 +905,15 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
     nx: int
 
     if system_name == "single_integrator":
+        _require_only_known_keys(raw_config, _allowed_system_config_keys(system_name), context="'single_integrator' config")
+
+        error_tolerance = _float(raw_config, "error_tolerance", 0.05)
+        if error_tolerance <= 0:
+            raise ConfigurationError("'error_tolerance' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=error_tolerance,
         )
         system_cfg = SingleIntegratorSystemConfig(
             dt=dt,
@@ -585,10 +943,15 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         nu = 2
 
     elif system_name == "double_integrator":
+        _require_only_known_keys(raw_config, _allowed_system_config_keys(system_name), context="'double_integrator' config")
+
+        error_tolerance = _float(raw_config, "error_tolerance", 0.05)
+        if error_tolerance <= 0:
+            raise ConfigurationError("'error_tolerance' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=error_tolerance,
         )
         system_cfg = DoubleIntegratorSystemConfig(
             dt=dt,
@@ -618,10 +981,15 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         nu = 2
 
     elif system_name == "unicycle1":
+        _require_only_known_keys(raw_config, _allowed_system_config_keys(system_name), context="'unicycle1' config")
+
+        error_tolerance = _float(raw_config, "error_tolerance", 0.05)
+        if error_tolerance <= 0:
+            raise ConfigurationError("'error_tolerance' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=error_tolerance,
         )
         system_cfg = Unicycle1SystemConfig(
             dt=dt,
@@ -651,10 +1019,29 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
         nu = 2
 
     elif system_name == "unicycle2":
+        _require_only_known_keys(raw_config, _allowed_system_config_keys(system_name), context="'unicycle2' config")
+
+        if "error_tolerance" in raw_config:
+            raise ConfigurationError(
+                "'error_tolerance' is not supported for 'unicycle2'. "
+                "Use 'pos_tol', 'theta_tol', 'vel_tol', and 'omega_tol'."
+            )
+        pos_tol = _float(raw_config, "pos_tol", 0.05)
+        theta_tol = _float(raw_config, "theta_tol", 0.05)
+        vel_tol = _float(raw_config, "vel_tol", 0.05)
+        omega_tol = _float(raw_config, "omega_tol", 0.05)
+        if pos_tol <= 0:
+            raise ConfigurationError("'pos_tol' must be positive.")
+        if theta_tol <= 0:
+            raise ConfigurationError("'theta_tol' must be positive.")
+        if vel_tol <= 0:
+            raise ConfigurationError("'vel_tol' must be positive.")
+        if omega_tol <= 0:
+            raise ConfigurationError("'omega_tol' must be positive.")
         goal_sampling = _goal_sampling(raw_config)
         initial_state_sampling = _initial_state_sampling(
             raw_config,
-            error_tolerance=error_tolerance,
+            default_min_goal_distance=pos_tol,
         )
         system_cfg = Unicycle2SystemConfig(
             dt=dt,
@@ -664,7 +1051,10 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             max_accel=_float(raw_config, "max_accel", 0.25),
             max_speed=_float(raw_config, "max_speed", 0.5),
             max_omega=_float(raw_config, "max_omega", 0.5),
-            error_tolerance=error_tolerance,
+            pos_tol=pos_tol,
+            theta_tol=theta_tol,
+            vel_tol=vel_tol,
+            omega_tol=omega_tol,
             goal_sampling=goal_sampling,
             initial_state_sampling=initial_state_sampling,
         )
@@ -679,7 +1069,10 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "max_accel": system_cfg.max_accel,
             "max_speed": system_cfg.max_speed,
             "max_omega": system_cfg.max_omega,
-            "error_tolerance": system_cfg.error_tolerance,
+            "pos_tol": system_cfg.pos_tol,
+            "theta_tol": system_cfg.theta_tol,
+            "vel_tol": system_cfg.vel_tol,
+            "omega_tol": system_cfg.omega_tol,
             "action_noise_seed": action_noise_seed,
             "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
             "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
@@ -704,9 +1097,16 @@ def validate_system_config(system_name: str, raw_config: Mapping[str, Any]) -> d
             "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
         }
     )
-    
-    _preserve_environment_config(raw_config, config_out)
-    _preserve_db_lacam_config(raw_config, config_out)
+
+    if "environment" in raw_config:
+        config_out["environment"] = _validate_environment_config(raw_config["environment"], key_name="environment")
+
+    validated_db_lacam = _validate_db_lacam_config(raw_config, config_dir=config_dir)
+    if validated_db_lacam is not None:
+        config_out["db_lacam"] = validated_db_lacam
+        if "environment" not in config_out and "environment" in validated_db_lacam:
+            config_out["environment"] = validated_db_lacam["environment"]
+
     if done_hold_steps is not None:
         config_out["done_hold_steps"] = done_hold_steps
     return config_out
