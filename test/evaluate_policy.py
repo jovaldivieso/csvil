@@ -703,6 +703,7 @@ def run_evaluation(
         path_labels=path_labels,
         trajectory_colors=trajectory_colors,
         trajectory_line_styles=trajectory_line_styles,
+        phase_lengths=[num_expert, num_policy],
     )
     if video_path is not None:
         print(f"Video saved to {video_path}")
