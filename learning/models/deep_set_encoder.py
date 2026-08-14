@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
 
 
-def build_mlp(dims: list[int], activation: nn.Module = nn.ReLU()) -> nn.Sequential:
+def build_mlp(
+    dims: list[int],
+    activation_factory: Callable[[], nn.Module] = nn.ReLU,
+) -> nn.Sequential:
     if len(dims) < 2:
         raise ValueError("'dims' must contain at least an input and output width.")
 
@@ -19,7 +22,7 @@ def build_mlp(dims: list[int], activation: nn.Module = nn.ReLU()) -> nn.Sequenti
 
         layers.append(nn.Linear(in_dim, out_dim))
         if layer_idx < len(dims) - 2:
-            layers.append(activation)
+            layers.append(activation_factory())
 
     return nn.Sequential(*layers)
 
@@ -68,8 +71,7 @@ class DeepSetEncoder(nn.Module):
             return torch.zeros((batch_size, self.out_dim), device=x.device, dtype=x.dtype)
 
         mask_bool = mask.bool()
-        if mask_bool.numel() == 0 or not bool(mask_bool.any().item()):
-            return torch.zeros((batch_size, self.out_dim), device=x.device, dtype=x.dtype)
+        row_has_visible = mask_bool.any(dim=(1, 2))
 
         phi_out = self.phi(x)
 
@@ -86,4 +88,5 @@ class DeepSetEncoder(nn.Module):
             valid_counts = mask_bool.sum(dim=1).clamp(min=1).to(dtype=x.dtype)
             pooled_out = summed / valid_counts
 
-        return self.rho(pooled_out)
+        context = self.rho(pooled_out)
+        return context.masked_fill(~row_has_visible.unsqueeze(-1), 0.0)

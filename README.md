@@ -105,14 +105,15 @@ csvil/
 │   │   ├── multi_double_integrator_casadi_diffusion_policy_config.yaml
 │   │   └── multi_unicycle2_casadi_mlp_config.yaml
 │   ├── models/
-│   │   └── mlp.py             # Custom MLP policy used for BC/DAgger
+│   │   ├── deep_set_encoder.py # Permutation-invariant neighbor-set encoder
+│   │   └── mlp_policy.py       # Custom MLP action policy used for BC/DAgger
 │   ├── dagger.py              # Shared DAgger rollout/evaluation/scheduling helpers
 │   ├── train_dagger.py        # Iterative DAgger for the custom MLP baseline
 │   └── train_lerobot_dagger.py  # LeRobot ACT / Diffusion training and DAgger entrypoint
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
 │   ├── casadi_planner.py      # CasADi planner implementation
-│   └── dblacam_planner.py     # db-lacam planner implementation
+│   └── dblacam_planner.py     # db-LaCAM planner implementation
 ├── systems/
 │   ├── dynamics.py            # Base simulator protocol and validation
 │   ├── double_integrator.py   # Example simulator subclass (holonomic)

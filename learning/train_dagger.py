@@ -29,12 +29,10 @@ from learning.dagger import (
     DaggerEvalMetrics,
     ExpertMixBetaController,
     action_feature_names,
-    apply_execution_noise,
     build_deep_set_joint_action,
     build_observation_feature_pack_cache,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
-    observation_dim_from_features,
     observation_feature_names,
     pack_observation_features_from_cache,
     print_rollout_metrics,
@@ -43,7 +41,7 @@ from learning.dagger import (
     set_seed,
     with_seeded_initial_state_config,
 )
-from learning.models.mlp import MLPPolicy
+from learning.models.mlp_policy import MLPPolicy
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
@@ -52,6 +50,7 @@ from systems.seed_utils import (
 
 
 DEFAULT_MLP_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 128)
+StructuredObservation = dict[str, torch.Tensor]
 
 
 def get_training_device() -> torch.device:
@@ -102,7 +101,7 @@ class LeRobotMLPDataset(Dataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor | StructuredObservation, torch.Tensor]:
         sample = self.dataset[idx]
         if self.use_deep_set:
             ego_parts = [sample[name].float().view(-1) for name in self.obs_feature_names if name in {"observation.environment_state", "observation.state"}]

@@ -484,7 +484,10 @@ def collect_dagger_rollouts(
     expert_mixing_beta: float,
     policy_action_fn: Callable[[np.ndarray], np.ndarray] | None,
     policy_reset_fn: Callable[[], None] | None = None,
-    frame_builder: Callable[[np.ndarray, np.ndarray], dict[str, object]] | None = None,
+    frame_builder: Callable[
+        [np.ndarray, np.ndarray],
+        Mapping[str, object] | list[Mapping[str, object]] | tuple[Mapping[str, object], ...],
+    ] | None = None,
 ) -> DaggerEvalMetrics:
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
     if policy_action_fn is None and expert_mixing_beta < 1.0:
@@ -548,7 +551,7 @@ def collect_dagger_rollouts(
 
         reached_goal = False
         rollout_steps = steps_per_trajectory
-        episode_frames: list[dict[str, object]] = []
+        episode_frame_buffers: list[list[dict[str, object]]] | None = None
 
         for step in range(1, steps_per_trajectory + 1):
             observation = simulator.observe(state, validate=False)
@@ -573,9 +576,35 @@ def collect_dagger_rollouts(
 
             built_frame = frame_builder(observation, expert_action)
             if isinstance(built_frame, (list, tuple)):
-                episode_frames.extend([ensure_task_field(dict(frame)) for frame in built_frame])
+                if episode_frame_buffers is None:
+                    episode_frame_buffers = [[] for _ in built_frame]
+                elif len(episode_frame_buffers) != len(built_frame):
+                    raise ValueError(
+                        "'frame_builder' must return the same number of per-robot frames "
+                        "at every rollout step."
+                    )
+
+                for robot_idx, frame in enumerate(built_frame):
+                    if not isinstance(frame, Mapping):
+                        raise TypeError(
+                            "'frame_builder' list/tuple items must be mappings, "
+                            f"got {type(frame).__name__}."
+                        )
+                    episode_frame_buffers[robot_idx].append(ensure_task_field(dict(frame)))
+            elif isinstance(built_frame, Mapping):
+                if episode_frame_buffers is None:
+                    episode_frame_buffers = [[]]
+                elif len(episode_frame_buffers) != 1:
+                    raise ValueError(
+                        "'frame_builder' cannot switch between per-robot and single-frame "
+                        "outputs within one rollout."
+                    )
+                episode_frame_buffers[0].append(ensure_task_field(dict(built_frame)))
             else:
-                episode_frames.append(ensure_task_field(dict(built_frame)))
+                raise TypeError(
+                    "'frame_builder' must return a mapping or a list/tuple of mappings, "
+                    f"got {type(built_frame).__name__}."
+                )
 
             use_expert_action = bool(episode_expert_mixing_rng.random() < expert_mixing_beta)
             policy_action = None
@@ -606,9 +635,12 @@ def collect_dagger_rollouts(
         if planner_failed:
             continue
 
-        for frame_data in episode_frames:
-            dataset_writer.add_frame(frame_data)
-        dataset_writer.save_episode()
+        if episode_frame_buffers is None:
+            raise RuntimeError("'frame_builder' produced no frames for the rollout.")
+        for frame_buffer in episode_frame_buffers:
+            for frame_data in frame_buffer:
+                dataset_writer.add_frame(frame_data)
+            dataset_writer.save_episode()
         successful_episodes += 1
         reached_goal_count += int(reached_goal)
         steps_taken.append(int(rollout_steps))

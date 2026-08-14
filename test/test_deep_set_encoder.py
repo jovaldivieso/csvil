@@ -54,6 +54,29 @@ class DeepSetEncoderTests(unittest.TestCase):
 
         self.assertFalse(torch.allclose(visible_output, hidden_output))
 
+    def test_all_masked_rows_return_zero_context_without_nan_gradients(self) -> None:
+        torch.manual_seed(11)
+        encoder = DeepSetEncoder(
+            in_features=2,
+            phi_dims=[8, 8],
+            rho_dims=[4],
+            pool_type="mean",
+        )
+        x = torch.randn((2, 3, 2), requires_grad=True)
+        mask = torch.tensor(
+            [
+                [[0.0], [0.0], [0.0]],
+                [[1.0], [0.0], [0.0]],
+            ]
+        )
+
+        output = encoder(x, mask)
+        self.assertTrue(torch.equal(output[0], torch.zeros_like(output[0])))
+        self.assertTrue(torch.isfinite(output).all())
+
+        output.sum().backward()
+        self.assertTrue(torch.isfinite(x.grad).all())
+
 
 class MultiRobotMaskSemanticsTests(unittest.TestCase):
     def test_decentralized_observation_distinguishes_zero_distance_from_invisible_neighbor(self) -> None:

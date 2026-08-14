@@ -24,7 +24,7 @@ from systems.seed_utils import (
 )
 from planning.casadi_planner import PlannerSolveError
 from learning.dagger import build_deep_set_joint_action, uses_deep_set_policy
-from learning.models.mlp import MLPPolicy
+from learning.models.mlp_policy import MLPPolicy
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 
@@ -425,15 +425,33 @@ def run_evaluation(
             else:
                 deepset_rho_dims = (128,)
             deepset_pool_type = str(checkpoint.get("deepset_pool_type", "max"))
+            if not use_deep_set:
+                neighbor_feature_dim = None
+                neighbor_slots = 0
         else:
             state_dict = checkpoint
             hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
             use_deep_set = False
-            neighbor_feature_dim = None
-            neighbor_slots = 0
             deepset_phi_dims = (128, 128)
             deepset_rho_dims = (128,)
             deepset_pool_type = "max"
+
+            linear_weights = [
+                (int(key.split(".")[1]), value)
+                for key, value in state_dict.items()
+                if key.startswith("network.")
+                and key.endswith(".weight")
+                and value.ndim == 2
+                and key.split(".")[1].isdigit()
+            ]
+            if not linear_weights:
+                raise ValueError("Legacy MLP checkpoint does not contain network linear weights.")
+
+            linear_weights.sort(key=lambda item: item[0])
+            state_dim = int(linear_weights[0][1].shape[1])
+            action_dim = int(linear_weights[-1][1].shape[0])
+            neighbor_feature_dim = None
+            neighbor_slots = 0
 
         policy = MLPPolicy(
             state_dim=state_dim,

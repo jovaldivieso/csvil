@@ -38,6 +38,10 @@ class MLPPolicy(nn.Module):
             raise ValueError(
                 "'neighbor_feature_dim' must be provided when 'neighbor_slots' is positive."
             )
+        if neighbor_feature_dim is not None and len(deepset_phi_dims) == 0:
+            raise ValueError("'deepset_phi_dims' must contain at least one layer width in deep-set mode.")
+        if neighbor_feature_dim is not None and len(deepset_rho_dims) == 0:
+            raise ValueError("'deepset_rho_dims' must contain at least one layer width in deep-set mode.")
 
         self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
@@ -110,6 +114,28 @@ class MLPPolicy(nn.Module):
             if neighbor_mask is None and "observation.neighbor_mask" in observation_tensor:
                 neighbor_mask = observation_tensor["observation.neighbor_mask"]
 
+            if ego.ndim == 1:
+                ego = ego.unsqueeze(0)
+            if self.use_deepset and neighbor_obs is not None and neighbor_mask is not None:
+                if neighbor_obs.ndim == 1:
+                    neighbor_obs = neighbor_obs.unsqueeze(0)
+                if neighbor_mask.ndim == 1:
+                    neighbor_mask = neighbor_mask.unsqueeze(0)
+
+                batch_size = ego.shape[0]
+                if self.neighbor_slots == 0:
+                    neighbor_obs = neighbor_obs.reshape(batch_size, 0, self.neighbor_input_dim)
+                    neighbor_mask = neighbor_mask.reshape(batch_size, 0, 1)
+                else:
+                    if neighbor_obs.ndim == 2:
+                        neighbor_obs = neighbor_obs.reshape(
+                            batch_size,
+                            self.neighbor_slots,
+                            self.neighbor_input_dim,
+                        )
+                    if neighbor_mask.ndim == 2:
+                        neighbor_mask = neighbor_mask.reshape(batch_size, self.neighbor_slots, 1)
+
             return ego, neighbor_obs, neighbor_mask
 
         if observation_tensor.ndim == 1:
@@ -139,7 +165,10 @@ class MLPPolicy(nn.Module):
 
         return ego, neighbor_obs, neighbor_mask
 
-    def forward(self, observation_tensor: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        observation_tensor: torch.Tensor | Mapping[str, torch.Tensor],
+    ) -> torch.Tensor:
         ego_obs, neighbor_obs, neighbor_mask = self._split_structured_observation(observation_tensor)
 
         if self.use_deepset:

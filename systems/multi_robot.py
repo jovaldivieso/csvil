@@ -256,8 +256,6 @@ class MultiRobotSimulator(DynamicsSimulator):
         for robot_idx, (sim, robot_state) in enumerate(zip(self.simulators, split_state)):
             base_obs = sim.observe(robot_state, validate=False)
             env_dim = self.robot_env_dims[robot_idx]
-            rel_dim = self.robot_relative_dims[robot_idx]
-            mask_dim = self.robot_neighbor_mask_dims[robot_idx]
             base_env = base_obs[:env_dim]
             base_proprio = base_obs[env_dim:]
 
