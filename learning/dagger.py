@@ -196,6 +196,7 @@ class ObservationFeaturePackCache:
 def build_observation_feature_pack_cache(
     simulator: DynamicsProtocol,
     feature_names: list[str],
+    allow_schema_subset: bool = False,
 ) -> ObservationFeaturePackCache:
     dataset_features = simulator.get_dataset_features()
     schema_observation_features = tuple(
@@ -205,7 +206,7 @@ def build_observation_feature_pack_cache(
     )
     provided_feature_names = tuple(feature_names)
 
-    if provided_feature_names != schema_observation_features:
+    if not allow_schema_subset and provided_feature_names != schema_observation_features:
         mismatch_index = next(
             (
                 idx

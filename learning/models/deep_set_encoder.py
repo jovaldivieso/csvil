@@ -60,6 +60,8 @@ class DeepSetEncoder(nn.Module):
             raise ValueError(f"'x' must have shape (B, K, D), got {tuple(x.shape)}.")
         if mask.ndim != 3:
             raise ValueError(f"'mask' must have shape (B, K, 1), got {tuple(mask.shape)}.")
+        if mask.shape[2] != 1:
+            raise ValueError(f"'mask' must have shape (B, K, 1), got {tuple(mask.shape)}.")
         if x.shape[0] != mask.shape[0] or x.shape[1] != mask.shape[1]:
             raise ValueError(
                 "'x' and 'mask' must agree on batch and neighbor dimensions: "

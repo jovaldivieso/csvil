@@ -23,7 +23,11 @@ from systems.seed_utils import (
     default_seed_argument_for_simulator,
 )
 from planning.casadi_planner import PlannerSolveError
-from learning.dagger import build_deep_set_joint_action, uses_deep_set_policy
+from learning.dagger import (
+    build_deep_set_joint_action,
+    build_observation_feature_pack_cache,
+    uses_deep_set_policy,
+)
 from learning.models.mlp_policy import MLPPolicy
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
@@ -46,28 +50,29 @@ def is_observation_feature(feature_name: str) -> bool:
 
 
 def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, ...]:
-    """Infer hidden layer widths from MLP Sequential Linear layer weights."""
-    linear_layers: list[tuple[int, int]] = []
-    for key, value in state_dict.items():
-        if key.startswith("network.") and key.endswith(".weight"):
-            parts = key.split(".")
-            if len(parts) != 3:
-                continue
-            try:
-                layer_idx = int(parts[1])
-            except ValueError:
-                continue
-            if value.ndim != 2:
-                continue
-            linear_layers.append((layer_idx, int(value.shape[0])))
-
-    if len(linear_layers) < 2:
-        # Fallback to historical default for legacy checkpoints.
-        return (256, 256, 128)
-
+    linear_layers = [
+        (int(key.split(".")[1]), int(value.shape[0]))
+        for key, value in state_dict.items()
+        if key.startswith("network.")
+        and key.endswith(".weight")
+        and value.ndim == 2
+        and key.split(".")[1].isdigit()
+    ]
     linear_layers.sort(key=lambda item: item[0])
-    # Last Linear maps to action_dim; preceding ones are hidden widths.
+    if len(linear_layers) < 2:
+        raise ValueError("MLP checkpoint does not contain enough network layers to infer its architecture.")
     return tuple(out_dim for _, out_dim in linear_layers[:-1])
+
+
+def infer_mlp_dimensions_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, int]:
+    linear_weights = [
+        value
+        for key, value in state_dict.items()
+        if key.startswith("network.") and key.endswith(".weight") and value.ndim == 2
+    ]
+    if not linear_weights:
+        raise ValueError("MLP checkpoint does not contain network linear weights.")
+    return int(linear_weights[0].shape[1]), int(linear_weights[-1].shape[0])
 
 
 def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
@@ -185,10 +190,12 @@ def create_policy_input(
     )
 
     if observation_feature_cache is None:
-        observation_feature_cache = build_observation_feature_pack_cache(
-            simulator,
-            [feature_name for feature_name in simulator.get_dataset_features().keys() if is_observation_feature(feature_name)],
-        )
+        feature_names = [
+            feature_name
+            for feature_name in simulator.get_dataset_features().keys()
+            if is_observation_feature(feature_name)
+        ]
+        observation_feature_cache = build_observation_feature_pack_cache(simulator, feature_names)
 
     packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
     policy_input: dict[str, torch.Tensor] = {}
@@ -295,6 +302,7 @@ def rollout_policy(
     action_noise_rng: np.random.Generator | None = None,
     policy_preprocessor=None,
     policy_postprocessor=None,
+    observation_feature_cache=None,
 ) -> tuple[np.ndarray, bool, int]:
     """
     Rolls out the neural policy from a given initial state.
@@ -326,6 +334,7 @@ def rollout_policy(
                 observation=observation,
                 device=device,
                 add_batch_dim=policy_preprocessor is None,
+                observation_feature_cache=observation_feature_cache,
             )
             if policy_preprocessor is not None:
                 policy_input = policy_preprocessor(policy_input)
@@ -399,59 +408,31 @@ def run_evaluation(
         action_dim = int(simulator.nu)
 
         checkpoint = torch.load(model_dir, map_location=device)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
+        checkpoint_metadata = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
+        state_dict = checkpoint["model_state_dict"] if checkpoint_metadata else checkpoint
+        if not isinstance(state_dict, Mapping):
+            raise ValueError("MLP checkpoint must contain a state dictionary.")
+
+        state_dim, action_dim = infer_mlp_dimensions_from_state_dict(state_dict)
+        hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+        use_deep_set = bool(checkpoint.get("use_deep_set", False)) if checkpoint_metadata else False
+        neighbor_feature_dim = None
+        neighbor_slots = 0
+        deepset_phi_dims = (128, 128)
+        deepset_rho_dims = (128,)
+        deepset_pool_type = "max"
+        if checkpoint_metadata:
             state_dim = int(checkpoint.get("state_dim", state_dim))
             action_dim = int(checkpoint.get("action_dim", action_dim))
             hidden_dims_raw = checkpoint.get("hidden_dims")
-            if isinstance(hidden_dims_raw, list) and len(hidden_dims_raw) > 0:
+            if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
                 hidden_dims = tuple(int(width) for width in hidden_dims_raw)
-            else:
-                hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-
-            use_deep_set = bool(checkpoint.get("use_deep_set", False))
-            neighbor_feature_dim = checkpoint.get("neighbor_feature_dim")
-            if neighbor_feature_dim is not None:
-                neighbor_feature_dim = int(neighbor_feature_dim)
-            neighbor_slots = int(checkpoint.get("neighbor_slots", 0))
-            deepset_phi_dims_raw = checkpoint.get("deepset_phi_dims")
-            if isinstance(deepset_phi_dims_raw, list) and len(deepset_phi_dims_raw) > 0:
-                deepset_phi_dims = tuple(int(width) for width in deepset_phi_dims_raw)
-            else:
-                deepset_phi_dims = (128, 128)
-            deepset_rho_dims_raw = checkpoint.get("deepset_rho_dims")
-            if isinstance(deepset_rho_dims_raw, list) and len(deepset_rho_dims_raw) > 0:
-                deepset_rho_dims = tuple(int(width) for width in deepset_rho_dims_raw)
-            else:
-                deepset_rho_dims = (128,)
-            deepset_pool_type = str(checkpoint.get("deepset_pool_type", "max"))
-            if not use_deep_set:
-                neighbor_feature_dim = None
-                neighbor_slots = 0
-        else:
-            state_dict = checkpoint
-            hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-            use_deep_set = False
-            deepset_phi_dims = (128, 128)
-            deepset_rho_dims = (128,)
-            deepset_pool_type = "max"
-
-            linear_weights = [
-                (int(key.split(".")[1]), value)
-                for key, value in state_dict.items()
-                if key.startswith("network.")
-                and key.endswith(".weight")
-                and value.ndim == 2
-                and key.split(".")[1].isdigit()
-            ]
-            if not linear_weights:
-                raise ValueError("Legacy MLP checkpoint does not contain network linear weights.")
-
-            linear_weights.sort(key=lambda item: item[0])
-            state_dim = int(linear_weights[0][1].shape[1])
-            action_dim = int(linear_weights[-1][1].shape[0])
-            neighbor_feature_dim = None
-            neighbor_slots = 0
+            if use_deep_set:
+                neighbor_feature_dim = int(checkpoint["neighbor_feature_dim"])
+                neighbor_slots = int(checkpoint["neighbor_slots"])
+                deepset_phi_dims = tuple(int(width) for width in checkpoint["deepset_phi_dims"])
+                deepset_rho_dims = tuple(int(width) for width in checkpoint["deepset_rho_dims"])
+                deepset_pool_type = str(checkpoint["deepset_pool_type"])
 
         policy = MLPPolicy(
             state_dim=state_dim,
@@ -471,6 +452,29 @@ def run_evaluation(
 
     policy.eval()
     policy.to(device)
+
+    mlp_observation_feature_cache = None
+    if policy_type == "mlp" and not policy.use_deepset:
+        dataset_features = simulator.get_dataset_features()
+        current_feature_names = [
+            name for name in dataset_features if is_observation_feature(name)
+        ]
+        saved_feature_names = None
+        if checkpoint_metadata:
+            raw_names = checkpoint.get("obs_feature_names")
+            if isinstance(raw_names, list) and all(isinstance(name, str) for name in raw_names):
+                saved_feature_names = raw_names
+
+        if saved_feature_names is None:
+            saved_feature_names = [
+                name for name in current_feature_names if name != "observation.neighbor_mask"
+            ]
+
+        mlp_observation_feature_cache = build_observation_feature_pack_cache(
+            simulator,
+            saved_feature_names,
+            allow_schema_subset=True,
+        )
 
     if policy_type in {"diffusion", "act"}:
         policy_cfg = PreTrainedConfig.from_pretrained(model_dir)
@@ -588,6 +592,7 @@ def run_evaluation(
             action_noise_rng=policy_action_noise_rng,
             policy_preprocessor=policy_preprocessor,
             policy_postprocessor=policy_postprocessor,
+            observation_feature_cache=mlp_observation_feature_cache,
         )
 
         policy_final_state = policy_trajectory[-1]

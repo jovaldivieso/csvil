@@ -469,8 +469,30 @@ class MultiRobotSimulator(DynamicsSimulator):
         env_dim = int(self.robot_env_dims[0])
         proprio_dim = int(self.robot_proprio_dims[0])
         action_dim = int(self.simulators[0].nu)
+        reference_simulator = self.simulators[0]
+
+        def schema_signature(simulator: DynamicsProtocol) -> tuple[tuple[str, tuple[int, ...], tuple[str, ...]], ...]:
+            signature: list[tuple[str, tuple[int, ...], tuple[str, ...]]] = []
+            for feature_name, feature_info in simulator.get_dataset_features().items():
+                shape = tuple(int(value) for value in feature_info.get("shape", ()))
+                names = tuple(str(name) for name in feature_info.get("names", ()))
+                signature.append((feature_name, shape, names))
+            return tuple(signature)
+
+        reference_signature = schema_signature(reference_simulator)
 
         for robot_idx, sim in enumerate(self.simulators[1:], start=1):
+            if type(sim) is not type(reference_simulator):
+                raise ValueError(
+                    "Decentralized multi-robot policies require identical simulator types; "
+                    f"robot 0 uses {type(reference_simulator).__name__}, "
+                    f"robot {robot_idx} uses {type(sim).__name__}."
+                )
+            if schema_signature(sim) != reference_signature:
+                raise ValueError(
+                    "Decentralized multi-robot policies require identical dataset feature semantics "
+                    "(names and shapes) for every robot."
+                )
             if int(self.robot_env_dims[robot_idx]) != env_dim:
                 raise ValueError(
                     "Decentralized multi-robot policies require homogeneous base environment dimensions."
@@ -486,7 +508,7 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         return env_dim, proprio_dim, action_dim
 
-    def decentralized_policy_observation(self, obs: np.ndarray, robot_id: int) -> dict[str, np.ndarray]:
+    def decentralized_policy_observation(self, obs: np.ndarray, robot_id: int = 0) -> dict[str, np.ndarray]:
         split_obs = self._split_observation(obs)
         if robot_id < 0 or robot_id >= len(split_obs):
             raise IndexError(f"robot_id {robot_id} is out of bounds for {len(split_obs)} robots.")

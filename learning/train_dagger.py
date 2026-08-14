@@ -28,13 +28,9 @@ from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger import (
     DaggerEvalMetrics,
     ExpertMixBetaController,
-    action_feature_names,
     build_deep_set_joint_action,
-    build_observation_feature_pack_cache,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
-    observation_feature_names,
-    pack_observation_features_from_cache,
     print_rollout_metrics,
     resolve_round_steps,
     resolve_initial_state_seed,
@@ -61,77 +57,113 @@ def get_training_device() -> torch.device:
     return torch.device("cpu")
 
 
-def flatten_observation_for_policy(
-    simulator: DynamicsProtocol,
-    observation: np.ndarray,
-    observation_feature_names_list: list[str],
-    device: torch.device,
-    observation_feature_cache,
-) -> torch.Tensor:
-    """
-    Pack runtime observation exactly like dataset frames, then flatten for MLP.
-    """
-    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
-    flattened = np.concatenate(
-        [packed_features[feature_name].reshape(-1) for feature_name in observation_feature_names_list]
-    ).astype(np.float32, copy=False)
-    observation_tensor = torch.as_tensor(flattened, dtype=torch.float32)
-    if device.type != "cpu":
-        observation_tensor = observation_tensor.to(device)
-    return observation_tensor.unsqueeze(0)
-
-
 class LeRobotMLPDataset(Dataset):
     def __init__(
         self,
         lerobot_dataset: LeRobotDataset,
         obs_feature_names: list[str],
         action_feature_names: list[str],
-        use_deep_set: bool = False,
         neighbor_feature_dim: int = 2,
         neighbor_slots: int = 0,
+        simulator: DynamicsProtocol | None = None,
     ):
         self.dataset = lerobot_dataset
         self.obs_feature_names = obs_feature_names
         self.action_feature_names = action_feature_names
-        self.use_deep_set = use_deep_set
         self.neighbor_feature_dim = int(neighbor_feature_dim)
         self.neighbor_slots = int(neighbor_slots)
+        self.simulator = simulator
+        dataset_features = getattr(getattr(lerobot_dataset, "meta", None), "features", {})
+        self.has_decentralized_features = "observation.neighbor_state" in dataset_features
+        self.samples_per_frame = 1
+        if not self.has_decentralized_features and self.simulator is not None and self.simulator.num_robots > 1:
+            self.samples_per_frame = int(self.simulator.num_robots)
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        return len(self.dataset) * self.samples_per_frame
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | StructuredObservation, torch.Tensor]:
-        sample = self.dataset[idx]
-        if self.use_deep_set:
-            ego_parts = [sample[name].float().view(-1) for name in self.obs_feature_names if name in {"observation.environment_state", "observation.state"}]
-            if len(ego_parts) == 0:
-                raise ValueError("Deep-set dataset samples must include environment and state features.")
-            ego_obs = torch.cat(ego_parts, dim=0)
-
-            neighbor_state = sample.get("observation.neighbor_state")
-            neighbor_mask = sample.get("observation.neighbor_mask")
-            if neighbor_state is None or neighbor_mask is None:
-                raise ValueError("Deep-set dataset samples must include neighbor_state and neighbor_mask features.")
-
-            neighbor_state_tensor = neighbor_state.float().view(-1)
-            neighbor_mask_tensor = neighbor_mask.float().view(-1)
-            if self.neighbor_slots == 0:
-                neighbor_obs = neighbor_state_tensor.new_zeros((0, self.neighbor_feature_dim))
-                neighbor_mask_2d = neighbor_mask_tensor.new_zeros((0, 1))
-            else:
-                neighbor_obs = neighbor_state_tensor.view(self.neighbor_slots, self.neighbor_feature_dim)
-                neighbor_mask_2d = neighbor_mask_tensor.view(self.neighbor_slots, 1)
-
-            observation = {
-                "ego_obs": ego_obs,
-                "neighbor_obs": neighbor_obs,
-                "neighbor_mask": neighbor_mask_2d,
-            }
+        robot_id = 0
+        if self.samples_per_frame > 1:
+            frame_idx, robot_id = divmod(idx, self.samples_per_frame)
+            sample = self.dataset[frame_idx]
         else:
-            obs_parts = [sample[name].float().view(-1) for name in self.obs_feature_names]
-            observation = torch.cat(obs_parts, dim=0)
-        action_parts = [sample[name].float().view(-1) for name in self.action_feature_names]
+            sample = self.dataset[idx]
+        neighbor_state = sample.get("observation.neighbor_state")
+        neighbor_mask = sample.get("observation.neighbor_mask")
+        if neighbor_state is None or neighbor_mask is None:
+            if self.simulator is None:
+                raise ValueError(
+                    "Centralized multi-robot frames require a simulator to derive local neighbor features."
+                )
+            if self.simulator.num_robots == 1:
+                ego_parts = [
+                    sample[name].float().view(-1)
+                    for name in self.obs_feature_names
+                    if name in {"observation.environment_state", "observation.state"}
+                ]
+                neighbor_state = torch.empty(0, dtype=torch.float32)
+                neighbor_mask = torch.empty(0, dtype=torch.float32)
+            elif "observation.neighbor_mask" not in sample:
+                raise ValueError(
+                    "Centralized multi-robot frames must contain observation.neighbor_mask "
+                    "to train a masked Deep Set policy."
+                )
+            else:
+                env_global = sample["observation.environment_state"].float().view(-1)
+                state_global = sample["observation.state"].float().view(-1)
+                env_start = sum(
+                    self.simulator.robot_env_dims[index]
+                    + self.simulator.robot_relative_dims[index]
+                    for index in range(robot_id)
+                )
+                env_stride = (
+                    self.simulator.robot_env_dims[robot_id]
+                    + self.simulator.robot_relative_dims[robot_id]
+                )
+                env_robot = env_global[env_start : env_start + env_stride]
+                base_env_dim = self.simulator.robot_env_dims[robot_id]
+                neighbor_state = env_robot[base_env_dim:]
+
+                state_start = sum(self.simulator.robot_proprio_dims[:robot_id])
+                state_end = state_start + self.simulator.robot_proprio_dims[robot_id]
+                ego_parts = [env_robot[:base_env_dim], state_global[state_start:state_end]]
+
+                mask_start = sum(self.simulator.robot_neighbor_mask_dims[:robot_id])
+                mask_end = mask_start + self.simulator.robot_neighbor_mask_dims[robot_id]
+                neighbor_mask = sample["observation.neighbor_mask"].float().view(-1)[mask_start:mask_end]
+        else:
+            ego_parts = [
+                sample[name].float().view(-1)
+                for name in self.obs_feature_names
+                if name in {"observation.environment_state", "observation.state"}
+            ]
+
+        if len(ego_parts) == 0:
+            raise ValueError("Deep-set dataset samples must include environment and state features.")
+        ego_obs = torch.cat(ego_parts, dim=0)
+
+        neighbor_state_tensor = neighbor_state.float().view(-1)
+        neighbor_mask_tensor = neighbor_mask.float().view(-1)
+        if self.neighbor_slots == 0:
+            neighbor_obs = neighbor_state_tensor.new_zeros((0, self.neighbor_feature_dim))
+            neighbor_mask_2d = neighbor_mask_tensor.new_zeros((0, 1))
+        else:
+            neighbor_obs = neighbor_state_tensor.view(self.neighbor_slots, self.neighbor_feature_dim)
+            neighbor_mask_2d = neighbor_mask_tensor.view(self.neighbor_slots, 1)
+
+        observation = {
+            "ego_obs": ego_obs,
+            "neighbor_obs": neighbor_obs,
+            "neighbor_mask": neighbor_mask_2d,
+        }
+        if self.samples_per_frame > 1:
+            action_global = sample["action"].float().view(-1)
+            action_start = sum(int(sim.nu) for sim in self.simulator.simulators[:robot_id])
+            action_end = action_start + int(self.simulator.simulators[robot_id].nu)
+            action_parts = [action_global[action_start:action_end]]
+        else:
+            action_parts = [sample[name].float().view(-1) for name in self.action_feature_names]
         action = torch.cat(action_parts, dim=0)
         return observation, action
 
@@ -301,32 +333,24 @@ def run_dagger(cfg: DaggerConfig) -> None:
     action_noise_seed = default_action_noise_seed_for_config(seeded_experiment_config)
     initial_state_seed = resolve_initial_state_seed(seeded_experiment_config, cfg.seed)
 
-    use_deep_set_policy = hasattr(simulator, "get_decentralized_dataset_features") and simulator.num_robots >= 1
-    if use_deep_set_policy:
-        dataset_features = simulator.get_decentralized_dataset_features()
-        obs_feature_names = [
-            feature_name
-            for feature_name in dataset_features.keys()
-            if feature_name.startswith("observation.")
-        ]
-        act_feature_names = ["action"]
-    else:
-        dataset_features = simulator.get_dataset_features()
-        obs_feature_names = observation_feature_names(simulator)
-        act_feature_names = action_feature_names(simulator)
+    dataset_features = simulator.get_decentralized_dataset_features()
+    obs_feature_names = [
+        feature_name
+        for feature_name in dataset_features.keys()
+        if feature_name.startswith("observation.")
+    ]
+    act_feature_names = ["action"]
 
     if len(obs_feature_names) == 0:
         raise ValueError("No observation features found in simulator dataset schema.")
     if len(act_feature_names) == 0:
         raise ValueError("No action features found in simulator dataset schema.")
 
-    obs_feature_cache = None if use_deep_set_policy else build_observation_feature_pack_cache(simulator, obs_feature_names)
-
     state_dim = sum(int(feature_info["shape"][0]) for feature_name, feature_info in dataset_features.items() if feature_name.startswith("observation."))
     action_dim = int(dataset_features["action"]["shape"][0])
 
-    neighbor_slots = max(int(simulator.num_robots) - 1, 0) if use_deep_set_policy else 0
-    neighbor_feature_dim = 2 if use_deep_set_policy else None
+    neighbor_slots = int(simulator.num_robots) - 1
+    neighbor_feature_dim = 2
 
     policy = MLPPolicy(
         state_dim=state_dim,
@@ -372,7 +396,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         f"target_epochs={cfg.target_epochs_per_round:.2f}, "
         f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
     )
-    print(f"Deep-set policy mode: {'yes' if use_deep_set_policy else 'no'}")
+    print(f"Deep-set neighbor slots: {neighbor_slots}")
 
     def train_on_aggregate(label: str, training_round: int) -> None:
         print(f"\n=== {label} ===")
@@ -382,8 +406,8 @@ def run_dagger(cfg: DaggerConfig) -> None:
             lerobot_dataset=aggregate_dataset,
             obs_feature_names=obs_feature_names,
             action_feature_names=act_feature_names,
-            use_deep_set=use_deep_set_policy,
             neighbor_slots=neighbor_slots,
+            simulator=simulator,
         )
 
         dataloader_generator = torch.Generator()
@@ -425,23 +449,12 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
         def action_fn(observation: np.ndarray) -> np.ndarray:
             with torch.inference_mode():
-                if use_deep_set_policy:
-                    return build_deep_set_joint_action(
-                        simulator=eval_simulator,
-                        policy=policy,
-                        observation=observation,
-                        device=device,
-                    )
-
-                model_input = flatten_observation_for_policy(
-                    eval_simulator,
-                    observation,
-                    observation_feature_names_list=obs_feature_names,
+                return build_deep_set_joint_action(
+                    simulator=eval_simulator,
+                    policy=policy,
+                    observation=observation,
                     device=device,
-                    observation_feature_cache=obs_feature_cache,
                 )
-                action = policy.select_action(model_input).squeeze(0).cpu().numpy()
-            return action
 
         metrics = evaluate_policy_rollouts(
             simulator=eval_simulator,
@@ -468,7 +481,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
             "hidden_dims": list(cfg.mlp_hidden_dims),
             "obs_feature_names": obs_feature_names,
             "system": cfg.system,
-            "use_deep_set": use_deep_set_policy,
+            "use_deep_set": True,
             "neighbor_feature_dim": neighbor_feature_dim,
             "neighbor_slots": neighbor_slots,
             "deepset_phi_dims": list(policy.deepset_phi_dims) if getattr(policy, "use_deepset", False) else None,
@@ -546,11 +559,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 repo_id=cfg.repo_id,
                 fps=int(1 / simulator_for_rollout.dt),
                 root=cfg.dataset_root,
-                features=(
-                    simulator_for_rollout.get_decentralized_dataset_features()
-                    if use_deep_set_policy
-                    else simulator_for_rollout.get_dataset_features()
-                ),
+                features=simulator_for_rollout.get_decentralized_dataset_features(),
             )
         else:
             dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
@@ -558,26 +567,18 @@ def run_dagger(cfg: DaggerConfig) -> None:
         try:
             def policy_action_fn(observation: np.ndarray) -> np.ndarray:
                 with torch.inference_mode():
-                    if use_deep_set_policy:
-                        return build_deep_set_joint_action(
-                            simulator=simulator_for_rollout,
-                            policy=policy,
-                            observation=observation,
-                            device=device,
-                        )
-
-                    model_input = flatten_observation_for_policy(
-                        simulator_for_rollout,
-                        observation,
-                        observation_feature_names_list=obs_feature_names,
+                    return build_deep_set_joint_action(
+                        simulator=simulator_for_rollout,
+                        policy=policy,
+                        observation=observation,
                         device=device,
-                        observation_feature_cache=obs_feature_cache,
                     )
-                    return policy.select_action(model_input).squeeze(0).cpu().numpy()
 
-            frame_builder = (
-                simulator_for_rollout.format_decentralized_dataset_frames if use_deep_set_policy else None
-            )
+            writer_features = getattr(getattr(dataset_writer, "meta", None), "features", {})
+            if "observation.neighbor_state" in writer_features:
+                frame_builder = simulator_for_rollout.format_decentralized_dataset_frames
+            else:
+                frame_builder = simulator_for_rollout.format_dataset_frame
 
             aggregation_metrics = collect_dagger_rollouts(
                 simulator=simulator_for_rollout,
