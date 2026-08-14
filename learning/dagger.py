@@ -303,6 +303,56 @@ def pack_observation_features(
     return pack_observation_features_from_cache(observation, feature_cache)
 
 
+def uses_deep_set_policy(simulator: DynamicsProtocol, policy: object) -> bool:
+    return bool(getattr(policy, "use_deepset", False)) and hasattr(
+        simulator, "decentralized_policy_observation"
+    )
+
+
+def build_deep_set_policy_input(
+    simulator: DynamicsProtocol,
+    observation: np.ndarray,
+    robot_id: int,
+    device: torch.device,
+    add_batch_dim: bool = True,
+) -> dict[str, torch.Tensor]:
+    robot_policy_obs = simulator.decentralized_policy_observation(observation, robot_id)
+
+    policy_input = {
+        name: torch.as_tensor(robot_policy_obs[name], dtype=torch.float32)
+        for name in ("ego_obs", "neighbor_obs", "neighbor_mask")
+    }
+    if add_batch_dim:
+        policy_input = {name: tensor.unsqueeze(0) for name, tensor in policy_input.items()}
+
+    if device.type != "cpu":
+        policy_input = {name: tensor.to(device) for name, tensor in policy_input.items()}
+
+    return policy_input
+
+
+def build_deep_set_joint_action(
+    simulator: DynamicsProtocol,
+    policy,
+    observation: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    """Query the shared decentralized policy once per robot and concatenate local actions."""
+    action_parts: list[np.ndarray] = []
+    for robot_id in range(int(simulator.num_robots)):
+        policy_input = build_deep_set_policy_input(
+            simulator=simulator,
+            observation=observation,
+            robot_id=robot_id,
+            device=device,
+        )
+        with torch.inference_mode():
+            action_tensor = policy.select_action(policy_input)
+        action_parts.append(action_tensor.squeeze(0).detach().cpu().numpy())
+
+    return np.concatenate(action_parts)
+
+
 def scheduled_expert_mix_beta(
     round_offset: int,
     beta_start: float,
@@ -455,6 +505,12 @@ def collect_dagger_rollouts(
             frame["task"] = "reach target"
             return frame
 
+    def ensure_task_field(frame: dict[str, object]) -> dict[str, object]:
+        if "task" not in frame:
+            frame = dict(frame)
+            frame["task"] = "reach target"
+        return frame
+
     while successful_episodes < trajectories_per_iteration:
         attempted_episodes += 1
         if attempted_episodes > max_attempts:
@@ -515,7 +571,11 @@ def collect_dagger_rollouts(
                 planner_failed = True
                 break
 
-            episode_frames.append(frame_builder(observation, expert_action))
+            built_frame = frame_builder(observation, expert_action)
+            if isinstance(built_frame, (list, tuple)):
+                episode_frames.extend([ensure_task_field(dict(frame)) for frame in built_frame])
+            else:
+                episode_frames.append(ensure_task_field(dict(built_frame)))
 
             use_expert_action = bool(episode_expert_mixing_rng.random() < expert_mixing_beta)
             policy_action = None

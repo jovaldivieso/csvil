@@ -711,7 +711,11 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 repo_id=cfg.repo_id,
                 fps=int(1 / simulator.dt),
                 root=cfg.dataset_root,
-                features=simulator.get_dataset_features(),
+                features=(
+                    simulator.get_decentralized_dataset_features()
+                    if hasattr(simulator, "get_decentralized_dataset_features")
+                    else simulator.get_dataset_features()
+                ),
             )
         else:
             dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
@@ -748,6 +752,11 @@ def run_lerobot_dagger(cfg: LeRobotDaggerConfig) -> None:
                 expert_mixing_beta=round_beta,
                 policy_action_fn=policy_action_fn,
                 policy_reset_fn=policy_reset_fn,
+                frame_builder=(
+                    simulator.format_decentralized_dataset_frames
+                    if hasattr(simulator, "format_decentralized_dataset_frames")
+                    else None
+                ),
             )
         finally:
             dataset_writer.finalize()

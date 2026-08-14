@@ -23,6 +23,7 @@ from systems.seed_utils import (
     default_seed_argument_for_simulator,
 )
 from planning.casadi_planner import PlannerSolveError
+from learning.dagger import build_deep_set_joint_action, uses_deep_set_policy
 from learning.models.mlp import MLPPolicy
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
@@ -307,24 +308,35 @@ def rollout_policy(
     trajectory = [state.copy()]
     policy.reset()
 
+    deep_set_inference = uses_deep_set_policy(simulator, policy)
+
     for step in range(1, num_steps + 1):
         observation = simulator.observe(state, validate=False)
 
-        policy_input = create_policy_input(
-            simulator=simulator,
-            observation=observation,
-            device=device,
-            add_batch_dim=policy_preprocessor is None,
-        )
-        if policy_preprocessor is not None:
-            policy_input = policy_preprocessor(policy_input)
+        if deep_set_inference:
+            action = build_deep_set_joint_action(
+                simulator=simulator,
+                policy=policy,
+                observation=observation,
+                device=device,
+            )
+        else:
+            policy_input = create_policy_input(
+                simulator=simulator,
+                observation=observation,
+                device=device,
+                add_batch_dim=policy_preprocessor is None,
+            )
+            if policy_preprocessor is not None:
+                policy_input = policy_preprocessor(policy_input)
 
-        with torch.inference_mode():
-            action_tensor = policy.select_action(policy_input)
-        if policy_postprocessor is not None:
-            action_tensor = policy_postprocessor(action_tensor)
+            with torch.inference_mode():
+                action_tensor = policy.select_action(policy_input)
+            if policy_postprocessor is not None:
+                action_tensor = policy_postprocessor(action_tensor)
 
-        action = action_tensor.squeeze(0).cpu().numpy()
+            action = action_tensor.squeeze(0).cpu().numpy()
+
         executed_action = apply_execution_noise(
             simulator=simulator,
             action=action,
@@ -389,19 +401,49 @@ def run_evaluation(
         checkpoint = torch.load(model_dir, map_location=device)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             state_dict = checkpoint["model_state_dict"]
+            state_dim = int(checkpoint.get("state_dim", state_dim))
+            action_dim = int(checkpoint.get("action_dim", action_dim))
             hidden_dims_raw = checkpoint.get("hidden_dims")
             if isinstance(hidden_dims_raw, list) and len(hidden_dims_raw) > 0:
                 hidden_dims = tuple(int(width) for width in hidden_dims_raw)
             else:
                 hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+
+            use_deep_set = bool(checkpoint.get("use_deep_set", False))
+            neighbor_feature_dim = checkpoint.get("neighbor_feature_dim")
+            if neighbor_feature_dim is not None:
+                neighbor_feature_dim = int(neighbor_feature_dim)
+            neighbor_slots = int(checkpoint.get("neighbor_slots", 0))
+            deepset_phi_dims_raw = checkpoint.get("deepset_phi_dims")
+            if isinstance(deepset_phi_dims_raw, list) and len(deepset_phi_dims_raw) > 0:
+                deepset_phi_dims = tuple(int(width) for width in deepset_phi_dims_raw)
+            else:
+                deepset_phi_dims = (128, 128)
+            deepset_rho_dims_raw = checkpoint.get("deepset_rho_dims")
+            if isinstance(deepset_rho_dims_raw, list) and len(deepset_rho_dims_raw) > 0:
+                deepset_rho_dims = tuple(int(width) for width in deepset_rho_dims_raw)
+            else:
+                deepset_rho_dims = (128,)
+            deepset_pool_type = str(checkpoint.get("deepset_pool_type", "max"))
         else:
             state_dict = checkpoint
             hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+            use_deep_set = False
+            neighbor_feature_dim = None
+            neighbor_slots = 0
+            deepset_phi_dims = (128, 128)
+            deepset_rho_dims = (128,)
+            deepset_pool_type = "max"
 
         policy = MLPPolicy(
             state_dim=state_dim,
             action_dim=action_dim,
             hidden_dims=hidden_dims,
+            neighbor_feature_dim=neighbor_feature_dim,
+            neighbor_slots=neighbor_slots,
+            deepset_phi_dims=deepset_phi_dims,
+            deepset_rho_dims=deepset_rho_dims,
+            deepset_pool_type=deepset_pool_type,
         )
         policy.load_state_dict(state_dict)
 

@@ -3,4 +3,4 @@
 
 model:
   # Hidden layer widths for MLPPolicy(state_dim -> ... -> action_dim)
-  hidden_dims: [512, 256, 128]
+  hidden_dims: [256, 256, 128]

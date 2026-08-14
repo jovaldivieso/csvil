@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 import torch
 from torch import nn
+
+from learning.models.deep_set_encoder import DeepSetEncoder
 
 
 class MLPPolicy(nn.Module):
@@ -14,6 +16,11 @@ class MLPPolicy(nn.Module):
         state_dim: int,
         action_dim: int,
         hidden_dims: tuple[int, ...] = (256, 256, 128),
+        neighbor_feature_dim: int | None = None,
+        neighbor_slots: int = 0,
+        deepset_phi_dims: tuple[int, ...] = (128, 128),
+        deepset_rho_dims: tuple[int, ...] = (128,),
+        deepset_pool_type: str = "max",
     ):
         super().__init__()
 
@@ -23,9 +30,52 @@ class MLPPolicy(nn.Module):
             raise ValueError(f"'action_dim' must be positive, got {action_dim}.")
         if len(hidden_dims) < 1:
             raise ValueError("'hidden_dims' must contain at least one layer width.")
+        if neighbor_slots < 0:
+            raise ValueError("'neighbor_slots' must be non-negative.")
+        if neighbor_feature_dim is not None and neighbor_feature_dim <= 0:
+            raise ValueError("'neighbor_feature_dim' must be positive when provided.")
+        if neighbor_slots > 0 and neighbor_feature_dim is None:
+            raise ValueError(
+                "'neighbor_feature_dim' must be provided when 'neighbor_slots' is positive."
+            )
+
+        self.state_dim = int(state_dim)
+        self.action_dim = int(action_dim)
+        self.neighbor_feature_dim = int(neighbor_feature_dim) if neighbor_feature_dim is not None else None
+        self.neighbor_slots = int(neighbor_slots)
+        self.deepset_phi_dims = tuple(int(width) for width in deepset_phi_dims)
+        self.deepset_rho_dims = tuple(int(width) for width in deepset_rho_dims)
+        self.deepset_pool_type = deepset_pool_type
+
+        self.use_deepset = self.neighbor_feature_dim is not None
+        self.neighbor_context_dim = 0
+        self.ego_dim = self.state_dim
+        self.neighbor_input_dim = 0
+
+        if self.use_deepset:
+            self.neighbor_input_dim = int(self.neighbor_feature_dim)
+            self.neighbor_context_dim = int(self.deepset_rho_dims[-1])
+            self.ego_dim = self.state_dim - self.neighbor_slots * (self.neighbor_input_dim + 1)
+            if self.ego_dim <= 0:
+                raise ValueError(
+                    "'state_dim' is too small for the requested deep-set layout. "
+                    f"Got state_dim={self.state_dim}, neighbor_slots={self.neighbor_slots}, "
+                    f"neighbor_feature_dim={self.neighbor_input_dim}."
+                )
+
+            self.neighbor_encoder = DeepSetEncoder(
+                in_features=self.neighbor_input_dim,
+                phi_dims=list(self.deepset_phi_dims),
+                rho_dims=list(self.deepset_rho_dims),
+                pool_type=self.deepset_pool_type,
+            )
+            main_input_dim = self.ego_dim + self.neighbor_context_dim
+        else:
+            self.neighbor_encoder = None
+            main_input_dim = self.state_dim
 
         layers: list[nn.Module] = []
-        in_dim = state_dim
+        in_dim = main_input_dim
         for width in hidden_dims:
             if width <= 0:
                 raise ValueError(f"Hidden layer widths must be positive, got {width}.")
@@ -36,10 +86,71 @@ class MLPPolicy(nn.Module):
 
         self.network = nn.Sequential(*layers)
 
-    def forward(self, observation_tensor: torch.Tensor) -> torch.Tensor:
+    def _split_structured_observation(
+        self,
+        observation_tensor: torch.Tensor | Mapping[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if isinstance(observation_tensor, Mapping):
+            if "ego_obs" in observation_tensor:
+                ego = observation_tensor["ego_obs"]
+            else:
+                env = observation_tensor.get("observation.environment_state")
+                state = observation_tensor.get("observation.state")
+                if env is None or state is None:
+                    raise KeyError(
+                        "Structured observations must provide either 'ego_obs' or both "
+                        "'observation.environment_state' and 'observation.state'."
+                    )
+                ego = torch.cat([env, state], dim=-1)
+
+            neighbor_obs = observation_tensor.get("neighbor_obs")
+            neighbor_mask = observation_tensor.get("neighbor_mask")
+            if neighbor_obs is None and "observation.neighbor_state" in observation_tensor:
+                neighbor_obs = observation_tensor["observation.neighbor_state"]
+            if neighbor_mask is None and "observation.neighbor_mask" in observation_tensor:
+                neighbor_mask = observation_tensor["observation.neighbor_mask"]
+
+            return ego, neighbor_obs, neighbor_mask
+
         if observation_tensor.ndim == 1:
             observation_tensor = observation_tensor.unsqueeze(0)
-        return self.network(observation_tensor)
+
+        if not self.use_deepset:
+            return observation_tensor, None, None
+
+        neighbor_total = self.neighbor_slots * (self.neighbor_input_dim + 1)
+        ego = observation_tensor[:, : self.ego_dim]
+        neighbor_flat = observation_tensor[:, self.ego_dim : self.ego_dim + neighbor_total]
+
+        if self.neighbor_slots == 0:
+            neighbor_obs = observation_tensor.new_zeros((observation_tensor.shape[0], 0, self.neighbor_input_dim))
+            neighbor_mask = observation_tensor.new_zeros((observation_tensor.shape[0], 0, 1))
+        else:
+            neighbor_obs = neighbor_flat[:, : self.neighbor_slots * self.neighbor_input_dim].reshape(
+                observation_tensor.shape[0],
+                self.neighbor_slots,
+                self.neighbor_input_dim,
+            )
+            neighbor_mask = neighbor_flat[:, self.neighbor_slots * self.neighbor_input_dim :].reshape(
+                observation_tensor.shape[0],
+                self.neighbor_slots,
+                1,
+            )
+
+        return ego, neighbor_obs, neighbor_mask
+
+    def forward(self, observation_tensor: torch.Tensor) -> torch.Tensor:
+        ego_obs, neighbor_obs, neighbor_mask = self._split_structured_observation(observation_tensor)
+
+        if self.use_deepset:
+            if neighbor_obs is None or neighbor_mask is None:
+                raise ValueError("Deep-set policy mode requires neighbor observations and masks.")
+            neighbor_context = self.neighbor_encoder(neighbor_obs, neighbor_mask)
+            model_input = torch.cat([ego_obs, neighbor_context], dim=-1)
+        else:
+            model_input = ego_obs
+
+        return self.network(model_input)
 
     def select_action(
         self,
@@ -52,6 +163,12 @@ class MLPPolicy(nn.Module):
         that will be concatenated in insertion order.
         """
         if isinstance(observation_tensor, Mapping):
+            if any(
+                key in observation_tensor
+                for key in ("ego_obs", "neighbor_obs", "neighbor_mask", "observation.neighbor_state")
+            ):
+                return self.forward(observation_tensor)
+
             chunks: list[torch.Tensor] = []
             for value in observation_tensor.values():
                 tensor = value
@@ -61,10 +178,9 @@ class MLPPolicy(nn.Module):
             if not chunks:
                 raise ValueError("Observation mapping is empty.")
             model_input = torch.cat(chunks, dim=-1)
-        else:
-            model_input = observation_tensor
+            return self.forward(model_input)
 
-        return self.forward(model_input)
+        return self.forward(observation_tensor)
 
     def reset(self) -> None:
         """Keeps parity with other policy APIs that expose a reset hook."""
