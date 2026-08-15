@@ -5,40 +5,14 @@ import argparse
 
 import numpy as np
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
 sys.path.insert(0, PROJECT_ROOT)
 
-from planning.dblacam_planner import DbLacamPlanner
-from systems.multi_robot import MultiRobotSimulator
-from systems.single_integrator import SingleIntegrator
-from systems.unicycle1 import Unicycle1
+from core.config import load_and_validate_system_config
+from core.factory import DynamicsFactory, PlannerFactory
 
-SYSTEMS = {
-    "single_integrator": SingleIntegrator,
-    "unicycle1": Unicycle1,
-}
-
-def create_team(config):
-    
-    robots = []
-    initial_states = []
-
-    for robot_config in config["robots"]:
-        system_name = robot_config["system"]
-
-        if system_name not in SYSTEMS:
-            raise ValueError(f"unsupported system: {system_name}")
-
-        system_config = dict(robot_config.get("config", {}))
-
-        system_config["goal"] = robot_config["goal"]
-        system_config["randomize_goal"] = False
-
-        robot = SYSTEMS[system_name](system_config)
-        robots.append(robot)
-        initial_states.append(np.asarray(robot_config["start"], dtype=float))
-
-    return MultiRobotSimulator(robots), initial_states
 
 def main():
     parser = argparse.ArgumentParser()
@@ -46,37 +20,56 @@ def main():
         "--config",
         default="test/config/multi_robot_dblacam_config.yaml",
     )
-    parser.add_argument(
-        "--algorithm-config",
-        default="planning/dblacam_algorithm_default.yaml",
-    )
     parser.add_argument("--num-steps", type=int, default=200)
     args = parser.parse_args()
 
+    # loads raw config to get specified initial states:
     with open(args.config, "r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
+        raw_config = yaml.safe_load(file)
 
-    with open(args.algorithm_config, "r", encoding="utf-8") as file:
-        algorithm_config = yaml.safe_load(file)
+    # loads and validates config for simulator and planner:
+    config = load_and_validate_system_config(
+        system_name="multi_robot",
+        config_path=args.config,
+    )
 
-    # creates MultiRobotSimulator:
-    simulator, initial_states = create_team(config)
-    
-    # creates DbLacamPlanner:
-    planner = DbLacamPlanner(simulator, config, algorithm_config)
+    simulator = DynamicsFactory.create(
+        system_name="multi_robot",
+        config=config,
+    )
 
-    # initializes robot states:
-    states = simulator.reset(initial_states)
+    planner = PlannerFactory.create(
+        planner_name="dblacam",
+        simulator=simulator,
+        config=config,
+    )
 
-    trajectories = [[state.copy()] for state in states]
+    # creates one concatenated initial state for robot team:
+    initial_state = np.concatenate(
+        [
+            np.asarray(robot_config["start"], dtype=float)
+            for robot_config in raw_config["robots"]
+        ]
+    )
+
+    states = simulator.reset(initial_state)
+    planner.reset()
+
+    trajectories = [
+        [states[state_slice].copy()]
+        for state_slice in simulator.robot_state_slices
+    ]
 
     for _ in range(args.num_steps):
         observations = simulator.observe(states)
         actions = planner(observations)
         states = simulator.step(states, actions)
 
-        for trajectory, state in zip(trajectories, states):
-            trajectory.append(state.copy())
+        for trajectory, state_slice in zip(
+            trajectories,
+            simulator.robot_state_slices,
+        ):
+            trajectory.append(states[state_slice].copy())
 
         if simulator.is_done(states):
             break
@@ -84,8 +77,13 @@ def main():
     print(f"finished after {simulator.time} steps")
     print(f"all robots reached their goals: {simulator.is_done(states)}")
 
-    for robot_index, state in enumerate(states):
-        print(f"robot {robot_index} final state: {state}")
+    for robot_index, state_slice in enumerate(
+        simulator.robot_state_slices
+    ):
+        print(
+            f"robot {robot_index} final state: "
+            f"{states[state_slice]}"
+        )
 
 
 if __name__ == "__main__":

@@ -54,6 +54,23 @@
                 "--num-primitives",
                 "10"
             ]
-        }
+        },
+        {
+        "name": "db-lacam custom motion primitives",
+        "type": "debugpy",
+        "request": "launch",
+        "python": "/opt/venv/bin/python",
+        "program": "/workspace/test/run_multi_robot_dblacam.py",
+        "cwd": "/workspace",
+        "console": "integratedTerminal",
+        "stopOnEntry": false,
+        "justMyCode": true,
+        "args": [
+            "--config",
+            "test/config/multi_robot_dblacam_config.yaml",
+            "--num-steps",
+            "200"
+        ]
+    }
     ]
 }

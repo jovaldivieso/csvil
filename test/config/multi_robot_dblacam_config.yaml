@@ -10,6 +10,9 @@ db_lacam:
   time_limit_ms: 60000
   algorithm_config: planning/dblacam_algorithm_default.yaml
 
+  motion_primitives:
+    unicycle1_v0: /workspace/data/motion_primitives/unicycle1_v0.bin.im.bin.sp.bin
+
 robots:
   - system: single_integrator
 
