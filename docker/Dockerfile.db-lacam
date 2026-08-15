@@ -23,7 +23,6 @@ RUN apt-get update \
         ffmpeg \
         git \
         gnupg \
-        libboost-all-dev \
         libeigen3-dev \
         libfcl-dev \
         libgl1 \
@@ -38,6 +37,46 @@ RUN apt-get update \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
+# installs Boost 1.78 to match motion-primitives container
+ARG BOOST_VERSION=1.78.0
+ARG BOOST_VERSION_UNDERSCORE=1_78_0
+
+ENV BOOST_ROOT=/opt/boost
+ENV BOOST_INCLUDEDIR=/opt/boost/include
+ENV BOOST_LIBRARYDIR=/opt/boost/lib
+ENV CMAKE_PREFIX_PATH=/opt/boost;/opt/ompl;/opt/openrobots
+ENV LD_LIBRARY_PATH=/opt/boost/lib:/opt/ompl/lib:/opt/openrobots/lib
+
+RUN wget -q \
+    "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_UNDERSCORE}.tar.gz" \
+    -O /tmp/boost.tar.gz \
+    && tar -xzf /tmp/boost.tar.gz -C /tmp \
+    && cd "/tmp/boost_${BOOST_VERSION_UNDERSCORE}" \
+    && ./bootstrap.sh --prefix="${BOOST_ROOT}" \
+    && ./b2 install \
+        --prefix="${BOOST_ROOT}" \
+        variant=release \
+        link=shared \
+        threading=multi \
+        --with-serialization \
+        --with-program_options \
+        --with-filesystem \
+        --with-system \
+        --with-stacktrace \
+        --with-test \
+        -j"$(nproc)" \
+    && STACKTRACE_BASIC="$(find bin.v2/libs/stacktrace/build \
+        -type f \
+        -name "libboost_stacktrace_basic.so.1.78.0" \
+        -print -quit)" \
+    && test -n "${STACKTRACE_BASIC}" \
+    && cp "${STACKTRACE_BASIC}" "${BOOST_ROOT}/lib/" \
+    && ln -sf \
+        libboost_stacktrace_basic.so.1.78.0 \
+        "${BOOST_ROOT}/lib/libboost_stacktrace_basic.so" \
+    && test -f "${BOOST_ROOT}/lib/libboost_stacktrace_basic.so.1.78.0" \
+    && rm -rf /tmp/boost*
+    
 # installs python (lerobot 0.5.1 requires python 3.12 or newer):
 RUN add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update \
@@ -89,18 +128,7 @@ RUN git clone https://github.com/ompl/ompl.git /tmp/ompl \
     && /usr/bin/cmake --install build \
     && rm -rf /tmp/ompl
 
-# clones db-lacam and nested submodules:
-# (from ChatGPT: public ssh-style github URLs are rewritten to HTTPS so that no SSH key is needed inside docker build)
-ARG DB_LACAM_REF=main
-RUN git config --global \
-        url."https://github.com/".insteadOf "git@github.com:" \
-    && git clone \
-        --recurse-submodules \
-        https://github.com/IMRCLab/db-lacam.git \
-        "${DB_LACAM_ROOT}" \
-    && cd "${DB_LACAM_ROOT}" \
-    && git checkout "${DB_LACAM_REF}" \
-    && git submodule update --init --recursive
+COPY db-lacam/ "${DB_LACAM_ROOT}/"
 
 # downloads pregenerated motion primitives used by db-lacam:
 RUN cd "${DB_LACAM_ROOT}" \
@@ -109,31 +137,28 @@ RUN cd "${DB_LACAM_ROOT}" \
     && unzip primitives.zip \
     && rm primitives.zip
 
-# run_dblacam doesn't actually use compute_heu, but linking it pulls incompatible dynoplan/crocoddyl components
-# - removes two unused compute_heu references:
-#     - idbastar::compute_heu from target_link_libraries() in CMakeLists.txt
-#     - include "dynoplan/tdbastar/compute_heu.hpp" from run_dblacam.cpp
+
 # - configures project and generates build files in buildRelease
 # - compiles build files, building run_dblacam
-# - final sanity check
-# (regular expressions in sed-commands were generated with ChatGPT)
 # (dynobench emits source-code warnings, can be ignored)
-ARG DB_LACAM_BUILD_JOBS=2
+ARG DB_LACAM_BUILD_JOBS=1
 RUN set -eux; \
-    sed -Ei \
-        's|[[:space:]]*idbastar::compute_heu[[:space:]]*| |g' \
-        "${DB_LACAM_ROOT}/CMakeLists.txt"; \
-    sed -Ei \
-        '/^[[:space:]]*#include[[:space:]]+"dynoplan\/tdbastar\/compute_heu\.hpp"/d' \
-        "${DB_LACAM_ROOT}/src/run_dblacam.cpp"; \
     /usr/bin/cmake \
         -S "${DB_LACAM_ROOT}" \
         -B "${DB_LACAM_ROOT}/buildRelease" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}"; \
+        -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}" \
+        -DBOOST_ROOT="${BOOST_ROOT}" \
+        -DBOOST_INCLUDEDIR="${BOOST_INCLUDEDIR}" \
+        -DBOOST_LIBRARYDIR="${BOOST_LIBRARYDIR}" \
+        -DBoost_NO_SYSTEM_PATHS=ON; \
     /usr/bin/cmake --build "${DB_LACAM_ROOT}/buildRelease" \
         --target run_dblacam \
-        --parallel "${DB_LACAM_BUILD_JOBS}"; \
+        --parallel "${DB_LACAM_BUILD_JOBS}" \
+        > /tmp/db-lacam-build.log 2>&1 || { \
+            tail -n 150 /tmp/db-lacam-build.log; \
+            exit 1; \
+        }; \
     test -x "${DB_LACAM_ROOT}/buildRelease/run_dblacam"
 
 WORKDIR /workspace
