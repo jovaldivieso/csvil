@@ -139,6 +139,13 @@ class MultiRobotSimulator(DynamicsSimulator):
         # Used by some planners as a symmetric control bound fallback.
         self.max_action = float(max(float(sim.max_action) for sim in self.simulators))
         self.d_safe = float(self.config.get("d_safe", 0.0))
+        self._is_homogeneous = all(
+            type(sim) is type(self.simulators[0])
+            and int(sim.nx) == int(self.simulators[0].nx)
+            and int(sim.nu) == int(self.simulators[0].nu)
+            for sim in self.simulators[1:]
+        )
+        self._casadi_mapped_dynamics: ca.Function | None = None
 
     @property
     def is_euclidean(self) -> bool:
@@ -288,6 +295,28 @@ class MultiRobotSimulator(DynamicsSimulator):
         return all(sim.is_done(robot_state, validate=False) for sim, robot_state in zip(self.simulators, split_state))
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any:
+        if self._is_homogeneous:
+            reference_sim = self.simulators[0]
+            sim_nx = int(reference_sim.nx)
+            sim_nu = int(reference_sim.nu)
+            if self._casadi_mapped_dynamics is None:
+                x_sym = ca.SX.sym("x_single", sim_nx)
+                u_sym = ca.SX.sym("u_single", sim_nu)
+                x_next_sym = reference_sim.casadi_dynamics(x_sym, u_sym)
+                step_fn = ca.Function(
+                    "multi_robot_step",
+                    [x_sym, u_sym],
+                    [x_next_sym],
+                    ["x", "u"],
+                    ["x_next"],
+                )
+                self._casadi_mapped_dynamics = step_fn.map(self.num_robots)
+
+            mapped_state = ca.reshape(x, sim_nx, self.num_robots)
+            mapped_action = ca.reshape(u, sim_nu, self.num_robots)
+            mapped_next = self._casadi_mapped_dynamics(mapped_state, mapped_action)
+            return ca.vec(mapped_next)
+
         next_parts = []
         for sim, state_slice, action_slice in zip(
             self.simulators,
