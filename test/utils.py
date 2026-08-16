@@ -457,10 +457,16 @@ def save_xy_rollout_video(
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.legend(loc="best")
 
+    if len(series) % robot_count != 0:
+        raise ValueError(
+            f"Length of series ({len(series)}) must be an exact multiple of robot count ({robot_count})."
+        )
     trajectory_count = len(series) // robot_count
     if phase_lengths is None:
         phase_lengths = [trajectory_count]
-    phase_lengths = [int(length) for length in phase_lengths if int(length) > 0]
+    phase_lengths = [int(length) for length in phase_lengths]
+    if any(length <= 0 for length in phase_lengths):
+        raise ValueError("'phase_lengths' entries must be positive integers.")
     if sum(phase_lengths) != trajectory_count:
         raise ValueError(
             "'phase_lengths' must contain positive group sizes summing to the number of trajectories."

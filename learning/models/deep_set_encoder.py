@@ -5,8 +5,10 @@ from collections.abc import Callable, Iterable
 import torch
 from torch import nn
 
+from learning.models.encoder import ObservationEncoder
 
-def build_mlp(
+
+def _build_mlp(
     dims: list[int],
     activation_factory: Callable[[], nn.Module] = nn.ReLU,
 ) -> nn.Sequential:
@@ -19,15 +21,12 @@ def build_mlp(
         out_dim = int(dims[layer_idx + 1])
         if in_dim <= 0 or out_dim <= 0:
             raise ValueError("MLP layer widths must be positive integers.")
-
         layers.append(nn.Linear(in_dim, out_dim))
         if layer_idx < len(dims) - 2:
             layers.append(activation_factory())
-
     return nn.Sequential(*layers)
 
-
-class DeepSetEncoder(nn.Module):
+class DeepSetEncoder(ObservationEncoder):
     def __init__(
         self,
         in_features: int,
@@ -51,44 +50,44 @@ class DeepSetEncoder(nn.Module):
             raise ValueError("'rho_dims' must contain at least one output width.")
 
         self.pool_type = pool_type
-        self.phi = build_mlp(phi_dims_list)
-        self.rho = build_mlp(rho_dims_list)
-        self.out_dim = int(rho_dims_list[-1])
+        self.phi = _build_mlp(phi_dims_list)
+        self.rho = _build_mlp(rho_dims_list)
+        self._out_dim = int(rho_dims_list[-1])
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 3:
-            raise ValueError(f"'x' must have shape (B, K, D), got {tuple(x.shape)}.")
-        if mask.ndim != 3:
-            raise ValueError(f"'mask' must have shape (B, K, 1), got {tuple(mask.shape)}.")
-        if mask.shape[2] != 1:
-            raise ValueError(f"'mask' must have shape (B, K, 1), got {tuple(mask.shape)}.")
-        if x.shape[0] != mask.shape[0] or x.shape[1] != mask.shape[1]:
+    @property
+    def out_dim(self) -> int:
+        return self._out_dim
+
+    def forward(self, neighbor_obs: torch.Tensor, neighbor_mask: torch.Tensor) -> torch.Tensor:
+        if neighbor_obs.ndim != 3:
+            raise ValueError(f"'neighbor_obs' must have shape (B, K, D), got {tuple(neighbor_obs.shape)}.")
+        if neighbor_mask.ndim != 3 or neighbor_mask.shape[2] != 1:
+            raise ValueError(f"'neighbor_mask' must have shape (B, K, 1), got {tuple(neighbor_mask.shape)}.")
+        if neighbor_obs.shape[0] != neighbor_mask.shape[0] or neighbor_obs.shape[1] != neighbor_mask.shape[1]:
             raise ValueError(
-                "'x' and 'mask' must agree on batch and neighbor dimensions: "
-                f"got {tuple(x.shape)} and {tuple(mask.shape)}."
+                "'neighbor_obs' and 'neighbor_mask' must agree on batch and neighbor dimensions."
             )
 
-        batch_size, max_items, _ = x.shape
+        batch_size, max_items, _ = neighbor_obs.shape
         if max_items == 0:
-            return torch.zeros((batch_size, self.out_dim), device=x.device, dtype=x.dtype)
+            return torch.zeros((batch_size, self.out_dim), device=neighbor_obs.device, dtype=neighbor_obs.dtype)
 
-        mask_bool = mask.bool()
+        mask_bool = neighbor_mask.bool()
         row_has_visible = mask_bool.any(dim=(1, 2))
 
-        phi_out = self.phi(x)
+        phi_out = self.phi(neighbor_obs)
 
         if self.pool_type == "max":
             phi_out = phi_out.masked_fill(~mask_bool, float("-inf"))
             pooled_out, _ = torch.max(phi_out, dim=1)
             pooled_out = torch.nan_to_num(pooled_out, neginf=0.0)
         elif self.pool_type == "sum":
-            phi_out = phi_out.masked_fill(~mask_bool, 0.0)
-            pooled_out = torch.sum(phi_out, dim=1)
+            pooled_out = torch.sum(phi_out.masked_fill(~mask_bool, 0.0), dim=1)
         else:
-            phi_out = phi_out.masked_fill(~mask_bool, 0.0)
-            summed = torch.sum(phi_out, dim=1)
-            valid_counts = mask_bool.sum(dim=1).clamp(min=1).to(dtype=x.dtype)
+            summed = torch.sum(phi_out.masked_fill(~mask_bool, 0.0), dim=1)
+            valid_counts = mask_bool.sum(dim=1).clamp(min=1).to(dtype=neighbor_obs.dtype)
             pooled_out = summed / valid_counts
 
         context = self.rho(pooled_out)
         return context.masked_fill(~row_has_visible.unsqueeze(-1), 0.0)
+

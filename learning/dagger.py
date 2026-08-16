@@ -305,7 +305,7 @@ def pack_observation_features(
 
 
 def uses_deep_set_policy(simulator: DynamicsProtocol, policy: object) -> bool:
-    return bool(getattr(policy, "use_deepset", False)) and hasattr(
+    return bool(getattr(policy, "use_neighbor_encoder", False)) and hasattr(
         simulator, "decentralized_policy_observation"
     )
 

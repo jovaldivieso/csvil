@@ -12,9 +12,23 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.factory import DynamicsFactory
 from learning.models.deep_set_encoder import DeepSetEncoder
+from learning.models.encoder import ObservationEncoder, EncoderFactory
 
 
 class DeepSetEncoderTests(unittest.TestCase):
+    def test_encoder_factory_and_interface(self) -> None:
+        encoder = EncoderFactory.create(
+            "deepset",
+            in_features=2,
+            phi_dims=[8],
+            rho_dims=[4],
+        )
+        self.assertIsInstance(encoder, ObservationEncoder)
+        self.assertEqual(encoder.out_dim, 4)
+
+        with self.assertRaises(ValueError):
+            EncoderFactory.create("unknown", in_features=2)
+
     def test_zero_neighbor_input_returns_zero_embedding(self) -> None:
         encoder = DeepSetEncoder(
             in_features=2,

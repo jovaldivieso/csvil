@@ -22,6 +22,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import (
     load_and_validate_mlp_architecture_config,
+    load_yaml_config,
     load_and_validate_system_config,
 )
 from core.factory import DynamicsFactory, PlannerFactory
@@ -37,7 +38,8 @@ from learning.dagger import (
     set_seed,
     with_seeded_initial_state_config,
 )
-from learning.models.mlp_policy import MLPPolicy
+from learning.models.mlp import MLPPolicy
+from learning.models.encoder import EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
@@ -193,9 +195,16 @@ class DaggerConfig:
     batch_size: int
     learning_rate: float
     mlp_hidden_dims: tuple[int, ...]
+    encoder_config: EncoderConfig
     checkpoint_dir: Path
     seed: int
     max_train_steps: int | None
+
+
+@dataclass(frozen=True)
+class EncoderConfig:
+    encoder_type: str
+    kwargs: dict[str, object]
 
 
 def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
@@ -204,6 +213,34 @@ def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
 
     validated = load_and_validate_mlp_architecture_config(mlp_config_path)
     return validated.hidden_dims
+
+
+def load_encoder_config(mlp_config_path: Path | None) -> EncoderConfig:
+    if mlp_config_path is None:
+        return EncoderConfig(encoder_type="deepset", kwargs={})
+
+    raw_config = load_yaml_config(mlp_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ValueError("MLP config model section must be a mapping.")
+
+    encoder_type_raw = model_section.get("encoder", "deepset")
+    if not isinstance(encoder_type_raw, str) or not encoder_type_raw.strip():
+        raise ValueError("MLP config 'model.encoder' must be a non-empty string.")
+
+    normalized_type = encoder_type_raw.strip().lower()
+    if normalized_type == "deepset":
+        raw_kwargs = model_section.get("deepset", {})
+        if not isinstance(raw_kwargs, Mapping):
+            raise ValueError("MLP config 'model.deepset' must be a mapping.")
+        kwargs: dict[str, object] = {
+            "phi_dims": tuple(int(width) for width in raw_kwargs.get("phi_dims", (128, 128))),
+            "rho_dims": tuple(int(width) for width in raw_kwargs.get("rho_dims", (128,))),
+            "pool_type": str(raw_kwargs.get("pool_type", "max")),
+        }
+        return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
+
+    return EncoderConfig(encoder_type=normalized_type, kwargs={})
 
 
 def default_checkpoint_dir_for_system(system: str) -> Path:
@@ -333,7 +370,10 @@ def run_dagger(cfg: DaggerConfig) -> None:
     action_noise_seed = default_action_noise_seed_for_config(seeded_experiment_config)
     initial_state_seed = resolve_initial_state_seed(seeded_experiment_config, cfg.seed)
 
-    dataset_features = simulator.get_decentralized_dataset_features()
+    if simulator.num_robots > 1:
+        dataset_features = simulator.get_decentralized_dataset_features()
+    else:
+        dataset_features = simulator.get_dataset_features()
     obs_feature_names = [
         feature_name
         for feature_name in dataset_features.keys()
@@ -351,6 +391,12 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
     neighbor_slots = int(simulator.num_robots) - 1
     neighbor_feature_dim = 2
+    encoder_config = cfg.encoder_config
+    neighbor_encoder = EncoderFactory.create(
+        encoder_type=encoder_config.encoder_type,
+        in_features=neighbor_feature_dim,
+        **encoder_config.kwargs,
+    )
 
     policy = MLPPolicy(
         state_dim=state_dim,
@@ -358,6 +404,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         hidden_dims=cfg.mlp_hidden_dims,
         neighbor_feature_dim=neighbor_feature_dim,
         neighbor_slots=neighbor_slots,
+        neighbor_encoder=neighbor_encoder,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate)
 
@@ -484,9 +531,8 @@ def run_dagger(cfg: DaggerConfig) -> None:
             "use_deep_set": True,
             "neighbor_feature_dim": neighbor_feature_dim,
             "neighbor_slots": neighbor_slots,
-            "deepset_phi_dims": list(policy.deepset_phi_dims) if getattr(policy, "use_deepset", False) else None,
-            "deepset_rho_dims": list(policy.deepset_rho_dims) if getattr(policy, "use_deepset", False) else None,
-            "deepset_pool_type": policy.deepset_pool_type if getattr(policy, "use_deepset", False) else None,
+            "encoder_type": encoder_config.encoder_type,
+            "encoder_kwargs": encoder_config.kwargs,
         }
 
         latest_checkpoint = cfg.checkpoint_dir / "mlp_dagger_checkpoint.pt"
@@ -555,11 +601,16 @@ def run_dagger(cfg: DaggerConfig) -> None:
         )
 
         if cfg.start_with_aggregation and not cfg.dataset_root.exists():
+            create_features = (
+                simulator_for_rollout.get_decentralized_dataset_features()
+                if simulator_for_rollout.num_robots > 1
+                else simulator_for_rollout.get_dataset_features()
+            )
             dataset_writer = LeRobotDataset.create(
                 repo_id=cfg.repo_id,
                 fps=int(1 / simulator_for_rollout.dt),
                 root=cfg.dataset_root,
-                features=simulator_for_rollout.get_decentralized_dataset_features(),
+                features=create_features,
             )
         else:
             dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
@@ -819,6 +870,7 @@ def main() -> None:
     if checkpoint_dir is None:
         checkpoint_dir = default_checkpoint_dir_for_system(args.system)
     mlp_hidden_dims = load_mlp_hidden_dims(args.mlp_config)
+    encoder_config = load_encoder_config(args.mlp_config)
 
     if (args.repo_id is None) != (args.dataset_root is None):
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both for fresh DAgger mode.")
@@ -857,6 +909,7 @@ def main() -> None:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         mlp_hidden_dims=mlp_hidden_dims,
+        encoder_config=encoder_config,
         checkpoint_dir=checkpoint_dir,
         seed=args.seed,
         max_train_steps=args.max_train_steps,

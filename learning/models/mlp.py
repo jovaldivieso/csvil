@@ -5,8 +5,7 @@ from collections.abc import Mapping
 import torch
 from torch import nn
 
-from learning.models.deep_set_encoder import DeepSetEncoder
-
+from learning.models.encoder import ObservationEncoder
 
 class MLPPolicy(nn.Module):
     """Simple feed-forward policy for continuous-action imitation learning."""
@@ -18,9 +17,7 @@ class MLPPolicy(nn.Module):
         hidden_dims: tuple[int, ...] = (256, 256, 128),
         neighbor_feature_dim: int | None = None,
         neighbor_slots: int = 0,
-        deepset_phi_dims: tuple[int, ...] = (128, 128),
-        deepset_rho_dims: tuple[int, ...] = (128,),
-        deepset_pool_type: str = "max",
+        neighbor_encoder: ObservationEncoder | None = None,
     ):
         super().__init__()
 
@@ -38,27 +35,29 @@ class MLPPolicy(nn.Module):
             raise ValueError(
                 "'neighbor_feature_dim' must be provided when 'neighbor_slots' is positive."
             )
-        if neighbor_feature_dim is not None and len(deepset_phi_dims) == 0:
-            raise ValueError("'deepset_phi_dims' must contain at least one layer width in deep-set mode.")
-        if neighbor_feature_dim is not None and len(deepset_rho_dims) == 0:
-            raise ValueError("'deepset_rho_dims' must contain at least one layer width in deep-set mode.")
+        if neighbor_encoder is not None and not isinstance(neighbor_encoder, nn.Module):
+            raise TypeError("'neighbor_encoder' must be an nn.Module or None.")
+        if neighbor_encoder is not None and int(getattr(neighbor_encoder, "out_dim", 0)) <= 0:
+            raise ValueError("'neighbor_encoder' must expose a positive integer 'out_dim'.")
+        if neighbor_slots > 0 and neighbor_encoder is None:
+            raise ValueError("'neighbor_encoder' must be provided when 'neighbor_slots' is positive.")
 
         self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
         self.neighbor_feature_dim = int(neighbor_feature_dim) if neighbor_feature_dim is not None else None
         self.neighbor_slots = int(neighbor_slots)
-        self.deepset_phi_dims = tuple(int(width) for width in deepset_phi_dims)
-        self.deepset_rho_dims = tuple(int(width) for width in deepset_rho_dims)
-        self.deepset_pool_type = deepset_pool_type
+        self.neighbor_encoder = neighbor_encoder
 
-        self.use_deepset = self.neighbor_feature_dim is not None
+        self.use_neighbor_encoder = self.neighbor_encoder is not None
         self.neighbor_context_dim = 0
         self.ego_dim = self.state_dim
         self.neighbor_input_dim = 0
 
-        if self.use_deepset:
+        if self.use_neighbor_encoder:
+            if self.neighbor_feature_dim is None:
+                raise ValueError("'neighbor_feature_dim' must be provided with 'neighbor_encoder'.")
             self.neighbor_input_dim = int(self.neighbor_feature_dim)
-            self.neighbor_context_dim = int(self.deepset_rho_dims[-1])
+            self.neighbor_context_dim = int(self.neighbor_encoder.out_dim)
             self.ego_dim = self.state_dim - self.neighbor_slots * (self.neighbor_input_dim + 1)
             if self.ego_dim <= 0:
                 raise ValueError(
@@ -67,15 +66,8 @@ class MLPPolicy(nn.Module):
                     f"neighbor_feature_dim={self.neighbor_input_dim}."
                 )
 
-            self.neighbor_encoder = DeepSetEncoder(
-                in_features=self.neighbor_input_dim,
-                phi_dims=list(self.deepset_phi_dims),
-                rho_dims=list(self.deepset_rho_dims),
-                pool_type=self.deepset_pool_type,
-            )
             main_input_dim = self.ego_dim + self.neighbor_context_dim
         else:
-            self.neighbor_encoder = None
             main_input_dim = self.state_dim
 
         layers: list[nn.Module] = []
@@ -116,7 +108,7 @@ class MLPPolicy(nn.Module):
 
             if ego.ndim == 1:
                 ego = ego.unsqueeze(0)
-            if self.use_deepset and neighbor_obs is not None and neighbor_mask is not None:
+            if self.use_neighbor_encoder and neighbor_obs is not None and neighbor_mask is not None:
                 if neighbor_obs.ndim == 1:
                     neighbor_obs = neighbor_obs.unsqueeze(0)
                 if neighbor_mask.ndim == 1:
@@ -141,7 +133,7 @@ class MLPPolicy(nn.Module):
         if observation_tensor.ndim == 1:
             observation_tensor = observation_tensor.unsqueeze(0)
 
-        if not self.use_deepset:
+        if not self.use_neighbor_encoder:
             return observation_tensor, None, None
 
         neighbor_total = self.neighbor_slots * (self.neighbor_input_dim + 1)
@@ -171,7 +163,7 @@ class MLPPolicy(nn.Module):
     ) -> torch.Tensor:
         ego_obs, neighbor_obs, neighbor_mask = self._split_structured_observation(observation_tensor)
 
-        if self.use_deepset:
+        if self.use_neighbor_encoder:
             if neighbor_obs is None or neighbor_mask is None:
                 raise ValueError("Deep-set policy mode requires neighbor observations and masks.")
             neighbor_context = self.neighbor_encoder(neighbor_obs, neighbor_mask)
@@ -188,8 +180,12 @@ class MLPPolicy(nn.Module):
         """
         Match policy API style by returning a tensor action for a batch.
 
-        Accepts either a pre-flattened tensor or a dict of observation tensors
-        that will be concatenated in insertion order.
+                Accepts one of the following observation formats:
+
+                - A pre-flattened torch.Tensor.
+                - A structured mapping containing ``ego_obs``, ``neighbor_obs``, and
+                    ``neighbor_mask`` (or ``observation.neighbor_state`` and its mask).
+                - A general mapping of observation tensors concatenated in insertion order.
         """
         if isinstance(observation_tensor, Mapping):
             if any(

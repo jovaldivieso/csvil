@@ -106,7 +106,8 @@ csvil/
 │   │   └── multi_unicycle2_casadi_mlp_config.yaml
 │   ├── models/
 │   │   ├── deep_set_encoder.py # Permutation-invariant neighbor-set encoder
-│   │   └── mlp_policy.py       # Custom MLP action policy used for BC/DAgger
+│   │   ├── encoder.py          # Shared neighbor-encoder interface and factory
+│   │   └── mlp.py              # MLP action policy used for BC/DAgger
 │   ├── dagger.py              # Shared DAgger rollout/evaluation/scheduling helpers
 │   ├── train_dagger.py        # Iterative DAgger for the custom MLP baseline
 │   └── train_lerobot_dagger.py  # LeRobot ACT / Diffusion training and DAgger entrypoint
@@ -363,6 +364,11 @@ Use the LeRobot DAgger entrypoint for both pure offline training and iterative D
 For pure offline ACT/Diffusion training on a pre-collected dataset, pass the dataset metadata
 and set `--dagger-iterations 0`:
 
+LeRobot ACT/Diffusion currently supports single-robot policies and centralized
+multi-robot controller synthesis only. In a multi-robot run, its policy receives
+the joint observation and produces the joint action; it does not yet implement
+the decentralized per-robot neighbor-encoder pipeline used by the custom MLP.
+
 ```bash
 docker compose run --rm csvil \
 python learning/train_lerobot_dagger.py \
@@ -391,8 +397,15 @@ Training outputs and checkpoints are saved in the configured output directory.
 
 ### Train a custom PyTorch based MLP policy with DAgger
 
-Train the custom MLP baseline with a standalone PyTorch DAgger loop.
-It can start from an existing expert dataset or in fresh mode, rolls out the learner, queries the expert on visited states, and appends corrective labels to reduce distribution shift. Expert execution during aggregation can be mixed with the learner via `--expert-mix-beta-start` / `--expert-mix-beta-end`.
+Train the custom MLP policy with a standalone PyTorch DAgger loop. This is the
+decentralized policy path: one shared policy is evaluated independently for each
+robot using that robot's ego observation plus its visible relative neighbors and
+masks, then the resulting local actions are concatenated only for simulator
+stepping. Fleet-of-1 uses the same pipeline with an empty neighbor set. The loop
+can start from an existing expert dataset or in fresh mode, queries the expert
+on visited states, and appends corrective labels to reduce distribution shift.
+Expert execution during aggregation can be mixed with the learner via
+`--expert-mix-beta-start` / `--expert-mix-beta-end`.
 
 ```bash
 docker compose run --rm csvil \
@@ -456,6 +469,23 @@ python learning/train_dagger.py \
 --action-noise-std 0.0 \
 --expert-mix-beta-start 0.5 \
 --expert-mix-beta-decay-rate 0.1 \
+--expert-mix-decay-after-success-rate 0.0
+```
+
+Fresh-start decentralized multi-robot `unicycle2` MLP DAgger example:
+
+```bash
+python learning/train_dagger.py \
+--system multi_robot \
+--expert-config test/config/multi_unicycle2_casadi_config.yaml \
+--mlp-config learning/config/multi_unicycle2_casadi_mlp_config.yaml \
+--dagger-iterations 2 \
+--trajectories-per-iteration 100 \
+--steps-per-trajectory 200 \
+--target-epochs-per-round 10 \
+--action-noise-std 0.03 \
+--expert-mix-beta-start 0.5 \
+--expert-mix-beta-decay-rate 0.5 \
 --expert-mix-decay-after-success-rate 0.0
 ```
 

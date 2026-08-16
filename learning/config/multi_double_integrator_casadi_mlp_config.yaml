@@ -4,3 +4,8 @@
 model:
   # Hidden layer widths for MLPPolicy(state_dim -> ... -> action_dim)
   hidden_dims: [256, 256, 128]
+  encoder: deepset
+  deepset:
+    phi_dims: [128, 128]
+    rho_dims: [128]
+    pool_type: max

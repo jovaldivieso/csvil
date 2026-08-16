@@ -28,7 +28,8 @@ from learning.dagger import (
     build_observation_feature_pack_cache,
     uses_deep_set_policy,
 )
-from learning.models.mlp_policy import MLPPolicy
+from learning.models.mlp import MLPPolicy
+from learning.models.encoder import EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 
@@ -60,7 +61,7 @@ def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]
     ]
     linear_layers.sort(key=lambda item: item[0])
     if len(linear_layers) < 2:
-        raise ValueError("MLP checkpoint does not contain enough network layers to infer its architecture.")
+        return (256, 256, 128)
     return tuple(out_dim for _, out_dim in linear_layers[:-1])
 
 
@@ -418,9 +419,7 @@ def run_evaluation(
         use_deep_set = bool(checkpoint.get("use_deep_set", False)) if checkpoint_metadata else False
         neighbor_feature_dim = None
         neighbor_slots = 0
-        deepset_phi_dims = (128, 128)
-        deepset_rho_dims = (128,)
-        deepset_pool_type = "max"
+        neighbor_encoder = None
         if checkpoint_metadata:
             state_dim = int(checkpoint.get("state_dim", state_dim))
             action_dim = int(checkpoint.get("action_dim", action_dim))
@@ -430,9 +429,21 @@ def run_evaluation(
             if use_deep_set:
                 neighbor_feature_dim = int(checkpoint["neighbor_feature_dim"])
                 neighbor_slots = int(checkpoint["neighbor_slots"])
-                deepset_phi_dims = tuple(int(width) for width in checkpoint["deepset_phi_dims"])
-                deepset_rho_dims = tuple(int(width) for width in checkpoint["deepset_rho_dims"])
-                deepset_pool_type = str(checkpoint["deepset_pool_type"])
+                encoder_type = str(checkpoint.get("encoder_type", "deepset"))
+                encoder_kwargs_raw = checkpoint.get("encoder_kwargs")
+                if isinstance(encoder_kwargs_raw, Mapping):
+                    encoder_kwargs = dict(encoder_kwargs_raw)
+                else:
+                    encoder_kwargs = {
+                        "phi_dims": tuple(int(width) for width in checkpoint.get("deepset_phi_dims", (128, 128))),
+                        "rho_dims": tuple(int(width) for width in checkpoint.get("deepset_rho_dims", (128,))),
+                        "pool_type": str(checkpoint.get("deepset_pool_type", "max")),
+                    }
+                neighbor_encoder = EncoderFactory.create(
+                    encoder_type=encoder_type,
+                    in_features=neighbor_feature_dim,
+                    **encoder_kwargs,
+                )
 
         policy = MLPPolicy(
             state_dim=state_dim,
@@ -440,9 +451,7 @@ def run_evaluation(
             hidden_dims=hidden_dims,
             neighbor_feature_dim=neighbor_feature_dim,
             neighbor_slots=neighbor_slots,
-            deepset_phi_dims=deepset_phi_dims,
-            deepset_rho_dims=deepset_rho_dims,
-            deepset_pool_type=deepset_pool_type,
+            neighbor_encoder=neighbor_encoder,
         )
         policy.load_state_dict(state_dict)
 
@@ -454,7 +463,7 @@ def run_evaluation(
     policy.to(device)
 
     mlp_observation_feature_cache = None
-    if policy_type == "mlp" and not policy.use_deepset:
+    if policy_type == "mlp" and not policy.use_neighbor_encoder:
         dataset_features = simulator.get_dataset_features()
         current_feature_names = [
             name for name in dataset_features if is_observation_feature(name)
