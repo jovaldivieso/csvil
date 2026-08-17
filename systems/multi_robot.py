@@ -145,6 +145,10 @@ class MultiRobotSimulator(DynamicsSimulator):
             and int(sim.nu) == int(self.simulators[0].nu)
             for sim in self.simulators[1:]
         )
+        if not self._is_homogeneous:
+            raise ValueError(
+                "MultiRobotSimulator only supports strictly homogeneous teams (same simulator type and dimensions)."
+            )
         self._casadi_mapped_dynamics: ca.Function | None = None
 
     @property
@@ -295,38 +299,26 @@ class MultiRobotSimulator(DynamicsSimulator):
         return all(sim.is_done(robot_state, validate=False) for sim, robot_state in zip(self.simulators, split_state))
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any:
-        if self._is_homogeneous:
-            reference_sim = self.simulators[0]
-            sim_nx = int(reference_sim.nx)
-            sim_nu = int(reference_sim.nu)
-            if self._casadi_mapped_dynamics is None:
-                x_sym = ca.SX.sym("x_single", sim_nx)
-                u_sym = ca.SX.sym("u_single", sim_nu)
-                x_next_sym = reference_sim.casadi_dynamics(x_sym, u_sym)
-                step_fn = ca.Function(
-                    "multi_robot_step",
-                    [x_sym, u_sym],
-                    [x_next_sym],
-                    ["x", "u"],
-                    ["x_next"],
-                )
-                self._casadi_mapped_dynamics = step_fn.map(self.num_robots)
+        reference_sim = self.simulators[0]
+        sim_nx = int(reference_sim.nx)
+        sim_nu = int(reference_sim.nu)
+        if self._casadi_mapped_dynamics is None:
+            x_sym = ca.SX.sym("x_single", sim_nx)
+            u_sym = ca.SX.sym("u_single", sim_nu)
+            x_next_sym = reference_sim.casadi_dynamics(x_sym, u_sym)
+            step_fn = ca.Function(
+                "multi_robot_step",
+                [x_sym, u_sym],
+                [x_next_sym],
+                ["x", "u"],
+                ["x_next"],
+            )
+            self._casadi_mapped_dynamics = step_fn.map(self.num_robots)
 
-            mapped_state = ca.reshape(x, sim_nx, self.num_robots)
-            mapped_action = ca.reshape(u, sim_nu, self.num_robots)
-            mapped_next = self._casadi_mapped_dynamics(mapped_state, mapped_action)
-            return ca.vec(mapped_next)
-
-        next_parts = []
-        for sim, state_slice, action_slice in zip(
-            self.simulators,
-            self.robot_state_slices,
-            self.robot_action_slices,
-        ):
-            next_parts.append(sim.casadi_dynamics(x[state_slice], u[action_slice]))
-        if len(next_parts) == 1:
-            return next_parts[0]
-        return ca.vertcat(*next_parts)
+        mapped_state = ca.reshape(x, sim_nx, self.num_robots)
+        mapped_action = ca.reshape(u, sim_nu, self.num_robots)
+        mapped_next = self._casadi_mapped_dynamics(mapped_state, mapped_action)
+        return ca.vec(mapped_next)
 
     def get_dataset_features(self) -> dict[str, Any]:
         features: dict[str, Any] = {}
