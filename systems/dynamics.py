@@ -76,6 +76,8 @@ class DynamicsProtocol(Protocol):
 
     def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
+    def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray: ...
+
     def is_done(self, state: np.ndarray, validate: bool = True) -> bool: ...
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any: ...
@@ -276,6 +278,10 @@ class DynamicsSimulator(ABC):
     def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
         """Get observation"""
         pass
+
+    def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray:
+        """Project a global vector into the robot's ego frame; identity unless the system has orientation"""
+        return np.asarray(vec, dtype=float)
 
     @abstractmethod
     def casadi_dynamics(self, x: Any, u: Any) -> Any:

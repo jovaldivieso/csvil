@@ -277,7 +277,7 @@ class MultiRobotSimulator(DynamicsSimulator):
                     rel_parts.append(np.zeros(2, dtype=float))
                     mask_parts.append(0.0)
                 else:
-                    rel_parts.append(delta)
+                    rel_parts.append(sim.global_vector_to_ego(delta, robot_state))
                     mask_parts.append(1.0)
 
             if rel_parts:
