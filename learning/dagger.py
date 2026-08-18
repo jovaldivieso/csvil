@@ -304,13 +304,13 @@ def pack_observation_features(
     return pack_observation_features_from_cache(observation, feature_cache)
 
 
-def uses_deep_set_policy(simulator: DynamicsProtocol, policy: object) -> bool:
+def uses_decentralized_policy(simulator: DynamicsProtocol, policy: object) -> bool:
     return bool(getattr(policy, "use_neighbor_encoder", False)) and hasattr(
         simulator, "decentralized_policy_observation"
     )
 
 
-def build_deep_set_policy_input(
+def build_decentralized_policy_input(
     simulator: DynamicsProtocol,
     observation: np.ndarray,
     robot_id: int,
@@ -332,7 +332,7 @@ def build_deep_set_policy_input(
     return policy_input
 
 
-def build_deep_set_joint_action(
+def build_decentralized_joint_action(
     simulator: DynamicsProtocol,
     policy,
     observation: np.ndarray,
@@ -341,7 +341,7 @@ def build_deep_set_joint_action(
     """Query the shared decentralized policy once per robot and concatenate local actions."""
     action_parts: list[np.ndarray] = []
     for robot_id in range(int(simulator.num_robots)):
-        policy_input = build_deep_set_policy_input(
+        policy_input = build_decentralized_policy_input(
             simulator=simulator,
             observation=observation,
             robot_id=robot_id,
@@ -349,7 +349,7 @@ def build_deep_set_joint_action(
         )
         with torch.inference_mode():
             action_tensor = policy.select_action(policy_input)
-        action_parts.append(action_tensor.squeeze(0).detach().cpu().numpy())
+        action_parts.append(action_tensor.squeeze(0)[0].detach().cpu().numpy())
 
     return np.concatenate(action_parts)
 

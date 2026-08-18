@@ -30,8 +30,8 @@ class DeepSetEncoder(ObservationEncoder):
     def __init__(
         self,
         in_features: int,
-        phi_dims: Iterable[int],
-        rho_dims: Iterable[int],
+        phi_dims: Iterable[int] = (128, 128),
+        rho_dims: Iterable[int] = (128,),
         pool_type: str = "max",
     ) -> None:
         super().__init__()

@@ -24,12 +24,12 @@ from systems.seed_utils import (
 )
 from planning.casadi_planner import PlannerSolveError
 from learning.dagger import (
-    build_deep_set_joint_action,
+    build_decentralized_joint_action,
     build_observation_feature_pack_cache,
-    uses_deep_set_policy,
+    uses_decentralized_policy,
 )
 from learning.models.mlp import MLPPolicy
-from learning.models.encoder import EncoderFactory
+from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 
@@ -317,13 +317,13 @@ def rollout_policy(
     trajectory = [state.copy()]
     policy.reset()
 
-    deep_set_inference = uses_deep_set_policy(simulator, policy)
+    decentralized_inference = uses_decentralized_policy(simulator, policy)
 
     for step in range(1, num_steps + 1):
         observation = simulator.observe(state, validate=False)
 
-        if deep_set_inference:
-            action = build_deep_set_joint_action(
+        if decentralized_inference:
+            action = build_decentralized_joint_action(
                 simulator=simulator,
                 policy=policy,
                 observation=observation,
@@ -345,7 +345,10 @@ def rollout_policy(
             if policy_postprocessor is not None:
                 action_tensor = policy_postprocessor(action_tensor)
 
-            action = action_tensor.squeeze(0).cpu().numpy()
+            if isinstance(policy, MLPPolicy):
+                action = action_tensor.squeeze(0)[0].cpu().numpy()
+            else:
+                action = action_tensor.squeeze(0).cpu().numpy()
 
         executed_action = apply_execution_noise(
             simulator=simulator,
@@ -416,7 +419,12 @@ def run_evaluation(
 
         state_dim, action_dim = infer_mlp_dimensions_from_state_dict(state_dict)
         hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-        use_deep_set = bool(checkpoint.get("use_deep_set", False)) if checkpoint_metadata else False
+        use_neighbor_encoder = (
+            bool(checkpoint.get("use_neighbor_encoder", checkpoint.get("use_deep_set", False)))
+            if checkpoint_metadata
+            else False
+        )
+        prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
         neighbor_feature_dim = None
         neighbor_slots = 0
         neighbor_encoder = None
@@ -426,19 +434,12 @@ def run_evaluation(
             hidden_dims_raw = checkpoint.get("hidden_dims")
             if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
                 hidden_dims = tuple(int(width) for width in hidden_dims_raw)
-            if use_deep_set:
+            if use_neighbor_encoder:
                 neighbor_feature_dim = int(checkpoint["neighbor_feature_dim"])
                 neighbor_slots = int(checkpoint["neighbor_slots"])
-                encoder_type = str(checkpoint.get("encoder_type", "deepset"))
+                encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE))
                 encoder_kwargs_raw = checkpoint.get("encoder_kwargs")
-                if isinstance(encoder_kwargs_raw, Mapping):
-                    encoder_kwargs = dict(encoder_kwargs_raw)
-                else:
-                    encoder_kwargs = {
-                        "phi_dims": tuple(int(width) for width in checkpoint.get("deepset_phi_dims", (128, 128))),
-                        "rho_dims": tuple(int(width) for width in checkpoint.get("deepset_rho_dims", (128,))),
-                        "pool_type": str(checkpoint.get("deepset_pool_type", "max")),
-                    }
+                encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
                 neighbor_encoder = EncoderFactory.create(
                     encoder_type=encoder_type,
                     in_features=neighbor_feature_dim,
@@ -449,6 +450,7 @@ def run_evaluation(
             state_dim=state_dim,
             action_dim=action_dim,
             hidden_dims=hidden_dims,
+            prediction_horizon=prediction_horizon,
             neighbor_feature_dim=neighbor_feature_dim,
             neighbor_slots=neighbor_slots,
             neighbor_encoder=neighbor_encoder,

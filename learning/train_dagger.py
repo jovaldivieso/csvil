@@ -29,7 +29,7 @@ from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger import (
     DaggerEvalMetrics,
     ExpertMixBetaController,
-    build_deep_set_joint_action,
+    build_decentralized_joint_action,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
     print_rollout_metrics,
@@ -39,7 +39,7 @@ from learning.dagger import (
     with_seeded_initial_state_config,
 )
 from learning.models.mlp import MLPPolicy
-from learning.models.encoder import EncoderFactory
+from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
@@ -68,13 +68,17 @@ class LeRobotMLPDataset(Dataset):
         neighbor_feature_dim: int = 2,
         neighbor_slots: int = 0,
         simulator: DynamicsProtocol | None = None,
+        prediction_horizon: int = 1,
     ):
+        if prediction_horizon <= 0:
+            raise ValueError("'prediction_horizon' must be positive.")
         self.dataset = lerobot_dataset
         self.obs_feature_names = obs_feature_names
         self.action_feature_names = action_feature_names
         self.neighbor_feature_dim = int(neighbor_feature_dim)
         self.neighbor_slots = int(neighbor_slots)
         self.simulator = simulator
+        self.prediction_horizon = int(prediction_horizon)
         dataset_features = getattr(getattr(lerobot_dataset, "meta", None), "features", {})
         self.has_decentralized_features = "observation.neighbor_state" in dataset_features
         self.samples_per_frame = 1
@@ -109,7 +113,7 @@ class LeRobotMLPDataset(Dataset):
             elif "observation.neighbor_mask" not in sample:
                 raise ValueError(
                     "Centralized multi-robot frames must contain observation.neighbor_mask "
-                    "to train a masked Deep Set policy."
+                    "to train a masked decentralized policy."
                 )
             else:
                 env_global = sample["observation.environment_state"].float().view(-1)
@@ -142,7 +146,9 @@ class LeRobotMLPDataset(Dataset):
             ]
 
         if len(ego_parts) == 0:
-            raise ValueError("Deep-set dataset samples must include environment and state features.")
+            raise ValueError(
+                "Decentralized policy dataset samples must include environment and state features."
+            )
         ego_obs = torch.cat(ego_parts, dim=0)
 
         neighbor_state_tensor = neighbor_state.float().view(-1)
@@ -159,14 +165,44 @@ class LeRobotMLPDataset(Dataset):
             "neighbor_obs": neighbor_obs,
             "neighbor_mask": neighbor_mask_2d,
         }
-        if self.samples_per_frame > 1:
-            action_global = sample["action"].float().view(-1)
-            action_start = sum(int(sim.nu) for sim in self.simulator.simulators[:robot_id])
-            action_end = action_start + int(self.simulator.simulators[robot_id].nu)
-            action_parts = [action_global[action_start:action_end]]
-        else:
-            action_parts = [sample[name].float().view(-1) for name in self.action_feature_names]
-        action = torch.cat(action_parts, dim=0)
+        action_chunk: list[torch.Tensor] = []
+        current_episode = getattr(sample, "episode_index", sample.get("episode_index", 0))
+        for step_offset in range(self.prediction_horizon):
+            target_idx = frame_idx + step_offset if self.samples_per_frame > 1 else idx + step_offset
+            valid = target_idx < len(self.dataset)
+            if valid:
+                future_sample = self.dataset[target_idx]
+                future_episode = getattr(
+                    future_sample,
+                    "episode_index",
+                    future_sample.get("episode_index", current_episode),
+                )
+                valid = future_episode == current_episode
+
+            if not valid:
+                if action_chunk:
+                    action_chunk.append(action_chunk[-1])
+                elif self.samples_per_frame > 1:
+                    action_chunk.append(
+                        torch.zeros(self.simulator.simulators[robot_id].nu, dtype=torch.float32)
+                    )
+                else:
+                    action_chunk.append(torch.zeros(len(self.action_feature_names), dtype=torch.float32))
+                continue
+
+            if self.samples_per_frame > 1:
+                action_global = future_sample["action"].float().view(-1)
+                action_start = sum(int(sim.nu) for sim in self.simulator.simulators[:robot_id])
+                action_end = action_start + int(self.simulator.simulators[robot_id].nu)
+                step_action = action_global[action_start:action_end]
+            else:
+                step_action = torch.cat(
+                    [future_sample[name].float().view(-1) for name in self.action_feature_names],
+                    dim=0,
+                )
+            action_chunk.append(step_action)
+
+        action = torch.stack(action_chunk, dim=0)
         return observation, action
 
 
@@ -195,6 +231,7 @@ class DaggerConfig:
     batch_size: int
     learning_rate: float
     mlp_hidden_dims: tuple[int, ...]
+    prediction_horizon: int
     encoder_config: EncoderConfig
     checkpoint_dir: Path
     seed: int
@@ -215,22 +252,32 @@ def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
     return validated.hidden_dims
 
 
+def load_prediction_horizon(mlp_config_path: Path | None) -> int:
+    if mlp_config_path is None:
+        return 1
+    raw_config = load_yaml_config(mlp_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if isinstance(model_section, Mapping):
+        return int(model_section.get("prediction_horizon", 1))
+    return 1
+
+
 def load_encoder_config(mlp_config_path: Path | None) -> EncoderConfig:
     if mlp_config_path is None:
-        return EncoderConfig(encoder_type="deepset", kwargs={})
+        return EncoderConfig(encoder_type=DEFAULT_ENCODER_TYPE, kwargs={})
 
     raw_config = load_yaml_config(mlp_config_path)
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
         raise ValueError("MLP config model section must be a mapping.")
 
-    encoder_type_raw = model_section.get("encoder", "deepset")
+    encoder_type_raw = model_section.get("encoder", DEFAULT_ENCODER_TYPE)
     if not isinstance(encoder_type_raw, str) or not encoder_type_raw.strip():
         raise ValueError("MLP config 'model.encoder' must be a non-empty string.")
 
     normalized_type = encoder_type_raw.strip().lower()
-    if normalized_type == "deepset":
-        raw_kwargs = model_section.get("deepset", {})
+    if normalized_type == DEFAULT_ENCODER_TYPE:
+        raw_kwargs = model_section.get(DEFAULT_ENCODER_TYPE, {})
         if not isinstance(raw_kwargs, Mapping):
             raise ValueError("MLP config 'model.deepset' must be a mapping.")
         kwargs: dict[str, object] = {
@@ -402,6 +449,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         state_dim=state_dim,
         action_dim=action_dim,
         hidden_dims=cfg.mlp_hidden_dims,
+        prediction_horizon=cfg.prediction_horizon,
         neighbor_feature_dim=neighbor_feature_dim,
         neighbor_slots=neighbor_slots,
         neighbor_encoder=neighbor_encoder,
@@ -433,6 +481,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
             f"decay_after_eval_success={cfg.expert_mix_decay_after_success_rate if cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
         )
     print(f"MLP hidden dims: {list(cfg.mlp_hidden_dims)}")
+    print(f"Prediction horizon: {cfg.prediction_horizon}")
     if cfg.start_with_aggregation:
         print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
     else:
@@ -443,7 +492,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         f"target_epochs={cfg.target_epochs_per_round:.2f}, "
         f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
     )
-    print(f"Deep-set neighbor slots: {neighbor_slots}")
+    print(f"Decentralized policy neighbor slots: {neighbor_slots}")
 
     def train_on_aggregate(label: str, training_round: int) -> None:
         print(f"\n=== {label} ===")
@@ -455,6 +504,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
             action_feature_names=act_feature_names,
             neighbor_slots=neighbor_slots,
             simulator=simulator,
+            prediction_horizon=cfg.prediction_horizon,
         )
 
         dataloader_generator = torch.Generator()
@@ -496,7 +546,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
         def action_fn(observation: np.ndarray) -> np.ndarray:
             with torch.inference_mode():
-                return build_deep_set_joint_action(
+                return build_decentralized_joint_action(
                     simulator=eval_simulator,
                     policy=policy,
                     observation=observation,
@@ -525,10 +575,11 @@ def run_dagger(cfg: DaggerConfig) -> None:
             "optimizer_state_dict": optimizer.state_dict(),
             "state_dim": state_dim,
             "action_dim": action_dim,
+            "prediction_horizon": cfg.prediction_horizon,
             "hidden_dims": list(cfg.mlp_hidden_dims),
             "obs_feature_names": obs_feature_names,
             "system": cfg.system,
-            "use_deep_set": True,
+            "use_neighbor_encoder": policy.use_neighbor_encoder,
             "neighbor_feature_dim": neighbor_feature_dim,
             "neighbor_slots": neighbor_slots,
             "encoder_type": encoder_config.encoder_type,
@@ -618,7 +669,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         try:
             def policy_action_fn(observation: np.ndarray) -> np.ndarray:
                 with torch.inference_mode():
-                    return build_deep_set_joint_action(
+                    return build_decentralized_joint_action(
                         simulator=simulator_for_rollout,
                         policy=policy,
                         observation=observation,
@@ -870,6 +921,7 @@ def main() -> None:
     if checkpoint_dir is None:
         checkpoint_dir = default_checkpoint_dir_for_system(args.system)
     mlp_hidden_dims = load_mlp_hidden_dims(args.mlp_config)
+    prediction_horizon = load_prediction_horizon(args.mlp_config)
     encoder_config = load_encoder_config(args.mlp_config)
 
     if (args.repo_id is None) != (args.dataset_root is None):
@@ -909,6 +961,7 @@ def main() -> None:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         mlp_hidden_dims=mlp_hidden_dims,
+        prediction_horizon=prediction_horizon,
         encoder_config=encoder_config,
         checkpoint_dir=checkpoint_dir,
         seed=args.seed,
