@@ -6,8 +6,9 @@ import torch
 from torch import nn
 
 from learning.models.encoder import ObservationEncoder
+from learning.models.policy import ActionPolicy
 
-class MLPPolicy(nn.Module):
+class MLPPolicy(ActionPolicy):
     """Simple feed-forward policy for continuous-action imitation learning."""
 
     def __init__(
@@ -52,7 +53,7 @@ class MLPPolicy(nn.Module):
         self.neighbor_slots = int(neighbor_slots)
         self.neighbor_encoder = neighbor_encoder
 
-        self.use_neighbor_encoder = self.neighbor_encoder is not None
+        self._use_neighbor_encoder = self.neighbor_encoder is not None
         self.neighbor_context_dim = 0
         self.ego_dim = self.state_dim
         self.neighbor_input_dim = 0
@@ -85,6 +86,10 @@ class MLPPolicy(nn.Module):
         layers.append(nn.Linear(in_dim, action_dim * prediction_horizon))
 
         self.network = nn.Sequential(*layers)
+
+    @property
+    def use_neighbor_encoder(self) -> bool:
+        return self._use_neighbor_encoder
 
     def forward(
         self,

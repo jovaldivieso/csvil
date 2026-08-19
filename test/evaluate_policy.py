@@ -28,7 +28,7 @@ from learning.dagger import (
     build_observation_feature_pack_cache,
     uses_decentralized_policy,
 )
-from learning.models.mlp import MLPPolicy
+from learning.models.mlp_policy import MLPPolicy
 from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol

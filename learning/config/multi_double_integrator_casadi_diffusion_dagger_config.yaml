@@ -1,0 +1,23 @@
+# Diffusion Policy architecture config for learning/train_dagger.py
+# Input/output dimensions are inferred from simulator dataset features and action space.
+
+model:
+  policy_type: diffusion  # options: mlp, diffusion
+  prediction_horizon: 16  # number of future action steps to predict
+
+  diffusion:
+    num_diffusion_iters: 100
+    sampling_method: ddim  # options: ddpm, ddim
+    num_inference_steps: 10  # used only if sampling_method is ddim
+    beta_schedule: squaredcos_cap_v2  # options: linear, squaredcos_cap_v2
+    min_beta: 0.0001
+    max_beta: 0.02
+
+  # Noise prediction network hidden layers
+  hidden_dims: [256, 256, 256]
+
+  encoder: deepset
+  deepset:
+    phi_dims: [128, 128]
+    rho_dims: [128]
+    pool_type: max

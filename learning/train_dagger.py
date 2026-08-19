@@ -38,7 +38,7 @@ from learning.dagger import (
     set_seed,
     with_seeded_initial_state_config,
 )
-from learning.models.mlp import MLPPolicy
+from learning.models.policy import ActionPolicy, PolicyFactory
 from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
@@ -48,6 +48,7 @@ from systems.seed_utils import (
 
 
 DEFAULT_MLP_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 128)
+DEFAULT_DIFFUSION_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 256)
 StructuredObservation = dict[str, torch.Tensor]
 
 
@@ -233,6 +234,8 @@ class DaggerConfig:
     mlp_hidden_dims: tuple[int, ...]
     prediction_horizon: int
     encoder_config: EncoderConfig
+    policy_type: str
+    diffusion_config: DiffusionConfig
     checkpoint_dir: Path
     seed: int
     max_train_steps: int | None
@@ -244,12 +247,71 @@ class EncoderConfig:
     kwargs: dict[str, object]
 
 
+@dataclass(frozen=True)
+class DiffusionConfig:
+    num_diffusion_iters: int = 100
+    sampling_method: str = "ddim"
+    num_inference_steps: int = 10
+    beta_schedule: str = "squaredcos_cap_v2"
+    min_beta: float = 0.0001
+    max_beta: float = 0.02
+
+
 def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
     if mlp_config_path is None:
         return DEFAULT_MLP_HIDDEN_DIMS
 
+    policy_type = load_policy_type(mlp_config_path)
+    if policy_type == "diffusion":
+        raw_config = load_yaml_config(mlp_config_path)
+        model_section = raw_config.get("model", raw_config)
+        hidden_dims_raw = model_section.get("hidden_dims") if isinstance(model_section, Mapping) else None
+        if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
+            return tuple(int(width) for width in hidden_dims_raw)
+        return DEFAULT_DIFFUSION_HIDDEN_DIMS
+
     validated = load_and_validate_mlp_architecture_config(mlp_config_path)
     return validated.hidden_dims
+
+
+def load_policy_type(mlp_config_path: Path | None) -> str:
+    if mlp_config_path is None:
+        return "mlp"
+    raw_config = load_yaml_config(mlp_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ValueError("Model config 'model' section must be a mapping.")
+    policy_type_raw = model_section.get("policy_type", "mlp")
+    if not isinstance(policy_type_raw, str) or policy_type_raw.strip().lower() not in {"mlp", "diffusion"}:
+        raise ValueError("'model.policy_type' must be one of {'mlp', 'diffusion'}.")
+    return policy_type_raw.strip().lower()
+
+
+def load_diffusion_config(mlp_config_path: Path | None) -> DiffusionConfig:
+    if mlp_config_path is None:
+        return DiffusionConfig()
+
+    raw_config = load_yaml_config(mlp_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ValueError("Model config 'model' section must be a mapping.")
+
+    diffusion_section = model_section.get("diffusion", {})
+    if not isinstance(diffusion_section, Mapping):
+        raise ValueError("Model config 'model.diffusion' must be a mapping.")
+
+    sampling_method = str(diffusion_section.get("sampling_method", "ddim")).strip().lower()
+    if sampling_method not in {"ddpm", "ddim"}:
+        raise ValueError("'model.diffusion.sampling_method' must be one of {'ddpm', 'ddim'}.")
+
+    return DiffusionConfig(
+        num_diffusion_iters=int(diffusion_section.get("num_diffusion_iters", 100)),
+        sampling_method=sampling_method,
+        num_inference_steps=int(diffusion_section.get("num_inference_steps", 10)),
+        beta_schedule=str(diffusion_section.get("beta_schedule", "squaredcos_cap_v2")),
+        min_beta=float(diffusion_section.get("min_beta", 0.0001)),
+        max_beta=float(diffusion_section.get("max_beta", 0.02)),
+    )
 
 
 def load_prediction_horizon(mlp_config_path: Path | None) -> int:
@@ -305,7 +367,7 @@ def default_dataset_root_for_system(system: str, timestamp: int) -> Path:
 
 
 def train_policy_steps(
-    policy: MLPPolicy,
+    policy: ActionPolicy,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -346,8 +408,11 @@ def train_policy_steps(
         actions = actions.to(device)
 
         optimizer.zero_grad()
-        predictions = policy(observations)
-        loss = mse_loss(predictions, actions)
+        try:
+            loss = policy.compute_loss(observations, actions)
+        except NotImplementedError:
+            predictions = policy(observations)
+            loss = mse_loss(predictions, actions)
         loss.backward()
         optimizer.step()
 
@@ -445,7 +510,19 @@ def run_dagger(cfg: DaggerConfig) -> None:
         **encoder_config.kwargs,
     )
 
-    policy = MLPPolicy(
+    diffusion_kwargs: dict[str, object] = {}
+    if cfg.policy_type == "diffusion":
+        diffusion_kwargs = {
+            "num_diffusion_iters": cfg.diffusion_config.num_diffusion_iters,
+            "sampling_method": cfg.diffusion_config.sampling_method,
+            "num_inference_steps": cfg.diffusion_config.num_inference_steps,
+            "beta_schedule": cfg.diffusion_config.beta_schedule,
+            "min_beta": cfg.diffusion_config.min_beta,
+            "max_beta": cfg.diffusion_config.max_beta,
+        }
+
+    policy: ActionPolicy = PolicyFactory.create(
+        policy_type=cfg.policy_type,
         state_dim=state_dim,
         action_dim=action_dim,
         hidden_dims=cfg.mlp_hidden_dims,
@@ -453,6 +530,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         neighbor_feature_dim=neighbor_feature_dim,
         neighbor_slots=neighbor_slots,
         neighbor_encoder=neighbor_encoder,
+        **diffusion_kwargs,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate)
 
@@ -482,6 +560,15 @@ def run_dagger(cfg: DaggerConfig) -> None:
         )
     print(f"MLP hidden dims: {list(cfg.mlp_hidden_dims)}")
     print(f"Prediction horizon: {cfg.prediction_horizon}")
+    print(f"Policy type: {cfg.policy_type}")
+    if cfg.policy_type == "diffusion":
+        print(
+            "Diffusion sampling: "
+            f"method={cfg.diffusion_config.sampling_method}, "
+            f"num_diffusion_iters={cfg.diffusion_config.num_diffusion_iters}, "
+            f"num_inference_steps={cfg.diffusion_config.num_inference_steps}, "
+            f"beta_schedule={cfg.diffusion_config.beta_schedule}"
+        )
     if cfg.start_with_aggregation:
         print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
     else:
@@ -584,10 +671,21 @@ def run_dagger(cfg: DaggerConfig) -> None:
             "neighbor_slots": neighbor_slots,
             "encoder_type": encoder_config.encoder_type,
             "encoder_kwargs": encoder_config.kwargs,
+            "policy_type": cfg.policy_type,
         }
+        if cfg.policy_type == "diffusion":
+            checkpoint_data["diffusion_config"] = {
+                "num_diffusion_iters": cfg.diffusion_config.num_diffusion_iters,
+                "sampling_method": cfg.diffusion_config.sampling_method,
+                "num_inference_steps": cfg.diffusion_config.num_inference_steps,
+                "beta_schedule": cfg.diffusion_config.beta_schedule,
+                "min_beta": cfg.diffusion_config.min_beta,
+                "max_beta": cfg.diffusion_config.max_beta,
+            }
 
-        latest_checkpoint = cfg.checkpoint_dir / "mlp_dagger_checkpoint.pt"
-        iteration_checkpoint = cfg.checkpoint_dir / f"mlp_dagger_iter_{training_round:03d}.pt"
+        checkpoint_prefix = "diffusion_dagger" if cfg.policy_type == "diffusion" else "mlp_dagger"
+        latest_checkpoint = cfg.checkpoint_dir / f"{checkpoint_prefix}_checkpoint.pt"
+        iteration_checkpoint = cfg.checkpoint_dir / f"{checkpoint_prefix}_iter_{training_round:03d}.pt"
         torch.save(checkpoint_data, latest_checkpoint)
         torch.save(checkpoint_data, iteration_checkpoint)
         print(f"Saved checkpoints: {latest_checkpoint} and {iteration_checkpoint}")
@@ -882,8 +980,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "optional YAML config for MLP architecture; expected key 'model.hidden_dims' "
-            "(or top-level 'hidden_dims'), e.g. [512, 256, 128]"
+            "optional YAML config for the policy architecture (MLP or diffusion); expected key "
+            "'model.hidden_dims' (or top-level 'hidden_dims'), e.g. [512, 256, 128], plus optional "
+            "'model.policy_type' ('mlp'|'diffusion') and 'model.diffusion' settings"
         ),
     )
     parser.add_argument(
@@ -923,6 +1022,8 @@ def main() -> None:
     mlp_hidden_dims = load_mlp_hidden_dims(args.mlp_config)
     prediction_horizon = load_prediction_horizon(args.mlp_config)
     encoder_config = load_encoder_config(args.mlp_config)
+    policy_type = load_policy_type(args.mlp_config)
+    diffusion_config = load_diffusion_config(args.mlp_config)
 
     if (args.repo_id is None) != (args.dataset_root is None):
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both for fresh DAgger mode.")
@@ -963,6 +1064,8 @@ def main() -> None:
         mlp_hidden_dims=mlp_hidden_dims,
         prediction_horizon=prediction_horizon,
         encoder_config=encoder_config,
+        policy_type=policy_type,
+        diffusion_config=diffusion_config,
         checkpoint_dir=checkpoint_dir,
         seed=args.seed,
         max_train_steps=args.max_train_steps,

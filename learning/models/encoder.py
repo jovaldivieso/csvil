@@ -26,7 +26,7 @@ class EncoderFactory:
     def create(encoder_type: str, in_features: int, **kwargs: object) -> ObservationEncoder:
         normalized_type = encoder_type.strip().lower()
         if normalized_type == DEFAULT_ENCODER_TYPE:
-            from learning.models.deep_set_encoder import DeepSetEncoder
+            from learning.models.deepset_encoder import DeepSetEncoder
 
             return DeepSetEncoder(in_features=in_features, **kwargs)
         raise ValueError(
