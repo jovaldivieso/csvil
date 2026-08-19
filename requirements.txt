@@ -1,3 +1,5 @@
 lerobot[dataset]==0.5.1
 casadi==3.6.7
 matplotlib==3.10.7
+torch_geometric
+

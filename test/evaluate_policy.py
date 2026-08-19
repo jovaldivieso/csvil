@@ -406,8 +406,16 @@ def run_evaluation(
         policy.load_state_dict(state_dict)
 
         policy_display_name = "MLP"
+    elif policy_type == "gnn":
+        # Imported lazily: torch_geometric is only needed for GNN policies, so the
+        # other policy types keep working in environments without it installed.
+        from learning.models.gnn import load_gnn_policy
+
+        policy = load_gnn_policy(checkpoint_path=model_dir, device=device)
+
+        policy_display_name = "GNN"
     else:
-        raise ValueError("'policy_type' must be one of {'diffusion', 'act', 'mlp'}.")
+        raise ValueError("'policy_type' must be one of {'diffusion', 'act', 'mlp', 'gnn'}.")
 
     policy.eval()
     policy.to(device)
@@ -681,7 +689,7 @@ def main():
     parser.add_argument(
         "--policy-type",
         type=str.lower,
-        choices=["diffusion", "act", "mlp"],
+        choices=["diffusion", "act", "mlp", "gnn"],
         required=True,
         help="the type of policy architecture to evaluate",
     )
