@@ -3,4 +3,10 @@
 
 model:
   # Hidden layer widths for MLPPolicy(state_dim -> ... -> action_dim)
-  hidden_dims: [512, 256, 128]
+  hidden_dims: [256, 256, 128]
+  prediction_horizon: 20          # Set to 1 for single-step prediction
+  encoder: deepset                # Set to transformer, GNN, etc
+  deepset:
+    phi_dims: [128, 128]
+    rho_dims: [128]
+    pool_type: sum                # Can be sum, max, mean

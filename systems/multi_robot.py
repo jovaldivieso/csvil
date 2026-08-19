@@ -30,7 +30,7 @@ class MultiRobotSimulator(DynamicsSimulator):
         ------------------------------
         For each robot, augmented observation ordering is:
 
-        ``[base_environment_features, relative_xy_to_other_robots..., base_state_features]``
+        ``[base_environment_features, relative_xy_to_other_robots..., visibility_mask..., base_state_features]``
 
         The global observation is the concatenation of these per-robot augmented
         observations in simulator list order.
@@ -41,6 +41,7 @@ class MultiRobotSimulator(DynamicsSimulator):
         top-level keys:
 
         - ``observation.environment_state``
+        - ``observation.neighbor_mask``
         - ``observation.state``
         - ``action``
 
@@ -50,7 +51,9 @@ class MultiRobotSimulator(DynamicsSimulator):
         ----------------------------------------------
         Relative x/y terms to other robots are included only when the other robot
         lies within the observing robot's configured visibility radius. When out
-        of range, the corresponding relative term is set to zero.
+        of range, the corresponding relative term is set to zero and the matching
+        mask slot is set to zero so collisions at distance 0 remain distinct from
+        invisible neighbors.
     """
 
     def __init__(self, simulators: Iterable[DynamicsProtocol], config: Mapping[str, Any] | None = None):
@@ -78,6 +81,8 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.robot_observation_slices: list[slice] = []
         self.robot_base_observation_dims: list[int] = []
         self.robot_env_dims: list[int] = []
+        self.robot_relative_dims: list[int] = []
+        self.robot_neighbor_mask_dims: list[int] = []
         self.robot_proprio_dims: list[int] = []
 
         state_start = 0
@@ -87,18 +92,18 @@ class MultiRobotSimulator(DynamicsSimulator):
             state_end = state_start + int(sim.nx)
             action_end = action_start + int(sim.nu)
             env_dim, proprio_dim = self._observation_feature_dims(sim)
-            base_obs_dim = env_dim + proprio_dim
-
-            # Each robot additionally observes relative x/y offsets to all other robots.
-            extra_rel_dim = 2 * (len(self.simulators) - 1)
-            obs_dim = base_obs_dim + extra_rel_dim
-            obs_end = obs_start + obs_dim
+            relative_dim = 2 * (len(self.simulators) - 1)
+            mask_dim = len(self.simulators) - 1
+            base_obs_dim = env_dim + relative_dim + mask_dim + proprio_dim
+            obs_end = obs_start + base_obs_dim
 
             self.robot_state_slices.append(slice(state_start, state_end))
             self.robot_action_slices.append(slice(action_start, action_end))
             self.robot_observation_slices.append(slice(obs_start, obs_end))
             self.robot_base_observation_dims.append(base_obs_dim)
             self.robot_env_dims.append(env_dim)
+            self.robot_relative_dims.append(relative_dim)
+            self.robot_neighbor_mask_dims.append(mask_dim)
             self.robot_proprio_dims.append(proprio_dim)
 
             state_start = state_end
@@ -134,6 +139,17 @@ class MultiRobotSimulator(DynamicsSimulator):
         # Used by some planners as a symmetric control bound fallback.
         self.max_action = float(max(float(sim.max_action) for sim in self.simulators))
         self.d_safe = float(self.config.get("d_safe", 0.0))
+        self._is_homogeneous = all(
+            type(sim) is type(self.simulators[0])
+            and int(sim.nx) == int(self.simulators[0].nx)
+            and int(sim.nu) == int(self.simulators[0].nu)
+            for sim in self.simulators[1:]
+        )
+        if not self._is_homogeneous:
+            raise ValueError(
+                "MultiRobotSimulator only supports strictly homogeneous teams (same simulator type and dimensions)."
+            )
+        self._casadi_mapped_dynamics: ca.Function | None = None
 
     @property
     def is_euclidean(self) -> bool:
@@ -201,14 +217,13 @@ class MultiRobotSimulator(DynamicsSimulator):
         Base ordering must match sub-simulator observe(): [environment_state, state].
         """
         base_env_dim = self.robot_env_dims[robot_id]
+        rel_dim = self.robot_relative_dims[robot_id]
+        mask_dim = self.robot_neighbor_mask_dims[robot_id]
         proprio_dim = self.robot_proprio_dims[robot_id]
-        rel_dim = 2 * (len(self.simulators) - 1)
 
-        aug_env_dim = base_env_dim + rel_dim
-
-        # Augmented layout per robot: [base_env, rel_terms, proprio]
+        # Augmented layout per robot: [base_env, rel_terms, mask_terms, proprio]
         base_env = robot_obs[:base_env_dim]
-        proprio_start = aug_env_dim
+        proprio_start = base_env_dim + rel_dim + mask_dim
         proprio_end = proprio_start + proprio_dim
         proprio = robot_obs[proprio_start:proprio_end]
         return np.concatenate([base_env, proprio])
@@ -256,6 +271,7 @@ class MultiRobotSimulator(DynamicsSimulator):
             base_proprio = base_obs[env_dim:]
 
             rel_parts: list[np.ndarray] = []
+            mask_parts: list[float] = []
             for other_idx, other_pos in enumerate(positions):
                 if other_idx == robot_idx:
                     continue
@@ -263,12 +279,15 @@ class MultiRobotSimulator(DynamicsSimulator):
                 visibility_radius = float(self.robot_visibility_radii[robot_idx])
                 if np.isfinite(visibility_radius) and np.linalg.norm(delta) > visibility_radius:
                     rel_parts.append(np.zeros(2, dtype=float))
+                    mask_parts.append(0.0)
                 else:
-                    rel_parts.append(delta)
+                    rel_parts.append(sim.global_vector_to_ego(delta, robot_state))
+                    mask_parts.append(1.0)
 
             if rel_parts:
                 rel_obs = np.concatenate(rel_parts)
-                observations.append(np.concatenate([base_env, rel_obs, base_proprio]))
+                rel_mask = np.asarray(mask_parts, dtype=float)
+                observations.append(np.concatenate([base_env, rel_obs, rel_mask, base_proprio]))
             else:
                 observations.append(np.concatenate([base_env, base_proprio]))
 
@@ -280,23 +299,35 @@ class MultiRobotSimulator(DynamicsSimulator):
         return all(sim.is_done(robot_state, validate=False) for sim, robot_state in zip(self.simulators, split_state))
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any:
-        next_parts = []
-        for sim, state_slice, action_slice in zip(
-            self.simulators,
-            self.robot_state_slices,
-            self.robot_action_slices,
-        ):
-            next_parts.append(sim.casadi_dynamics(x[state_slice], u[action_slice]))
-        if len(next_parts) == 1:
-            return next_parts[0]
-        return ca.vertcat(*next_parts)
+        reference_sim = self.simulators[0]
+        sim_nx = int(reference_sim.nx)
+        sim_nu = int(reference_sim.nu)
+        if self._casadi_mapped_dynamics is None:
+            x_sym = ca.SX.sym("x_single", sim_nx)
+            u_sym = ca.SX.sym("u_single", sim_nu)
+            x_next_sym = reference_sim.casadi_dynamics(x_sym, u_sym)
+            step_fn = ca.Function(
+                "multi_robot_step",
+                [x_sym, u_sym],
+                [x_next_sym],
+                ["x", "u"],
+                ["x_next"],
+            )
+            self._casadi_mapped_dynamics = step_fn.map(self.num_robots)
+
+        mapped_state = ca.reshape(x, sim_nx, self.num_robots)
+        mapped_action = ca.reshape(u, sim_nu, self.num_robots)
+        mapped_next = self._casadi_mapped_dynamics(mapped_state, mapped_action)
+        return ca.vec(mapped_next)
 
     def get_dataset_features(self) -> dict[str, Any]:
         features: dict[str, Any] = {}
         env_names: list[str] = []
+        mask_names: list[str] = []
         state_names: list[str] = []
         action_names: list[str] = []
         env_dim = 0
+        mask_dim = 0
         state_dim = 0
         action_dim = 0
 
@@ -313,10 +344,12 @@ class MultiRobotSimulator(DynamicsSimulator):
                 )
 
             robot_env_dim = int(env_feature["shape"][0]) + 2 * (len(self.simulators) - 1)
+            robot_mask_dim = len(self.simulators) - 1
             robot_state_dim = int(proprio_feature["shape"][0])
             robot_action_dim = int(action_feature["shape"][0])
 
             env_dim += robot_env_dim
+            mask_dim += robot_mask_dim
             state_dim += robot_state_dim
             action_dim += robot_action_dim
 
@@ -328,6 +361,7 @@ class MultiRobotSimulator(DynamicsSimulator):
                     f"robot_{robot_id}.rel_robot_{other_id}_x",
                     f"robot_{robot_id}.rel_robot_{other_id}_y",
                 ])
+                mask_names.append(f"robot_{robot_id}.neighbor_mask_robot_{other_id}")
 
             state_names.extend([f"robot_{robot_id}.{name}" for name in proprio_feature.get("names", [])])
             action_names.extend([f"robot_{robot_id}.{name}" for name in action_feature.get("names", [])])
@@ -336,6 +370,11 @@ class MultiRobotSimulator(DynamicsSimulator):
             "dtype": "float32",
             "shape": (env_dim,),
             "names": env_names,
+        }
+        features["observation.neighbor_mask"] = {
+            "dtype": "float32",
+            "shape": (mask_dim,),
+            "names": mask_names,
         }
         features["observation.state"] = {
             "dtype": "float32",
@@ -419,24 +458,188 @@ class MultiRobotSimulator(DynamicsSimulator):
         split_action = self._split_action(action)
 
         env_tensors: list[np.ndarray] = []
+        mask_tensors: list[np.ndarray] = []
         state_tensors: list[np.ndarray] = []
         action_tensors: list[np.ndarray] = []
         for robot_id, (sim, robot_obs, robot_action) in enumerate(
             zip(self.simulators, split_obs, split_action)
         ):
             base_env_dim = self.robot_env_dims[robot_id]
+            rel_dim = self.robot_relative_dims[robot_id]
+            mask_dim = self.robot_neighbor_mask_dims[robot_id]
             proprio_dim = self.robot_proprio_dims[robot_id]
-            rel_dim = 2 * (len(self.simulators) - 1)
             env_end = base_env_dim + rel_dim
-            proprio_start = env_end
+            mask_start = env_end
+            mask_end = mask_start + mask_dim
+            proprio_start = mask_end
             proprio_end = proprio_start + proprio_dim
 
             env_tensors.append(np.asarray(robot_obs[:env_end], dtype=np.float32))
+            mask_tensors.append(np.asarray(robot_obs[mask_start:mask_end], dtype=np.float32))
             state_tensors.append(np.asarray(robot_obs[proprio_start:proprio_end], dtype=np.float32))
             action_tensors.append(np.asarray(robot_action, dtype=np.float32))
 
         return {
             "observation.environment_state": np.concatenate(env_tensors),
+            "observation.neighbor_mask": np.concatenate(mask_tensors) if len(mask_tensors) > 0 else np.empty(0, dtype=np.float32),
             "observation.state": np.concatenate(state_tensors),
             "action": np.concatenate(action_tensors),
         }
+
+    def _validate_homogeneous_decentralized_dimensions(self) -> tuple[int, int, int]:
+        env_dim = int(self.robot_env_dims[0])
+        proprio_dim = int(self.robot_proprio_dims[0])
+        action_dim = int(self.simulators[0].nu)
+        reference_simulator = self.simulators[0]
+
+        def schema_signature(simulator: DynamicsProtocol) -> tuple[tuple[str, tuple[int, ...], tuple[str, ...]], ...]:
+            signature: list[tuple[str, tuple[int, ...], tuple[str, ...]]] = []
+            for feature_name, feature_info in simulator.get_dataset_features().items():
+                shape = tuple(int(value) for value in feature_info.get("shape", ()))
+                names = tuple(str(name) for name in feature_info.get("names", ()))
+                signature.append((feature_name, shape, names))
+            return tuple(signature)
+
+        reference_signature = schema_signature(reference_simulator)
+
+        for robot_idx, sim in enumerate(self.simulators[1:], start=1):
+            if type(sim) is not type(reference_simulator):
+                raise ValueError(
+                    "Decentralized multi-robot policies require identical simulator types; "
+                    f"robot 0 uses {type(reference_simulator).__name__}, "
+                    f"robot {robot_idx} uses {type(sim).__name__}."
+                )
+            if schema_signature(sim) != reference_signature:
+                raise ValueError(
+                    "Decentralized multi-robot policies require identical dataset feature semantics "
+                    "(names and shapes) for every robot."
+                )
+            if int(self.robot_env_dims[robot_idx]) != env_dim:
+                raise ValueError(
+                    "Decentralized multi-robot policies require homogeneous base environment dimensions."
+                )
+            if int(self.robot_proprio_dims[robot_idx]) != proprio_dim:
+                raise ValueError(
+                    "Decentralized multi-robot policies require homogeneous proprioceptive dimensions."
+                )
+            if int(sim.nu) != action_dim:
+                raise ValueError(
+                    "Decentralized multi-robot policies require homogeneous action dimensions."
+                )
+
+        return env_dim, proprio_dim, action_dim
+
+    def decentralized_policy_observation(self, obs: np.ndarray, robot_id: int = 0) -> dict[str, np.ndarray]:
+        split_obs = self._split_observation(obs)
+        if robot_id < 0 or robot_id >= len(split_obs):
+            raise IndexError(f"robot_id {robot_id} is out of bounds for {len(split_obs)} robots.")
+
+        robot_obs = split_obs[robot_id]
+        base_env_dim = self.robot_env_dims[robot_id]
+        rel_dim = self.robot_relative_dims[robot_id]
+        mask_dim = self.robot_neighbor_mask_dims[robot_id]
+        proprio_dim = self.robot_proprio_dims[robot_id]
+
+        env_end = base_env_dim + rel_dim
+        mask_start = env_end
+        mask_end = mask_start + mask_dim
+        proprio_start = mask_end
+        proprio_end = proprio_start + proprio_dim
+
+        ego_obs = np.concatenate(
+            [
+                np.asarray(robot_obs[:base_env_dim], dtype=np.float32),
+                np.asarray(robot_obs[proprio_start:proprio_end], dtype=np.float32),
+            ]
+        )
+        neighbor_state = np.asarray(robot_obs[base_env_dim:env_end], dtype=np.float32)
+        neighbor_mask = np.asarray(robot_obs[mask_start:mask_end], dtype=np.float32)
+
+        if mask_dim == 0:
+            neighbor_obs = np.empty((0, 2), dtype=np.float32)
+            neighbor_mask_2d = np.empty((0, 1), dtype=np.float32)
+        else:
+            neighbor_obs = neighbor_state.reshape(mask_dim, 2)
+            neighbor_mask_2d = neighbor_mask.reshape(mask_dim, 1)
+
+        return {
+            "ego_obs": ego_obs,
+            "neighbor_obs": neighbor_obs,
+            "neighbor_mask": neighbor_mask_2d,
+        }
+
+    def get_decentralized_dataset_features(self) -> dict[str, Any]:
+        env_dim, proprio_dim, action_dim = self._validate_homogeneous_decentralized_dimensions()
+        neighbor_count = len(self.simulators) - 1
+
+        env_feature = self.simulators[0].get_dataset_features().get("observation.environment_state")
+        proprio_feature = self.simulators[0].get_dataset_features().get("observation.state")
+        action_feature = self.simulators[0].get_dataset_features().get("action")
+        if env_feature is None or proprio_feature is None or action_feature is None:
+            raise ValueError(
+                "Each robot simulator must define observation.environment_state, observation.state, and action features."
+            )
+
+        return {
+            "observation.environment_state": {
+                "dtype": "float32",
+                "shape": (env_dim,),
+                "names": [name for name in env_feature.get("names", [])],
+            },
+            "observation.state": {
+                "dtype": "float32",
+                "shape": (proprio_dim,),
+                "names": [name for name in proprio_feature.get("names", [])],
+            },
+            "observation.neighbor_state": {
+                "dtype": "float32",
+                "shape": (2 * neighbor_count,),
+                "names": [
+                    name
+                    for neighbor_idx in range(neighbor_count)
+                    for name in (f"neighbor_{neighbor_idx}_x", f"neighbor_{neighbor_idx}_y")
+                ],
+            },
+            "observation.neighbor_mask": {
+                "dtype": "float32",
+                "shape": (neighbor_count,),
+                "names": [f"neighbor_{neighbor_idx}_visible" for neighbor_idx in range(neighbor_count)],
+            },
+            "action": {
+                "dtype": "float32",
+                "shape": (action_dim,),
+                "names": [name for name in action_feature.get("names", [])],
+            },
+        }
+
+    def format_decentralized_dataset_frames(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, Any]]:
+        self._validate_homogeneous_decentralized_dimensions()
+        split_obs = self._split_observation(obs)
+        split_action = self._split_action(action)
+
+        frames: list[dict[str, Any]] = []
+        for robot_id, robot_action in enumerate(split_action):
+            robot_policy_obs = self.decentralized_policy_observation(obs, robot_id)
+            frames.append(
+                {
+                    "observation.environment_state": np.asarray(
+                        robot_policy_obs["ego_obs"][: self.robot_env_dims[robot_id]],
+                        dtype=np.float32,
+                    ),
+                    "observation.state": np.asarray(
+                        robot_policy_obs["ego_obs"][self.robot_env_dims[robot_id] :],
+                        dtype=np.float32,
+                    ),
+                    "observation.neighbor_state": np.asarray(
+                        robot_policy_obs["neighbor_obs"].reshape(-1),
+                        dtype=np.float32,
+                    ),
+                    "observation.neighbor_mask": np.asarray(
+                        robot_policy_obs["neighbor_mask"].reshape(-1),
+                        dtype=np.float32,
+                    ),
+                    "action": np.asarray(robot_action, dtype=np.float32),
+                }
+            )
+
+        return frames

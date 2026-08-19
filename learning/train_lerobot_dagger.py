@@ -33,7 +33,6 @@ from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger import (
     DaggerEvalMetrics,
     ExpertMixBetaController,
-    apply_execution_noise,
     build_observation_feature_pack_cache,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,

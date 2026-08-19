@@ -294,6 +294,7 @@ def save_xy_rollout_video(
     path_labels=None,
     trajectory_colors: Sequence[str] | None = None,
     trajectory_line_styles: Sequence[str] | None = None,
+    phase_lengths: Sequence[int] | None = None,
 ) -> str | None:
     """Save an MP4 rollout animation with the same geometry as the PDF plot.
 
@@ -456,7 +457,32 @@ def save_xy_rollout_video(
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.legend(loc="best")
 
-    total_frames = max(len(item["x"]) for item in series)
+    if len(series) % robot_count != 0:
+        raise ValueError(
+            f"Length of series ({len(series)}) must be an exact multiple of robot count ({robot_count})."
+        )
+    trajectory_count = len(series) // robot_count
+    if phase_lengths is None:
+        phase_lengths = [trajectory_count]
+    phase_lengths = [int(length) for length in phase_lengths]
+    if any(length <= 0 for length in phase_lengths):
+        raise ValueError("'phase_lengths' entries must be positive integers.")
+    if sum(phase_lengths) != trajectory_count:
+        raise ValueError(
+            "'phase_lengths' must contain positive group sizes summing to the number of trajectories."
+        )
+
+    series_phases: list[int] = []
+    for phase_idx, phase_length in enumerate(phase_lengths):
+        series_phases.extend([phase_idx] * (phase_length * robot_count))
+    phase_frame_counts = []
+    series_start = 0
+    for phase_length in phase_lengths:
+        phase_series = series[series_start : series_start + phase_length * robot_count]
+        phase_frame_counts.append(max(len(item["x"]) for item in phase_series))
+        series_start += phase_length * robot_count
+    phase_frame_offsets = np.cumsum([0, *phase_frame_counts])
+    total_frames = int(phase_frame_offsets[-1])
 
     def _init():
         for line, point, heading in zip(line_artists, point_artists, heading_artists):
@@ -468,8 +494,24 @@ def save_xy_rollout_video(
         return [*line_artists, *point_artists, *[h for h in heading_artists if h is not None]]
 
     def _update(frame_idx: int):
-        for item, line, point, heading in zip(series, line_artists, point_artists, heading_artists):
-            end = min(frame_idx + 1, len(item["x"]))
+        phase_idx = int(np.searchsorted(phase_frame_offsets[1:], frame_idx, side="right"))
+        phase_start = int(phase_frame_offsets[phase_idx])
+        phase_frame_idx = frame_idx - phase_start
+
+        for item, item_phase, line, point, heading in zip(
+            series, series_phases, line_artists, point_artists, heading_artists
+        ):
+            if item_phase > phase_idx:
+                line.set_data([], [])
+                point.set_data([], [])
+                if heading is not None:
+                    heading.set_visible(False)
+                continue
+
+            if item_phase < phase_idx:
+                continue
+
+            end = min(phase_frame_idx + 1, len(item["x"]))
             x_data = item["x"][:end]
             y_data = item["y"][:end]
             line.set_data(x_data, y_data)

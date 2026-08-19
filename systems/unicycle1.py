@@ -71,13 +71,24 @@ class Unicycle1(DynamicsSimulator):
         next_theta = np.arctan2(np.sin(theta + omega * self.dt), np.cos(theta + omega * self.dt))
         return np.array([next_x, next_y, next_theta], dtype=float)
 
+    def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray:
+        """
+        rotates a global 2D vector by -theta into the robot body frame
+        """
+        state_array = self.validate_state(state)
+        theta = state_array[2]
+        ego_x = np.cos(theta) * vec[0] + np.sin(theta) * vec[1]
+        ego_y = -np.sin(theta) * vec[0] + np.cos(theta) * vec[1]
+        return np.array([ego_x, ego_y], dtype=float)
+
     def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         rel_pos = self.goal[0:2] - state_array[:2]
+        ego_pos = self.global_vector_to_ego(rel_pos, state_array)
         rel_theta = np.arctan2(np.sin(self.goal[2] - state_array[2]), np.cos(self.goal[2] - state_array[2]))
         obs = np.array([
-            rel_pos[0],
-            rel_pos[1],
+            ego_pos[0],
+            ego_pos[1],
             np.sin(rel_theta),
             np.cos(rel_theta),
             self.current_action[0],
@@ -149,10 +160,16 @@ class Unicycle1(DynamicsSimulator):
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
         obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)
         rel_theta = np.arctan2(obs_array[2], obs_array[3])
+        theta = self.goal[2] - rel_theta
+
+        ego_dx, ego_dy = obs_array[0], obs_array[1]
+        global_dx = np.cos(theta) * ego_dx - np.sin(theta) * ego_dy
+        global_dy = np.sin(theta) * ego_dx + np.cos(theta) * ego_dy
+
         return np.array([
-            self.goal[0] - obs_array[0],
-            self.goal[1] - obs_array[1],
-            self.goal[2] - rel_theta,
+            self.goal[0] - global_dx,
+            self.goal[1] - global_dy,
+            theta,
         ], dtype=float)
 
     @property
