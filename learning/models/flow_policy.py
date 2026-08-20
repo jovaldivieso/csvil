@@ -7,33 +7,12 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-
 from learning.models.encoder import ObservationEncoder
 from learning.models.policy import ActionPolicy
 
 
-def _build_noise_scheduler(
-    sampling_method: str,
-    num_diffusion_iters: int,
-    beta_schedule: str,
-    min_beta: float,
-    max_beta: float,
-) -> DDPMScheduler | DDIMScheduler:
-    scheduler_cls = DDPMScheduler if sampling_method == "ddpm" else DDIMScheduler
-    return scheduler_cls(
-        num_train_timesteps=num_diffusion_iters,
-        beta_start=min_beta,
-        beta_end=max_beta,
-        beta_schedule=beta_schedule,
-        prediction_type="epsilon",
-        clip_sample=False,
-    )
-
-
 class SinusoidalTimeEmbedding(nn.Module):
-    """Standard transformer-style sinusoidal embedding for the diffusion timestep."""
+    """Standard transformer-style sinusoidal embedding for continuous flow time."""
 
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
@@ -49,8 +28,8 @@ class SinusoidalTimeEmbedding(nn.Module):
         return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
 
-class DiffusionPolicy(ActionPolicy):
-    """Conditional DDPM/DDIM noise-prediction policy with MLPPolicy-compatible API."""
+class FlowPolicy(ActionPolicy):
+    """Conditional flow-matching policy with Euler ODE inference."""
 
     def __init__(
         self,
@@ -58,12 +37,7 @@ class DiffusionPolicy(ActionPolicy):
         action_dim: int,
         prediction_horizon: int = 16,
         hidden_dims: tuple[int, ...] = (256, 256, 256),
-        num_diffusion_iters: int = 100,
-        sampling_method: str = "ddim",
         num_inference_steps: int = 10,
-        beta_schedule: str = "squaredcos_cap_v2",
-        min_beta: float = 0.0001,
-        max_beta: float = 0.02,
         time_embed_dim: int = 64,
         neighbor_feature_dim: int | None = None,
         neighbor_slots: int = 0,
@@ -79,15 +53,8 @@ class DiffusionPolicy(ActionPolicy):
             raise ValueError(f"'prediction_horizon' must be positive, got {prediction_horizon}.")
         if len(hidden_dims) < 1:
             raise ValueError("'hidden_dims' must contain at least one layer width.")
-        if num_diffusion_iters <= 0:
-            raise ValueError(f"'num_diffusion_iters' must be positive, got {num_diffusion_iters}.")
-        if sampling_method not in {"ddpm", "ddim"}:
-            raise ValueError(f"'sampling_method' must be one of {{'ddpm', 'ddim'}}, got '{sampling_method}'.")
-        if sampling_method == "ddim" and not (0 < num_inference_steps <= num_diffusion_iters):
-            raise ValueError(
-                "'num_inference_steps' must be in (0, num_diffusion_iters] for DDIM, "
-                f"got {num_inference_steps} with num_diffusion_iters={num_diffusion_iters}."
-            )
+        if num_inference_steps <= 0:
+            raise ValueError(f"'num_inference_steps' must be positive, got {num_inference_steps}.")
         if neighbor_slots < 0:
             raise ValueError("'neighbor_slots' must be non-negative.")
         if neighbor_feature_dim is not None and neighbor_feature_dim <= 0:
@@ -106,8 +73,6 @@ class DiffusionPolicy(ActionPolicy):
         self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
         self.prediction_horizon = int(prediction_horizon)
-        self.num_diffusion_iters = int(num_diffusion_iters)
-        self.sampling_method = sampling_method
         self.num_inference_steps = int(num_inference_steps)
         self.neighbor_feature_dim = int(neighbor_feature_dim) if neighbor_feature_dim is not None else None
         self.neighbor_slots = int(neighbor_slots)
@@ -147,17 +112,6 @@ class DiffusionPolicy(ActionPolicy):
         layers.append(nn.Linear(in_dim, self.action_flat_dim))
         self.net = nn.Sequential(*layers)
 
-        self.beta_schedule = beta_schedule
-        self.min_beta = float(min_beta)
-        self.max_beta = float(max_beta)
-        self.noise_scheduler = _build_noise_scheduler(
-            sampling_method=self.sampling_method,
-            num_diffusion_iters=self.num_diffusion_iters,
-            beta_schedule=self.beta_schedule,
-            min_beta=self.min_beta,
-            max_beta=self.max_beta,
-        )
-
     @property
     def use_neighbor_encoder(self) -> bool:
         return self._use_neighbor_encoder
@@ -174,14 +128,15 @@ class DiffusionPolicy(ActionPolicy):
             return torch.cat([ego_obs, neighbor_context], dim=-1)
         return ego_obs
 
-    def _predict_noise(
+    def _predict_velocity(
         self,
-        noisy_actions_flat: torch.Tensor,
+        action_state_flat: torch.Tensor,
         obs_cond: torch.Tensor,
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
-        time_embedding = self.time_embed(timesteps)
-        net_input = torch.cat([noisy_actions_flat, obs_cond, time_embedding], dim=-1)
+        # Scale t from [0, 1] to [0, 1000] for stable sinusoidal embedding.
+        time_embedding = self.time_embed(timesteps * 1000.0)
+        net_input = torch.cat([action_state_flat, obs_cond, time_embedding], dim=-1)
         return self.net(net_input)
 
     def compute_loss(
@@ -192,18 +147,14 @@ class DiffusionPolicy(ActionPolicy):
         obs_cond = self._encode_observations(observation_dict)
 
         batch_size = actions.shape[0]
-        noise = torch.randn_like(actions)
-        timesteps = torch.randint(
-            0,
-            self.noise_scheduler.config.num_train_timesteps,
-            (batch_size,),
-            device=actions.device,
-            dtype=torch.long,
-        )
-        noisy_actions = self.noise_scheduler.add_noise(actions, noise, timesteps)
-
-        pred_noise = self._predict_noise(noisy_actions.flatten(1), obs_cond, timesteps)
-        return F.mse_loss(pred_noise, noise.flatten(1))
+        x_1 = actions
+        x_0 = torch.randn_like(actions)
+        t = torch.rand((batch_size,), device=actions.device, dtype=actions.dtype)
+        t_expanded = t.view(batch_size, 1, 1)
+        x_t = t_expanded * x_1 + (1.0 - t_expanded) * x_0
+        target_velocity = x_1 - x_0
+        pred_velocity = self._predict_velocity(x_t.flatten(1), obs_cond, t)
+        return F.mse_loss(pred_velocity, target_velocity.flatten(1))
 
     def forward(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
         return self.select_action(observation_dict)
@@ -214,28 +165,20 @@ class DiffusionPolicy(ActionPolicy):
         batch_size = obs_cond.shape[0]
         device = obs_cond.device
 
-        actions = torch.randn(
+        x = torch.randn(
             batch_size, self.prediction_horizon, self.action_dim, device=device, dtype=obs_cond.dtype
         )
 
-        inference_steps = (
-            self.num_inference_steps
-            if self.sampling_method == "ddim"
-            else self.noise_scheduler.config.num_train_timesteps
-        )
-        self.noise_scheduler.set_timesteps(inference_steps, device=device)
+        dt = 1.0 / float(self.num_inference_steps)
 
-        for t in self.noise_scheduler.timesteps:
-            timestep_tensor = torch.full((batch_size,), t, device=device, dtype=torch.long)
-            pred_noise = self._predict_noise(actions.flatten(1), obs_cond, timestep_tensor)
-            pred_noise = pred_noise.view(batch_size, self.prediction_horizon, self.action_dim)
-            actions = self.noise_scheduler.step(
-                model_output=pred_noise,
-                timestep=t,
-                sample=actions,
-            ).prev_sample
+        for step in range(self.num_inference_steps):
+            t_val = step * dt
+            t_tensor = torch.full((batch_size,), t_val, device=device, dtype=obs_cond.dtype)
+            pred_velocity = self._predict_velocity(x.flatten(1), obs_cond, t_tensor)
+            pred_velocity = pred_velocity.view(batch_size, self.prediction_horizon, self.action_dim)
+            x = x + pred_velocity * dt
 
-        return actions
+        return x
 
     def reset(self) -> None:
         """Keeps parity with other policy APIs that expose a reset hook."""

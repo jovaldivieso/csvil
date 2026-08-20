@@ -85,12 +85,12 @@ csvil/
 │   │   └── multi_unicycle2_casadi_mlp_config.yaml
 │   ├── models/
 │   │   ├── deepset_encoder.py  # Permutation-invariant neighbor-set encoder
-│   │   ├── diffusion.py        # Conditional DDPM/DDIM diffusion action policy used for BC/DAgger
+│   │   ├── flow_policy.py      # Conditional flow-matching action policy used for BC/DAgger
 │   │   ├── encoder.py          # Shared interface and factory
-│   │   ├── mlp.py              # MLP action policy
+│   │   ├── mlp_policy.py       # MLP action policy
 │   │   └── policy.py           # Shared interface and factory
 │   ├── dagger.py              # Shared DAgger rollout/evaluation/scheduling helpers
-│   ├── train_dagger.py        # Iterative DAgger for the custom MLP / diffusion baselines
+│   ├── train_dagger.py        # Iterative DAgger for the custom MLP / flow baselines
 │   └── train_lerobot_dagger.py  # LeRobot ACT / Diffusion training and DAgger entrypoint
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
@@ -210,8 +210,8 @@ python learning/train_dagger.py \
 
 The optional `--mlp-config` controls the shared action policy and neighbor
 encoder. `model.policy_type` selects between `mlp` (default, `learning/models/mlp_policy.py`)
-and `diffusion` (`learning/models/diffusion_policy.py`, a conditional DDPM/DDIM noise-predictor
-with DDPM/DDIM selected via `model.diffusion.sampling_method`). Both policies implement
+and `flow` (`learning/models/flow_policy.py`, an optimal-transport conditional flow-matching
+policy sampled by Euler integration via `model.flow.num_inference_steps`). Both policies implement
 the shared `ActionPolicy` interface (`learning/models/policy.py`) and are instantiated
 through `PolicyFactory.create(policy_type=...)`. Both share the same
 neighbor-encoding config below. The currently supported encoder is `deepset`, which is
@@ -219,7 +219,7 @@ permutation-invariant over visible neighbors. Its configuration is:
 
 ```yaml
 model:
-  policy_type: mlp  # mlp or diffusion
+  policy_type: mlp  # mlp or flow
   hidden_dims: [256, 256, 128]
   prediction_horizon: 1
   encoder: deepset
@@ -227,14 +227,9 @@ model:
     phi_dims: [128, 128]
     rho_dims: [128]
     pool_type: max  # sum, max, or mean
-  # diffusion-only settings, used when policy_type: diffusion
-  diffusion:
-    num_diffusion_iters: 100
-    sampling_method: ddim  # ddpm or ddim
-    num_inference_steps: 10  # used only when sampling_method: ddim
-    beta_schedule: squaredcos_cap_v2  # linear or squaredcos_cap_v2
-    min_beta: 0.0001
-    max_beta: 0.02
+  # flow-only settings, used when policy_type: flow
+  flow:
+    num_inference_steps: 10  # Euler integration steps
 ```
 
 `phi_dims` encodes each neighbor, `pool_type` aggregates the masked set, and
@@ -242,8 +237,8 @@ model:
 The encoder interface is intentionally generic for future implementations such
 as Transformer encoders, but `deepset` is the only encoder currently available.
 Fleet-of-1 uses the same policy interface with an empty neighbor set. See
-`learning/config/multi_double_integrator_casadi_diffusion_dagger_config.yaml`
-for a full diffusion example.
+`learning/config/multi_double_integrator_casadi_flow_config.yaml`
+for a full flow example.
 
 ### Decentralized MLP DAgger recipes
 
@@ -373,7 +368,7 @@ round does: aggregate learner rollouts with expert labels, then retrain.
 - `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`
 - `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` for a strict "start decaying only after success is nonzero" gate
 - `--adaptive-beta-recovery`: optional (default `true`); when enabled, beta increases by one schedule step after an eval-success regression; when disabled, beta follows monotonic decay
-- `--mlp-config`: optional YAML file for the policy architecture (MLP or diffusion), e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [256, 256, 128]`, or `learning/config/multi_double_integrator_casadi_diffusion_dagger_config.yaml` with `model.policy_type: diffusion`
+- `--mlp-config`: optional YAML file for the policy architecture (MLP or flow), e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [256, 256, 128]`, or `learning/config/multi_double_integrator_casadi_flow_config.yaml` with `model.policy_type: flow`
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate` and `aggregation_mean_steps`.
 - After each retrain, deterministic in-loop evaluation reports `eval_success_rate` and `eval_mean_steps`.
 - Evaluation defaults to 10 seeded rollouts; tune with `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, and `--eval-action-noise-std`.
@@ -381,7 +376,7 @@ round does: aggregate learner rollouts with expert labels, then retrain.
 
 If you want expert-only offline training with no DAgger aggregation at all, use one of these two entrypoints with `--dagger-iterations 0` and a precollected expert dataset:
 
-- `learning/train_dagger.py` for the custom MLP or diffusion baselines (`model.policy_type` in `--mlp-config`)
+- `learning/train_dagger.py` for the custom MLP or flow baselines (`model.policy_type` in `--mlp-config`)
 - `learning/train_lerobot_dagger.py` for LeRobot ACT/Diffusion
 
 If you want to keep the DAgger loop but make aggregation expert-only, keep `--dagger-iterations > 0` and set `--expert-mix-beta-start 1.0` and `--expert-mix-beta-end 1.0` (or the equivalent beta schedule) so rollouts still run but always execute the expert action.

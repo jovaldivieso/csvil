@@ -28,6 +28,7 @@ from learning.dagger import (
     build_observation_feature_pack_cache,
     uses_decentralized_policy,
 )
+from learning.models.flow_policy import FlowPolicy
 from learning.models.mlp_policy import MLPPolicy
 from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from planning.planner import PlannerProtocol
@@ -51,14 +52,19 @@ def is_observation_feature(feature_name: str) -> bool:
 
 
 def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, ...]:
-    linear_layers = [
-        (int(key.split(".")[1]), int(value.shape[0]))
-        for key, value in state_dict.items()
-        if key.startswith("network.")
-        and key.endswith(".weight")
-        and value.ndim == 2
-        and key.split(".")[1].isdigit()
-    ]
+    linear_layers: list[tuple[int, int]] = []
+    for prefix in ("network", "net"):
+        linear_layers = [
+            (int(key.split(".")[1]), int(value.shape[0]))
+            for key, value in state_dict.items()
+            if key.startswith(f"{prefix}.")
+            and key.endswith(".weight")
+            and value.ndim == 2
+            and key.split(".")[1].isdigit()
+        ]
+        if linear_layers:
+            break
+
     linear_layers.sort(key=lambda item: item[0])
     if len(linear_layers) < 2:
         return (256, 256, 128)
@@ -66,13 +72,18 @@ def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]
 
 
 def infer_mlp_dimensions_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, int]:
-    linear_weights = [
-        value
-        for key, value in state_dict.items()
-        if key.startswith("network.") and key.endswith(".weight") and value.ndim == 2
-    ]
+    linear_weights: list[torch.Tensor] = []
+    for prefix in ("network", "net"):
+        linear_weights = [
+            value
+            for key, value in state_dict.items()
+            if key.startswith(f"{prefix}.") and key.endswith(".weight") and value.ndim == 2
+        ]
+        if linear_weights:
+            break
+
     if not linear_weights:
-        raise ValueError("MLP checkpoint does not contain network linear weights.")
+        raise ValueError("Checkpoint does not contain expected policy linear weights.")
     return int(linear_weights[0].shape[1]), int(linear_weights[-1].shape[0])
 
 
@@ -295,7 +306,7 @@ def rollout_planner(
 
 def rollout_policy(
     simulator: DynamicsProtocol,
-    policy: DiffusionPolicy | ACTPolicy | MLPPolicy,
+    policy: DiffusionPolicy | ACTPolicy | MLPPolicy | FlowPolicy,
     device: torch.device,
     initial_state: np.ndarray,
     num_steps: int,
@@ -345,7 +356,7 @@ def rollout_policy(
             if policy_postprocessor is not None:
                 action_tensor = policy_postprocessor(action_tensor)
 
-            if isinstance(policy, MLPPolicy):
+            if isinstance(policy, (MLPPolicy, FlowPolicy)):
                 action = action_tensor.squeeze(0)[0].cpu().numpy()
             else:
                 action = action_tensor.squeeze(0).cpu().numpy()
@@ -403,6 +414,66 @@ def run_evaluation(
     elif policy_type == "act":
         policy = ACTPolicy.from_pretrained(model_dir)
         policy_display_name = "ACT"
+    elif policy_type == "flow":
+        state_dim = sum(
+            int(feature_info["shape"][0])
+            for feature_name, feature_info in simulator.get_dataset_features().items()
+            if is_observation_feature(feature_name)
+        )
+        action_dim = int(simulator.nu)
+
+        checkpoint = torch.load(model_dir, map_location=device)
+        checkpoint_metadata = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
+        state_dict = checkpoint["model_state_dict"] if checkpoint_metadata else checkpoint
+        if not isinstance(state_dict, Mapping):
+            raise ValueError("Flow checkpoint must contain a state dictionary.")
+
+        state_dim, action_dim = infer_mlp_dimensions_from_state_dict(state_dict)
+        hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+        use_neighbor_encoder = (
+            bool(checkpoint.get("use_neighbor_encoder", checkpoint.get("use_deep_set", False)))
+            if checkpoint_metadata
+            else False
+        )
+        prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
+        num_inference_steps = 10
+        neighbor_feature_dim = None
+        neighbor_slots = 0
+        neighbor_encoder = None
+        if checkpoint_metadata:
+            state_dim = int(checkpoint.get("state_dim", state_dim))
+            action_dim = int(checkpoint.get("action_dim", action_dim))
+            hidden_dims_raw = checkpoint.get("hidden_dims")
+            if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
+                hidden_dims = tuple(int(width) for width in hidden_dims_raw)
+            flow_config_raw = checkpoint.get("flow_config")
+            if isinstance(flow_config_raw, Mapping):
+                num_inference_steps = int(flow_config_raw.get("num_inference_steps", 10))
+            if use_neighbor_encoder:
+                neighbor_feature_dim = int(checkpoint["neighbor_feature_dim"])
+                neighbor_slots = int(checkpoint["neighbor_slots"])
+                encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE))
+                encoder_kwargs_raw = checkpoint.get("encoder_kwargs")
+                encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
+                neighbor_encoder = EncoderFactory.create(
+                    encoder_type=encoder_type,
+                    in_features=neighbor_feature_dim,
+                    **encoder_kwargs,
+                )
+
+        policy = FlowPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dims=hidden_dims,
+            prediction_horizon=prediction_horizon,
+            num_inference_steps=num_inference_steps,
+            neighbor_feature_dim=neighbor_feature_dim,
+            neighbor_slots=neighbor_slots,
+            neighbor_encoder=neighbor_encoder,
+        )
+        policy.load_state_dict(state_dict)
+
+        policy_display_name = "Flow"
     elif policy_type == "mlp":
         state_dim = sum(
             int(feature_info["shape"][0])
@@ -459,13 +530,13 @@ def run_evaluation(
 
         policy_display_name = "MLP"
     else:
-        raise ValueError("'policy_type' must be one of {'diffusion', 'act', 'mlp'}.")
+        raise ValueError("'policy_type' must be one of {'diffusion', 'act', 'mlp', 'flow'}.")
 
     policy.eval()
     policy.to(device)
 
     mlp_observation_feature_cache = None
-    if policy_type == "mlp" and not policy.use_neighbor_encoder:
+    if policy_type in {"mlp", "flow"} and not policy.use_neighbor_encoder:
         dataset_features = simulator.get_dataset_features()
         current_feature_names = [
             name for name in dataset_features if is_observation_feature(name)
@@ -758,7 +829,7 @@ def main():
     parser.add_argument(
         "--policy-type",
         type=str.lower,
-        choices=["diffusion", "act", "mlp"],
+        choices=["diffusion", "act", "mlp", "flow"],
         required=True,
         help="the type of policy architecture to evaluate",
     )

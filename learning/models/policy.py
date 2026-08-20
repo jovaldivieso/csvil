@@ -34,7 +34,7 @@ class ActionPolicy(nn.Module, ABC):
         observation_dict: Mapping[str, torch.Tensor],
         actions: torch.Tensor,
     ) -> torch.Tensor:
-        """Optional loss computation hook used by policies with their own training objective (e.g. diffusion)."""
+        """Optional loss computation hook used by policies with custom training objectives."""
         raise NotImplementedError(f"{type(self).__name__} does not implement 'compute_loss'.")
 
 
@@ -46,11 +46,11 @@ class PolicyFactory:
             from learning.models.mlp_policy import MLPPolicy
 
             return MLPPolicy(**kwargs)
-        if normalized_type == "diffusion":
-            from learning.models.diffusion_policy import DiffusionPolicy
+        if normalized_type == "flow":
+            from learning.models.flow_policy import FlowPolicy
 
-            return DiffusionPolicy(**kwargs)
+            return FlowPolicy(**kwargs)
         raise ValueError(
             f"Unknown policy type '{policy_type}'. "
-            f"Supported policies: 'mlp', 'diffusion'."
+            f"Supported policies: 'mlp', 'flow'."
         )
