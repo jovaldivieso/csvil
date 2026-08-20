@@ -22,20 +22,16 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import (
     load_and_validate_mlp_architecture_config,
+    load_yaml_config,
     load_and_validate_system_config,
 )
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger import (
     DaggerEvalMetrics,
     ExpertMixBetaController,
-    action_feature_names,
-    apply_execution_noise,
-    build_observation_feature_pack_cache,
+    build_decentralized_joint_action,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
-    observation_dim_from_features,
-    observation_feature_names,
-    pack_observation_features_from_cache,
     print_rollout_metrics,
     resolve_round_steps,
     resolve_initial_state_seed,
@@ -43,6 +39,7 @@ from learning.dagger import (
     with_seeded_initial_state_config,
 )
 from learning.models.mlp import MLPPolicy
+from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
@@ -51,6 +48,7 @@ from systems.seed_utils import (
 
 
 DEFAULT_MLP_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 128)
+StructuredObservation = dict[str, torch.Tensor]
 
 
 def get_training_device() -> torch.device:
@@ -61,46 +59,150 @@ def get_training_device() -> torch.device:
     return torch.device("cpu")
 
 
-def flatten_observation_for_policy(
-    simulator: DynamicsProtocol,
-    observation: np.ndarray,
-    observation_feature_names_list: list[str],
-    device: torch.device,
-    observation_feature_cache,
-) -> torch.Tensor:
-    """
-    Pack runtime observation exactly like dataset frames, then flatten for MLP.
-    """
-    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
-    flattened = np.concatenate(
-        [packed_features[feature_name].reshape(-1) for feature_name in observation_feature_names_list]
-    ).astype(np.float32, copy=False)
-    observation_tensor = torch.as_tensor(flattened, dtype=torch.float32)
-    if device.type != "cpu":
-        observation_tensor = observation_tensor.to(device)
-    return observation_tensor.unsqueeze(0)
-
-
 class LeRobotMLPDataset(Dataset):
     def __init__(
         self,
         lerobot_dataset: LeRobotDataset,
         obs_feature_names: list[str],
         action_feature_names: list[str],
+        neighbor_feature_dim: int = 2,
+        neighbor_slots: int = 0,
+        simulator: DynamicsProtocol | None = None,
+        prediction_horizon: int = 1,
     ):
+        if prediction_horizon <= 0:
+            raise ValueError("'prediction_horizon' must be positive.")
         self.dataset = lerobot_dataset
         self.obs_feature_names = obs_feature_names
         self.action_feature_names = action_feature_names
+        self.neighbor_feature_dim = int(neighbor_feature_dim)
+        self.neighbor_slots = int(neighbor_slots)
+        self.simulator = simulator
+        self.prediction_horizon = int(prediction_horizon)
+        dataset_features = getattr(getattr(lerobot_dataset, "meta", None), "features", {})
+        self.has_decentralized_features = "observation.neighbor_state" in dataset_features
+        self.samples_per_frame = 1
+        if not self.has_decentralized_features and self.simulator is not None and self.simulator.num_robots > 1:
+            self.samples_per_frame = int(self.simulator.num_robots)
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        return len(self.dataset) * self.samples_per_frame
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        sample = self.dataset[idx]
-        obs_parts = [sample[name].float().view(-1) for name in self.obs_feature_names]
-        observation = torch.cat(obs_parts, dim=0)
-        action_parts = [sample[name].float().view(-1) for name in self.action_feature_names]
-        action = torch.cat(action_parts, dim=0)
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor | StructuredObservation, torch.Tensor]:
+        robot_id = 0
+        if self.samples_per_frame > 1:
+            frame_idx, robot_id = divmod(idx, self.samples_per_frame)
+            sample = self.dataset[frame_idx]
+        else:
+            sample = self.dataset[idx]
+        neighbor_state = sample.get("observation.neighbor_state")
+        neighbor_mask = sample.get("observation.neighbor_mask")
+        if neighbor_state is None or neighbor_mask is None:
+            if self.simulator is None:
+                raise ValueError(
+                    "Centralized multi-robot frames require a simulator to derive local neighbor features."
+                )
+            if self.simulator.num_robots == 1:
+                ego_parts = [
+                    sample[name].float().view(-1)
+                    for name in self.obs_feature_names
+                    if name in {"observation.environment_state", "observation.state"}
+                ]
+                neighbor_state = torch.empty(0, dtype=torch.float32)
+                neighbor_mask = torch.empty(0, dtype=torch.float32)
+            elif "observation.neighbor_mask" not in sample:
+                raise ValueError(
+                    "Centralized multi-robot frames must contain observation.neighbor_mask "
+                    "to train a masked decentralized policy."
+                )
+            else:
+                env_global = sample["observation.environment_state"].float().view(-1)
+                state_global = sample["observation.state"].float().view(-1)
+                env_start = sum(
+                    self.simulator.robot_env_dims[index]
+                    + self.simulator.robot_relative_dims[index]
+                    for index in range(robot_id)
+                )
+                env_stride = (
+                    self.simulator.robot_env_dims[robot_id]
+                    + self.simulator.robot_relative_dims[robot_id]
+                )
+                env_robot = env_global[env_start : env_start + env_stride]
+                base_env_dim = self.simulator.robot_env_dims[robot_id]
+                neighbor_state = env_robot[base_env_dim:]
+
+                state_start = sum(self.simulator.robot_proprio_dims[:robot_id])
+                state_end = state_start + self.simulator.robot_proprio_dims[robot_id]
+                ego_parts = [env_robot[:base_env_dim], state_global[state_start:state_end]]
+
+                mask_start = sum(self.simulator.robot_neighbor_mask_dims[:robot_id])
+                mask_end = mask_start + self.simulator.robot_neighbor_mask_dims[robot_id]
+                neighbor_mask = sample["observation.neighbor_mask"].float().view(-1)[mask_start:mask_end]
+        else:
+            ego_parts = [
+                sample[name].float().view(-1)
+                for name in self.obs_feature_names
+                if name in {"observation.environment_state", "observation.state"}
+            ]
+
+        if len(ego_parts) == 0:
+            raise ValueError(
+                "Decentralized policy dataset samples must include environment and state features."
+            )
+        ego_obs = torch.cat(ego_parts, dim=0)
+
+        neighbor_state_tensor = neighbor_state.float().view(-1)
+        neighbor_mask_tensor = neighbor_mask.float().view(-1)
+        if self.neighbor_slots == 0:
+            neighbor_obs = neighbor_state_tensor.new_zeros((0, self.neighbor_feature_dim))
+            neighbor_mask_2d = neighbor_mask_tensor.new_zeros((0, 1))
+        else:
+            neighbor_obs = neighbor_state_tensor.view(self.neighbor_slots, self.neighbor_feature_dim)
+            neighbor_mask_2d = neighbor_mask_tensor.view(self.neighbor_slots, 1)
+
+        observation = {
+            "ego_obs": ego_obs,
+            "neighbor_obs": neighbor_obs,
+            "neighbor_mask": neighbor_mask_2d,
+        }
+        action_chunk: list[torch.Tensor] = []
+        current_episode = getattr(sample, "episode_index", sample.get("episode_index", 0))
+        for step_offset in range(self.prediction_horizon):
+            target_idx = frame_idx + step_offset if self.samples_per_frame > 1 else idx + step_offset
+            valid = target_idx < len(self.dataset)
+            if valid:
+                future_sample = self.dataset[target_idx]
+                future_episode = getattr(
+                    future_sample,
+                    "episode_index",
+                    future_sample.get("episode_index", current_episode),
+                )
+                valid = future_episode == current_episode
+
+            if not valid:
+                if action_chunk:
+                    action_chunk.append(action_chunk[-1])
+                elif self.samples_per_frame > 1:
+                    action_chunk.append(
+                        torch.zeros(self.simulator.simulators[robot_id].nu, dtype=torch.float32)
+                    )
+                else:
+                    action_chunk.append(torch.zeros(len(self.action_feature_names), dtype=torch.float32))
+                continue
+
+            if self.samples_per_frame > 1:
+                action_global = future_sample["action"].float().view(-1)
+                action_start = sum(int(sim.nu) for sim in self.simulator.simulators[:robot_id])
+                action_end = action_start + int(self.simulator.simulators[robot_id].nu)
+                step_action = action_global[action_start:action_end]
+            else:
+                step_action = torch.cat(
+                    [future_sample[name].float().view(-1) for name in self.action_feature_names],
+                    dim=0,
+                )
+            action_chunk.append(step_action)
+
+        action = torch.stack(action_chunk, dim=0)
         return observation, action
 
 
@@ -129,9 +231,17 @@ class DaggerConfig:
     batch_size: int
     learning_rate: float
     mlp_hidden_dims: tuple[int, ...]
+    prediction_horizon: int
+    encoder_config: EncoderConfig
     checkpoint_dir: Path
     seed: int
     max_train_steps: int | None
+
+
+@dataclass(frozen=True)
+class EncoderConfig:
+    encoder_type: str
+    kwargs: dict[str, object]
 
 
 def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
@@ -140,6 +250,44 @@ def load_mlp_hidden_dims(mlp_config_path: Path | None) -> tuple[int, ...]:
 
     validated = load_and_validate_mlp_architecture_config(mlp_config_path)
     return validated.hidden_dims
+
+
+def load_prediction_horizon(mlp_config_path: Path | None) -> int:
+    if mlp_config_path is None:
+        return 1
+    raw_config = load_yaml_config(mlp_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if isinstance(model_section, Mapping):
+        return int(model_section.get("prediction_horizon", 1))
+    return 1
+
+
+def load_encoder_config(mlp_config_path: Path | None) -> EncoderConfig:
+    if mlp_config_path is None:
+        return EncoderConfig(encoder_type=DEFAULT_ENCODER_TYPE, kwargs={})
+
+    raw_config = load_yaml_config(mlp_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ValueError("MLP config model section must be a mapping.")
+
+    encoder_type_raw = model_section.get("encoder", DEFAULT_ENCODER_TYPE)
+    if not isinstance(encoder_type_raw, str) or not encoder_type_raw.strip():
+        raise ValueError("MLP config 'model.encoder' must be a non-empty string.")
+
+    normalized_type = encoder_type_raw.strip().lower()
+    if normalized_type == DEFAULT_ENCODER_TYPE:
+        raw_kwargs = model_section.get(DEFAULT_ENCODER_TYPE, {})
+        if not isinstance(raw_kwargs, Mapping):
+            raise ValueError("MLP config 'model.deepset' must be a mapping.")
+        kwargs: dict[str, object] = {
+            "phi_dims": tuple(int(width) for width in raw_kwargs.get("phi_dims", (128, 128))),
+            "rho_dims": tuple(int(width) for width in raw_kwargs.get("rho_dims", (128,))),
+            "pool_type": str(raw_kwargs.get("pool_type", "max")),
+        }
+        return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
+
+    return EncoderConfig(encoder_type=normalized_type, kwargs={})
 
 
 def default_checkpoint_dir_for_system(system: str) -> Path:
@@ -191,7 +339,10 @@ def train_policy_steps(
             data_iterator = iter(dataloader)
             observations, actions = next(data_iterator)
 
-        observations = observations.to(device)
+        if isinstance(observations, dict):
+            observations = {name: tensor.to(device) for name, tensor in observations.items()}
+        else:
+            observations = observations.to(device)
         actions = actions.to(device)
 
         optimizer.zero_grad()
@@ -266,22 +417,42 @@ def run_dagger(cfg: DaggerConfig) -> None:
     action_noise_seed = default_action_noise_seed_for_config(seeded_experiment_config)
     initial_state_seed = resolve_initial_state_seed(seeded_experiment_config, cfg.seed)
 
-    obs_feature_names = observation_feature_names(simulator)
-    act_feature_names = action_feature_names(simulator)
+    if simulator.num_robots > 1:
+        dataset_features = simulator.get_decentralized_dataset_features()
+    else:
+        dataset_features = simulator.get_dataset_features()
+    obs_feature_names = [
+        feature_name
+        for feature_name in dataset_features.keys()
+        if feature_name.startswith("observation.")
+    ]
+    act_feature_names = ["action"]
+
     if len(obs_feature_names) == 0:
         raise ValueError("No observation features found in simulator dataset schema.")
     if len(act_feature_names) == 0:
         raise ValueError("No action features found in simulator dataset schema.")
 
-    obs_feature_cache = build_observation_feature_pack_cache(simulator, obs_feature_names)
+    state_dim = sum(int(feature_info["shape"][0]) for feature_name, feature_info in dataset_features.items() if feature_name.startswith("observation."))
+    action_dim = int(dataset_features["action"]["shape"][0])
 
-    state_dim = observation_dim_from_features(simulator)
-    action_dim = int(simulator.nu)
+    neighbor_slots = int(simulator.num_robots) - 1
+    neighbor_feature_dim = 2
+    encoder_config = cfg.encoder_config
+    neighbor_encoder = EncoderFactory.create(
+        encoder_type=encoder_config.encoder_type,
+        in_features=neighbor_feature_dim,
+        **encoder_config.kwargs,
+    )
 
     policy = MLPPolicy(
         state_dim=state_dim,
         action_dim=action_dim,
         hidden_dims=cfg.mlp_hidden_dims,
+        prediction_horizon=cfg.prediction_horizon,
+        neighbor_feature_dim=neighbor_feature_dim,
+        neighbor_slots=neighbor_slots,
+        neighbor_encoder=neighbor_encoder,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate)
 
@@ -310,6 +481,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
             f"decay_after_eval_success={cfg.expert_mix_decay_after_success_rate if cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
         )
     print(f"MLP hidden dims: {list(cfg.mlp_hidden_dims)}")
+    print(f"Prediction horizon: {cfg.prediction_horizon}")
     if cfg.start_with_aggregation:
         print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
     else:
@@ -320,6 +492,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         f"target_epochs={cfg.target_epochs_per_round:.2f}, "
         f"max={cfg.max_train_steps if cfg.max_train_steps is not None else 'none'}"
     )
+    print(f"Decentralized policy neighbor slots: {neighbor_slots}")
 
     def train_on_aggregate(label: str, training_round: int) -> None:
         print(f"\n=== {label} ===")
@@ -329,6 +502,9 @@ def run_dagger(cfg: DaggerConfig) -> None:
             lerobot_dataset=aggregate_dataset,
             obs_feature_names=obs_feature_names,
             action_feature_names=act_feature_names,
+            neighbor_slots=neighbor_slots,
+            simulator=simulator,
+            prediction_horizon=cfg.prediction_horizon,
         )
 
         dataloader_generator = torch.Generator()
@@ -370,15 +546,12 @@ def run_dagger(cfg: DaggerConfig) -> None:
 
         def action_fn(observation: np.ndarray) -> np.ndarray:
             with torch.inference_mode():
-                model_input = flatten_observation_for_policy(
-                    eval_simulator,
-                    observation,
-                    observation_feature_names_list=obs_feature_names,
+                return build_decentralized_joint_action(
+                    simulator=eval_simulator,
+                    policy=policy,
+                    observation=observation,
                     device=device,
-                        observation_feature_cache=obs_feature_cache,
                 )
-                action = policy.select_action(model_input).squeeze(0).cpu().numpy()
-            return action
 
         metrics = evaluate_policy_rollouts(
             simulator=eval_simulator,
@@ -402,9 +575,15 @@ def run_dagger(cfg: DaggerConfig) -> None:
             "optimizer_state_dict": optimizer.state_dict(),
             "state_dim": state_dim,
             "action_dim": action_dim,
+            "prediction_horizon": cfg.prediction_horizon,
             "hidden_dims": list(cfg.mlp_hidden_dims),
             "obs_feature_names": obs_feature_names,
             "system": cfg.system,
+            "use_neighbor_encoder": policy.use_neighbor_encoder,
+            "neighbor_feature_dim": neighbor_feature_dim,
+            "neighbor_slots": neighbor_slots,
+            "encoder_type": encoder_config.encoder_type,
+            "encoder_kwargs": encoder_config.kwargs,
         }
 
         latest_checkpoint = cfg.checkpoint_dir / "mlp_dagger_checkpoint.pt"
@@ -473,11 +652,16 @@ def run_dagger(cfg: DaggerConfig) -> None:
         )
 
         if cfg.start_with_aggregation and not cfg.dataset_root.exists():
+            create_features = (
+                simulator_for_rollout.get_decentralized_dataset_features()
+                if simulator_for_rollout.num_robots > 1
+                else simulator_for_rollout.get_dataset_features()
+            )
             dataset_writer = LeRobotDataset.create(
                 repo_id=cfg.repo_id,
                 fps=int(1 / simulator_for_rollout.dt),
                 root=cfg.dataset_root,
-                features=simulator_for_rollout.get_dataset_features(),
+                features=create_features,
             )
         else:
             dataset_writer = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.dataset_root)
@@ -485,14 +669,18 @@ def run_dagger(cfg: DaggerConfig) -> None:
         try:
             def policy_action_fn(observation: np.ndarray) -> np.ndarray:
                 with torch.inference_mode():
-                    model_input = flatten_observation_for_policy(
-                        simulator_for_rollout,
-                        observation,
-                        observation_feature_names_list=obs_feature_names,
+                    return build_decentralized_joint_action(
+                        simulator=simulator_for_rollout,
+                        policy=policy,
+                        observation=observation,
                         device=device,
-                        observation_feature_cache=obs_feature_cache,
                     )
-                    return policy.select_action(model_input).squeeze(0).cpu().numpy()
+
+            writer_features = getattr(getattr(dataset_writer, "meta", None), "features", {})
+            if "observation.neighbor_state" in writer_features:
+                frame_builder = simulator_for_rollout.format_decentralized_dataset_frames
+            else:
+                frame_builder = simulator_for_rollout.format_dataset_frame
 
             aggregation_metrics = collect_dagger_rollouts(
                 simulator=simulator_for_rollout,
@@ -505,6 +693,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
                 initial_state_seed=initial_state_seed,
                 expert_mixing_beta=round_beta,
                 policy_action_fn=policy_action_fn,
+                frame_builder=frame_builder,
             )
         finally:
             # LeRobot writes parquet chunks lazily; finalize guarantees readable footers.
@@ -732,6 +921,8 @@ def main() -> None:
     if checkpoint_dir is None:
         checkpoint_dir = default_checkpoint_dir_for_system(args.system)
     mlp_hidden_dims = load_mlp_hidden_dims(args.mlp_config)
+    prediction_horizon = load_prediction_horizon(args.mlp_config)
+    encoder_config = load_encoder_config(args.mlp_config)
 
     if (args.repo_id is None) != (args.dataset_root is None):
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both for fresh DAgger mode.")
@@ -770,6 +961,8 @@ def main() -> None:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         mlp_hidden_dims=mlp_hidden_dims,
+        prediction_horizon=prediction_horizon,
+        encoder_config=encoder_config,
         checkpoint_dir=checkpoint_dir,
         seed=args.seed,
         max_train_steps=args.max_train_steps,
