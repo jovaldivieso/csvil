@@ -220,12 +220,19 @@ class CasadiPlanner(Planner):
         q_blocks = [self.Q[state_slice, state_slice] for state_slice in self.robot_state_slices]
         r_blocks = [self.R[action_slice, action_slice] for action_slice in self.robot_action_slices]
 
-        # Build dynamics constraints (kept in a loop because casadi_dynamics
-        # is not guaranteed to support batched matrix inputs).
-        for k in range(self.N):
-            self.opti.subject_to(self.X[:, k + 1] ==
-                                 self.sim.casadi_dynamics(self.X[:, k],
-                                                          self.U[:, k]))
+        # Vectorized dynamics constraints using CasADi's map function.
+        # Create symbolic step function: x_next = f(x, u)
+        x_sym = ca.SX.sym("x", self.sim.nx)
+        u_sym = ca.SX.sym("u", self.sim.nu)
+        x_next_sym = self.sim.casadi_dynamics(x_sym, u_sym)
+        step_fn = ca.Function("step", [x_sym, u_sym], [x_next_sym])
+        
+        # Map the step function over the entire horizon
+        F_map = step_fn.map(self.N)
+        X_next = F_map(self.X[:, :-1], self.U)
+        
+        # Add single vectorized constraint: X[:, 1:] == X_next
+        self.opti.subject_to(self.X[:, 1:] == X_next)
 
         # Vectorized actuator limits over all horizon steps.
         for sub_sim, action_slice in zip(self.sub_simulators, self.robot_action_slices):
@@ -297,14 +304,24 @@ class CasadiPlanner(Planner):
             )
 
         pairwise_collision_is_active = self.d_safe > 0.0 and len(self.robot_state_slices) > 1
-        xy_index_by_robot: list[tuple[int, int]] = []
+        position_indices_by_robot: list[tuple[int, ...]] = []
         if pairwise_collision_is_active:
-            for robot_idx, state_slice in enumerate(self.robot_state_slices):
-                if state_slice.stop - state_slice.start < 2:
-                    raise ValueError(
-                        f"Robot {robot_idx} state must include at least x/y in first two entries."
-                    )
-                xy_index_by_robot.append((state_slice.start, state_slice.start + 1))
+            for robot_idx, (sub_sim, state_slice) in enumerate(zip(self.sub_simulators, self.robot_state_slices)):
+                # Get position indices from the sub-simulator (default to (0, 1))
+                local_pos_indices = tuple(getattr(sub_sim, "position_indices", (0, 1)))
+                local_state_dim = int(sub_sim.nx)
+                
+                # Validate position indices
+                for local_idx in local_pos_indices:
+                    if local_idx < 0 or local_idx >= local_state_dim:
+                        raise ValueError(
+                            f"Robot {robot_idx} declares invalid position_indices entry {local_idx} "
+                            f"for local state dimension {local_state_dim}."
+                        )
+                
+                # Convert local indices to global indices
+                global_pos_indices = tuple(int(state_slice.start) + int(idx) for idx in local_pos_indices)
+                position_indices_by_robot.append(global_pos_indices)
 
         collision_pairs: list[tuple[int, int]] = []
         if pairwise_collision_is_active:
@@ -320,26 +337,27 @@ class CasadiPlanner(Planner):
             self.opti.subject_to(ca.vec(collision_slack) >= 0)
 
             for pair_idx, (i, j) in enumerate(collision_pairs):
-                xi_idx, yi_idx = xy_index_by_robot[i]
-                xj_idx, yj_idx = xy_index_by_robot[j]
+                pos_indices_i = position_indices_by_robot[i]
+                pos_indices_j = position_indices_by_robot[j]
 
-                xi = self.X[xi_idx, :-1]
-                yi = self.X[yi_idx, :-1]
-                xj = self.X[xj_idx, :-1]
-                yj = self.X[yj_idx, :-1]
+                # Compute squared distance over all position dimensions (supports 1D, 2D, 3D, etc.)
+                squared_distance = ca.DM(0.0)
+                for idx_i, idx_j in zip(pos_indices_i, pos_indices_j):
+                    diff = self.X[int(idx_i), :-1] - self.X[int(idx_j), :-1]
+                    squared_distance = squared_distance + diff ** 2
+                
                 self.opti.subject_to(
-                    (xi - xj) ** 2 + (yi - yj) ** 2 + collision_slack[pair_idx, :-1] >= self.d_safe ** 2
+                    squared_distance + collision_slack[pair_idx, :-1] >= self.d_safe ** 2
                 )
 
-                xi_terminal = self.X[xi_idx, self.N]
-                yi_terminal = self.X[yi_idx, self.N]
-                xj_terminal = self.X[xj_idx, self.N]
-                yj_terminal = self.X[yj_idx, self.N]
+                # Terminal constraint
+                squared_distance_terminal = ca.DM(0.0)
+                for idx_i, idx_j in zip(pos_indices_i, pos_indices_j):
+                    diff = self.X[int(idx_i), self.N] - self.X[int(idx_j), self.N]
+                    squared_distance_terminal = squared_distance_terminal + diff ** 2
+                
                 self.opti.subject_to(
-                    (xi_terminal - xj_terminal) ** 2
-                    + (yi_terminal - yj_terminal) ** 2
-                    + collision_slack[pair_idx, self.N]
-                    >= self.d_safe ** 2
+                    squared_distance_terminal + collision_slack[pair_idx, self.N] >= self.d_safe ** 2
                 )
 
             cost += self.collision_slack_penalty_weight * ca.sum2(ca.sum1(collision_slack))

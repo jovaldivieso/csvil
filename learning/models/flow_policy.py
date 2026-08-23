@@ -29,24 +29,22 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class FlowPolicy(ActionPolicy):
-    """Conditional flow-matching policy with Euler ODE inference."""
+    """Conditional flow-matching policy with Euler ODE inference.
+
+    This policy delegates structured observation encoding to an ObservationEncoder.
+    """
 
     def __init__(
         self,
-        state_dim: int,
         action_dim: int,
+        obs_encoder: ObservationEncoder,
         prediction_horizon: int = 16,
         hidden_dims: tuple[int, ...] = (256, 256, 256),
         num_inference_steps: int = 10,
         time_embed_dim: int = 64,
-        neighbor_feature_dim: int | None = None,
-        neighbor_slots: int = 0,
-        neighbor_encoder: ObservationEncoder | None = None,
     ):
         super().__init__()
 
-        if state_dim <= 0:
-            raise ValueError(f"'state_dim' must be positive, got {state_dim}.")
         if action_dim <= 0:
             raise ValueError(f"'action_dim' must be positive, got {action_dim}.")
         if prediction_horizon <= 0:
@@ -55,48 +53,17 @@ class FlowPolicy(ActionPolicy):
             raise ValueError("'hidden_dims' must contain at least one layer width.")
         if num_inference_steps <= 0:
             raise ValueError(f"'num_inference_steps' must be positive, got {num_inference_steps}.")
-        if neighbor_slots < 0:
-            raise ValueError("'neighbor_slots' must be non-negative.")
-        if neighbor_feature_dim is not None and neighbor_feature_dim <= 0:
-            raise ValueError("'neighbor_feature_dim' must be positive when provided.")
-        if neighbor_slots > 0 and neighbor_feature_dim is None:
-            raise ValueError(
-                "'neighbor_feature_dim' must be provided when 'neighbor_slots' is positive."
-            )
-        if neighbor_encoder is not None and not isinstance(neighbor_encoder, nn.Module):
-            raise TypeError("'neighbor_encoder' must be an nn.Module or None.")
-        if neighbor_encoder is not None and int(getattr(neighbor_encoder, "out_dim", 0)) <= 0:
-            raise ValueError("'neighbor_encoder' must expose a positive integer 'out_dim'.")
-        if neighbor_slots > 0 and neighbor_encoder is None:
-            raise ValueError("'neighbor_encoder' must be provided when 'neighbor_slots' is positive.")
+        if not isinstance(obs_encoder, nn.Module):
+            raise TypeError("'obs_encoder' must be an nn.Module.")
+        if int(getattr(obs_encoder, "out_dim", 0)) <= 0:
+            raise ValueError("'obs_encoder' must expose a positive integer 'out_dim'.")
 
-        self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
         self.prediction_horizon = int(prediction_horizon)
         self.num_inference_steps = int(num_inference_steps)
-        self.neighbor_feature_dim = int(neighbor_feature_dim) if neighbor_feature_dim is not None else None
-        self.neighbor_slots = int(neighbor_slots)
-        self.neighbor_encoder = neighbor_encoder
+        self.obs_encoder = obs_encoder
 
-        self._use_neighbor_encoder = self.neighbor_encoder is not None
-        self.neighbor_context_dim = 0
-        self.ego_dim = self.state_dim
-
-        if self.use_neighbor_encoder:
-            if self.neighbor_feature_dim is None:
-                raise ValueError("'neighbor_feature_dim' must be provided with 'neighbor_encoder'.")
-            self.neighbor_context_dim = int(self.neighbor_encoder.out_dim)
-            self.ego_dim = self.state_dim - self.neighbor_slots * (self.neighbor_feature_dim + 1)
-            if self.ego_dim <= 0:
-                raise ValueError(
-                    "'state_dim' is too small for the requested decentralized neighbor-packed layout. "
-                    f"Got state_dim={self.state_dim}, neighbor_slots={self.neighbor_slots}, "
-                    f"neighbor_feature_dim={self.neighbor_feature_dim}."
-                )
-            self.obs_cond_dim = self.ego_dim + self.neighbor_context_dim
-        else:
-            self.obs_cond_dim = self.state_dim
-
+        self.obs_cond_dim = int(self.obs_encoder.out_dim)
         self.action_flat_dim = self.action_dim * self.prediction_horizon
         self.time_embed = SinusoidalTimeEmbedding(time_embed_dim)
 
@@ -111,22 +78,19 @@ class FlowPolicy(ActionPolicy):
             in_dim = width
         layers.append(nn.Linear(in_dim, self.action_flat_dim))
         self.net = nn.Sequential(*layers)
+        if hasattr(torch, "compile"):
+            self.net = torch.compile(self.net)
 
-    @property
-    def use_neighbor_encoder(self) -> bool:
-        return self._use_neighbor_encoder
-
-    def _encode_observations(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        ego_obs = observation_dict["ego_obs"]
-
-        if self.use_neighbor_encoder:
-            neighbor_obs = observation_dict.get("neighbor_obs")
-            neighbor_mask = observation_dict.get("neighbor_mask")
-            if neighbor_obs is None or neighbor_mask is None:
-                raise ValueError("Decentralized policy requires neighbor observations and masks.")
-            neighbor_context = self.neighbor_encoder(neighbor_obs, neighbor_mask)
-            return torch.cat([ego_obs, neighbor_context], dim=-1)
-        return ego_obs
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """Load both uncompiled and TorchDynamo-compiled network checkpoints."""
+        if hasattr(self.net, "_orig_mod"):
+            state_dict = {
+                key.replace("net.", "net._orig_mod.", 1)
+                if key.startswith("net.") and not key.startswith("net._orig_mod.")
+                else key: value
+                for key, value in state_dict.items()
+            }
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def _predict_velocity(
         self,
@@ -144,7 +108,7 @@ class FlowPolicy(ActionPolicy):
         observation_dict: Mapping[str, torch.Tensor],
         actions: torch.Tensor,
     ) -> torch.Tensor:
-        obs_cond = self._encode_observations(observation_dict)
+        obs_cond = self.obs_encoder(observation_dict)
 
         batch_size = actions.shape[0]
         x_1 = actions
@@ -156,12 +120,9 @@ class FlowPolicy(ActionPolicy):
         pred_velocity = self._predict_velocity(x_t.flatten(1), obs_cond, t)
         return F.mse_loss(pred_velocity, target_velocity.flatten(1))
 
-    def forward(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        return self.select_action(observation_dict)
-
     @torch.no_grad()
     def select_action(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        obs_cond = self._encode_observations(observation_dict)
+        obs_cond = self.obs_encoder(observation_dict)
         batch_size = obs_cond.shape[0]
         device = obs_cond.device
 
@@ -176,7 +137,7 @@ class FlowPolicy(ActionPolicy):
             t_tensor = torch.full((batch_size,), t_val, device=device, dtype=obs_cond.dtype)
             pred_velocity = self._predict_velocity(x.flatten(1), obs_cond, t_tensor)
             pred_velocity = pred_velocity.view(batch_size, self.prediction_horizon, self.action_dim)
-            x = x + pred_velocity * dt
+            x.add_(pred_velocity, alpha=dt)
 
         return x
 

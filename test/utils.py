@@ -5,32 +5,11 @@ from typing import Any, Mapping
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
-from matplotlib import colors as mcolors
 from matplotlib.patches import FancyArrowPatch
 
 from core.factory import DynamicsFactory, PlannerFactory
 from systems.initial_state_utils import normalize_initial_state_specs
 from data.data_collection import DataCollector
-
-
-def _blend_robot_family_color(
-    family_color: str,
-    robot_color: Any,
-    robot_idx: int,
-    robot_count: int,
-) -> tuple[float, float, float]:
-    """Blend rollout-family and robot colors to keep both distinctions visible."""
-    base_rgb = np.asarray(mcolors.to_rgb(family_color), dtype=float)
-    robot_rgb = np.asarray(mcolors.to_rgb(robot_color), dtype=float)
-
-    # Increase robot influence as the robot index grows to create distinct shades.
-    if robot_count <= 1:
-        robot_weight = 0.25
-    else:
-        robot_weight = 0.2 + 0.4 * (robot_idx / max(robot_count - 1, 1))
-
-    blended = (1.0 - robot_weight) * base_rgb + robot_weight * robot_rgb
-    return tuple(np.clip(blended, 0.0, 1.0))
 
 
 def _heading_sample_stride(num_points: int) -> int:
@@ -185,7 +164,7 @@ def plot_xy_trajectories(
         if trajectory_index < len(path_labels):
             current_label = path_labels[trajectory_index]
 
-        # For fleet comparisons, per-trajectory colors separate rollout families.
+        # Fleet colors identify robot IDs; line styles distinguish rollout families.
         base_color = None
         if trajectory_colors is not None and trajectory_index < len(trajectory_colors):
             base_color = trajectory_colors[trajectory_index]
@@ -195,15 +174,7 @@ def plot_xy_trajectories(
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
             if base_color is not None:
-                if robot_count > 1:
-                    robot_color = _blend_robot_family_color(
-                        family_color=base_color,
-                        robot_color=robot_color_map(robot_idx),
-                        robot_idx=robot_idx,
-                        robot_count=robot_count,
-                    )
-                else:
-                    robot_color = base_color
+                robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
 
@@ -363,15 +334,7 @@ def save_xy_rollout_video(
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
             if base_color is not None:
-                if robot_count > 1:
-                    robot_color = _blend_robot_family_color(
-                        family_color=base_color,
-                        robot_color=robot_color_map(robot_idx),
-                        robot_idx=robot_idx,
-                        robot_count=robot_count,
-                    )
-                else:
-                    robot_color = base_color
+                robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
 

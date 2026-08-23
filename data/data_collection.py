@@ -76,6 +76,7 @@ class DataCollector:
                 rollout_index=attempted_trajectories,
             )
             planner_failed = False
+            episode_frames = []
 
             # Tell the planner a new episode is starting!
             if hasattr(motion_planner, "reset"):
@@ -121,8 +122,17 @@ class DataCollector:
                 frame_data = self.sim.format_dataset_frame(obs, action)
                 frame_data["task"] = "reach target"
 
-                dataset.add_frame(frame_data)
                 state = self.sim.step(state, executed_action)
+
+                if self.sim.is_collision(state):
+                    print(
+                        "Discarding trajectory due to expert collision "
+                        f"(attempt={attempted_trajectories}, source={initial_state_source})."
+                    )
+                    planner_failed = True
+                    break
+
+                episode_frames.append(frame_data)
 
                 if self.sim.should_terminate_rollout(state):
                     break
@@ -130,6 +140,8 @@ class DataCollector:
             if planner_failed:
                 continue
 
+            for frame_data in episode_frames:
+                dataset.add_frame(frame_data)
             dataset.save_episode()
             successful_trajectories += 1
 

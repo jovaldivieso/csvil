@@ -30,7 +30,11 @@ from learning.dagger import (
 )
 from learning.models.flow_policy import FlowPolicy
 from learning.models.mlp_policy import MLPPolicy
-from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
+from learning.models.encoder import (
+    DEFAULT_ENCODER_TYPE,
+    EncoderFactory,
+    ObservationEncoder,
+)
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 
@@ -45,6 +49,11 @@ from utils import plot_xy_trajectories, save_xy_rollout_video
 
 def default_evaluation_output_path(system: str, policy_type: str) -> str:
     return os.path.join("outputs", "plots", f"{system}_casadi_{policy_type}_evaluation.pdf")
+
+
+def evaluation_rollout_title(system: str, policy_display_name: str) -> str:
+    system_name = system.replace("_", " ").title()
+    return f"{system_name} Expert Rollout vs {policy_display_name} Policy"
 
 
 def is_observation_feature(feature_name: str) -> bool:
@@ -167,8 +176,7 @@ def sample_initial_state(
 
     joint_seed_seq = np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec])
     rng = np.random.default_rng(joint_seed_seq)
-    for sub_sim in sub_simulators:
-        sub_sim.randomize_goal_for_reset(rng)
+    simulator.randomize_goal_for_reset(rng)
 
     return simulator.random_initial_state(rng)
 
@@ -298,6 +306,9 @@ def rollout_planner(
         state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
+        if simulator.is_collision(state):
+            break
+
         if simulator.should_terminate_rollout(state):
             break
 
@@ -315,7 +326,7 @@ def rollout_policy(
     policy_preprocessor=None,
     policy_postprocessor=None,
     observation_feature_cache=None,
-) -> tuple[np.ndarray, bool, int]:
+) -> tuple[np.ndarray, bool, int, bool]:
     """
     Rolls out the neural policy from a given initial state.
     
@@ -323,10 +334,12 @@ def rollout_policy(
         trajectory: array containing visited simulator states
         reached_goal: whether simulator reached goal state
         steps_taken: number of executed simulation steps
+        collided: whether robots collided during the rollout
     """
     state = simulator.reset(initial_state)
     trajectory = [state.copy()]
     policy.reset()
+    collided = False
 
     decentralized_inference = uses_decentralized_policy(simulator, policy)
 
@@ -371,10 +384,14 @@ def rollout_policy(
         state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
-        if simulator.should_terminate_rollout(state):
-            return np.asarray(trajectory), True, step
+        if simulator.is_collision(state):
+            collided = True
+            break
 
-    return np.asarray(trajectory), False, num_steps
+        if simulator.should_terminate_rollout(state):
+            return np.asarray(trajectory), True, step, collided
+
+    return np.asarray(trajectory), False, len(trajectory) - 1, collided
 
 
 def run_evaluation(
@@ -430,16 +447,11 @@ def run_evaluation(
 
         state_dim, action_dim = infer_mlp_dimensions_from_state_dict(state_dict)
         hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-        use_neighbor_encoder = (
-            bool(checkpoint.get("use_neighbor_encoder", checkpoint.get("use_deep_set", False)))
-            if checkpoint_metadata
-            else False
-        )
         prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
         num_inference_steps = 10
-        neighbor_feature_dim = None
-        neighbor_slots = 0
-        neighbor_encoder = None
+        neighbor_feature_dim = 2
+        neighbor_slots = max(0, int(simulator.num_robots) - 1)
+        
         if checkpoint_metadata:
             state_dim = int(checkpoint.get("state_dim", state_dim))
             action_dim = int(checkpoint.get("action_dim", action_dim))
@@ -449,28 +461,31 @@ def run_evaluation(
             flow_config_raw = checkpoint.get("flow_config")
             if isinstance(flow_config_raw, Mapping):
                 num_inference_steps = int(flow_config_raw.get("num_inference_steps", 10))
-            if use_neighbor_encoder:
-                neighbor_feature_dim = int(checkpoint["neighbor_feature_dim"])
-                neighbor_slots = int(checkpoint["neighbor_slots"])
-                encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE))
-                encoder_kwargs_raw = checkpoint.get("encoder_kwargs")
-                encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
-                neighbor_encoder = EncoderFactory.create(
-                    encoder_type=encoder_type,
-                    in_features=neighbor_feature_dim,
-                    **encoder_kwargs,
-                )
+        
+        neighbor_feature_dim = int(checkpoint.get("neighbor_feature_dim", neighbor_feature_dim)) if checkpoint_metadata else neighbor_feature_dim
+        neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots)) if checkpoint_metadata else neighbor_slots
+        encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE)) if checkpoint_metadata else DEFAULT_ENCODER_TYPE
+        encoder_kwargs_raw = checkpoint.get("encoder_kwargs") if checkpoint_metadata else {}
+        encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
+        obs_encoder: ObservationEncoder = EncoderFactory.create(
+            encoder_type=encoder_type,
+            state_dim=state_dim,
+            neighbor_feature_dim=neighbor_feature_dim,
+            neighbor_slots=neighbor_slots,
+            **encoder_kwargs,
+        )
 
         policy = FlowPolicy(
-            state_dim=state_dim,
             action_dim=action_dim,
+            obs_encoder=obs_encoder,
             hidden_dims=hidden_dims,
             prediction_horizon=prediction_horizon,
             num_inference_steps=num_inference_steps,
-            neighbor_feature_dim=neighbor_feature_dim,
-            neighbor_slots=neighbor_slots,
-            neighbor_encoder=neighbor_encoder,
         )
+        state_dict = {
+            key.replace("neighbor_encoder.", "obs_encoder.", 1): value
+            for key, value in state_dict.items()
+        }
         policy.load_state_dict(state_dict)
 
         policy_display_name = "Flow"
@@ -490,42 +505,40 @@ def run_evaluation(
 
         state_dim, action_dim = infer_mlp_dimensions_from_state_dict(state_dict)
         hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-        use_neighbor_encoder = (
-            bool(checkpoint.get("use_neighbor_encoder", checkpoint.get("use_deep_set", False)))
-            if checkpoint_metadata
-            else False
-        )
         prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
-        neighbor_feature_dim = None
-        neighbor_slots = 0
-        neighbor_encoder = None
+        neighbor_feature_dim = 2
+        neighbor_slots = max(0, int(simulator.num_robots) - 1)
+        
         if checkpoint_metadata:
             state_dim = int(checkpoint.get("state_dim", state_dim))
             action_dim = int(checkpoint.get("action_dim", action_dim))
             hidden_dims_raw = checkpoint.get("hidden_dims")
             if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
                 hidden_dims = tuple(int(width) for width in hidden_dims_raw)
-            if use_neighbor_encoder:
-                neighbor_feature_dim = int(checkpoint["neighbor_feature_dim"])
-                neighbor_slots = int(checkpoint["neighbor_slots"])
-                encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE))
-                encoder_kwargs_raw = checkpoint.get("encoder_kwargs")
-                encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
-                neighbor_encoder = EncoderFactory.create(
-                    encoder_type=encoder_type,
-                    in_features=neighbor_feature_dim,
-                    **encoder_kwargs,
-                )
-
-        policy = MLPPolicy(
+        
+        neighbor_feature_dim = int(checkpoint.get("neighbor_feature_dim", neighbor_feature_dim)) if checkpoint_metadata else neighbor_feature_dim
+        neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots)) if checkpoint_metadata else neighbor_slots
+        encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE)) if checkpoint_metadata else DEFAULT_ENCODER_TYPE
+        encoder_kwargs_raw = checkpoint.get("encoder_kwargs") if checkpoint_metadata else {}
+        encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
+        obs_encoder: ObservationEncoder = EncoderFactory.create(
+            encoder_type=encoder_type,
             state_dim=state_dim,
-            action_dim=action_dim,
-            hidden_dims=hidden_dims,
-            prediction_horizon=prediction_horizon,
             neighbor_feature_dim=neighbor_feature_dim,
             neighbor_slots=neighbor_slots,
-            neighbor_encoder=neighbor_encoder,
+            **encoder_kwargs,
         )
+
+        policy = MLPPolicy(
+            action_dim=action_dim,
+            obs_encoder=obs_encoder,
+            hidden_dims=hidden_dims,
+            prediction_horizon=prediction_horizon,
+        )
+        state_dict = {
+            key.replace("neighbor_encoder.", "obs_encoder.", 1): value
+            for key, value in state_dict.items()
+        }
         policy.load_state_dict(state_dict)
 
         policy_display_name = "MLP"
@@ -536,7 +549,7 @@ def run_evaluation(
     policy.to(device)
 
     mlp_observation_feature_cache = None
-    if policy_type in {"mlp", "flow"} and not policy.use_neighbor_encoder:
+    if policy_type in {"mlp", "flow"} and simulator.num_robots <= 1:
         dataset_features = simulator.get_dataset_features()
         current_feature_names = [
             name for name in dataset_features if is_observation_feature(name)
@@ -664,7 +677,7 @@ def run_evaluation(
             action_noise_rng=expert_action_noise_rng,
         )
 
-        policy_trajectory, reached_goal, steps_taken = rollout_policy(
+        policy_trajectory, reached_goal, steps_taken, policy_collided = rollout_policy(
             simulator=simulator,
             policy=policy,
             device=device,
@@ -676,6 +689,7 @@ def run_evaluation(
             policy_postprocessor=policy_postprocessor,
             observation_feature_cache=mlp_observation_feature_cache,
         )
+        expert_collided = simulator.is_collision(expert_trajectory[-1])
 
         policy_final_state = policy_trajectory[-1]
         expert_final_state = expert_trajectory[-1]
@@ -691,6 +705,8 @@ def run_evaluation(
                 "goal_state": goal_state,
                 "initial_state": initial_state,
                 "policy_reached_goal": reached_goal,
+                "policy_collided": policy_collided,
+                "expert_collided": expert_collided,
                 "policy_steps": max(len(policy_trajectory) - 1, 0),
                 "expert_steps": max(len(expert_trajectory) - 1, 0),
                 "policy_goal_error_l2": policy_goal_error,
@@ -700,7 +716,9 @@ def run_evaluation(
 
     total_runs = len(per_seed_metrics)
     total_successes = sum(
-        1 for metric in per_seed_metrics if metric["policy_reached_goal"]
+        1
+        for metric in per_seed_metrics
+        if metric["policy_reached_goal"] and not metric["policy_collided"]
     )
     success_rate = (total_successes / total_runs) if total_runs > 0 else 0.0
     mean_policy_error = float(
@@ -736,6 +754,16 @@ def run_evaluation(
     print(f"num_trajectories: {total_runs}")
     print(f"policy_successes: {total_successes}/{total_runs}")
     print(f"success_rate: {success_rate:.4f}")
+    policy_collision_rate = (
+        np.mean([metric["policy_collided"] for metric in per_seed_metrics])
+        if total_runs > 0 else 0.0
+    )
+    expert_collision_rate = (
+        np.mean([metric["expert_collided"] for metric in per_seed_metrics])
+        if total_runs > 0 else 0.0
+    )
+    print(f"policy_collision_rate: {policy_collision_rate:.4f}")
+    print(f"expert_collision_rate: {expert_collision_rate:.4f}")
     print(f"mean_policy_steps: {mean_policy_steps:.3f}")
     print(f"mean_expert_steps: {mean_expert_steps:.3f}")
     print(f"mean_policy_goal_error_l2: {mean_policy_error:.6f}")
@@ -747,7 +775,7 @@ def run_evaluation(
         policy_type=policy_type,
     )
 
-    system_title = system.replace("_", " ").title()
+    comparison_title = evaluation_rollout_title(system, policy_display_name)
 
     all_trajectories = expert_trajectories + policy_trajectories
     num_expert = len(expert_trajectories)
@@ -766,7 +794,7 @@ def run_evaluation(
         simulator=simulator,
         trajectories=all_trajectories,
         path_to_output=output_path,
-        title=f"{system_title} {policy_display_name} vs Expert",
+        title=comparison_title,
         path_labels=path_labels,
         show_heading=show_heading,
         marker="o",
@@ -779,7 +807,7 @@ def run_evaluation(
         simulator=simulator,
         trajectories=all_trajectories,
         path_to_output=output_path,
-        title=f"{system_title} {policy_display_name} rollout vs Expert",
+        title=comparison_title,
         show_heading=show_heading,
         fps=12,
         path_labels=path_labels,
@@ -801,6 +829,8 @@ def run_evaluation(
         "num_trajectories": total_runs,
         "policy_successes": total_successes,
         "success_rate": success_rate,
+        "policy_collision_rate": float(policy_collision_rate),
+        "expert_collision_rate": float(expert_collision_rate),
         "mean_policy_steps": mean_policy_steps,
         "mean_expert_steps": mean_expert_steps,
         "mean_policy_goal_error_l2": mean_policy_error,

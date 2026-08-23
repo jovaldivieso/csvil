@@ -61,6 +61,7 @@ class DynamicsProtocol(Protocol):
     max_action: float
     is_euclidean: bool
     angular_state_indices: tuple[int, ...]
+    position_indices: tuple[int, ...]
     num_robots: int
     simulators: list["DynamicsProtocol"]
     robot_state_slices: list[slice]
@@ -110,6 +111,8 @@ class DynamicsProtocol(Protocol):
     def goal_state(self) -> np.ndarray: ...
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray: ...
+
+    def is_collision(self, state: np.ndarray) -> bool: ...
 
     def simulate(
         self,
@@ -207,6 +210,11 @@ class DynamicsSimulator(ABC):
     def angular_state_indices(self) -> tuple[int, ...]:
         """Local state coordinates whose planner residuals should use wrapped angular distance."""
         return ()
+
+    @property
+    def position_indices(self) -> tuple[int, ...]:
+        """State coordinate indices representing spatial position (for collision detection, etc.)."""
+        return (0, 1)
 
     @property
     def num_robots(self) -> int:
@@ -311,9 +319,10 @@ class DynamicsSimulator(ABC):
         environment_state = np.asarray(frame["observation.environment_state"], dtype=np.float32).reshape(-1)
         state = np.asarray(frame["observation.state"], dtype=np.float32).reshape(-1)
         return {
-            "ego_obs": np.concatenate([environment_state, state]),
-            "neighbor_obs": np.empty((0, 2), dtype=np.float32),
-            "neighbor_mask": np.empty((0, 1), dtype=np.float32),
+            "observation.environment_state": environment_state,
+            "observation.state": state,
+            "observation.neighbor_state": np.empty(0, dtype=np.float32),
+            "observation.neighbor_mask": np.empty(0, dtype=np.float32),
         }
 
     def get_decentralized_dataset_features(self) -> dict[str, Any]:
@@ -374,6 +383,9 @@ class DynamicsSimulator(ABC):
         self.time = 0
         self.reset_rollout_termination()
         return self.state
+
+    def is_collision(self, state: np.ndarray) -> bool:
+        return False
 
     def simulate(
         self,

@@ -12,14 +12,9 @@ DEFAULT_POLICY_TYPE = "mlp"
 class ActionPolicy(nn.Module, ABC):
     """Abstract base class for all continuous-action imitation learning policies."""
 
-    @property
-    @abstractmethod
-    def use_neighbor_encoder(self) -> bool:
-        raise NotImplementedError
-
-    @abstractmethod
     def forward(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        raise NotImplementedError
+        """Default PyTorch module forward pass delegates to select_action."""
+        return self.select_action(observation_dict)
 
     @abstractmethod
     def select_action(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:

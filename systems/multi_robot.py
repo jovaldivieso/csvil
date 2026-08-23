@@ -6,6 +6,7 @@ import casadi as ca
 import numpy as np
 
 from core.types import VectorSpec, as_vector
+from systems.collision_checker import check_homogeneous_fleet_collisions
 from systems.dynamics import DynamicsProtocol, DynamicsSimulator
 
 
@@ -173,6 +174,25 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         return tuple(global_indices)
 
+    @property
+    def position_indices(self) -> tuple[int, ...]:
+        """Aggregate global position indices from all sub-simulators."""
+        global_indices: list[int] = []
+        for sub_sim, state_slice in zip(self.simulators, self.robot_state_slices):
+            local_indices = tuple(getattr(sub_sim, "position_indices", (0, 1)))
+            local_state_dim = int(sub_sim.nx)
+
+            for local_idx_raw in local_indices:
+                local_idx = int(local_idx_raw)
+                if local_idx < 0 or local_idx >= local_state_dim:
+                    raise ValueError(
+                        f"Sub-simulator {type(sub_sim).__name__} declares invalid position_indices "
+                        f"entry {local_idx} for local state dimension {local_state_dim}."
+                    )
+                global_indices.append(int(state_slice.start) + local_idx)
+
+        return tuple(global_indices)
+
     @staticmethod
     def _observation_feature_dims(simulator: DynamicsProtocol) -> tuple[int, int]:
         env_dim = 0
@@ -240,6 +260,14 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.time = 0
         self.reset_rollout_termination()
         return self.state
+
+    def is_collision(self, state: np.ndarray) -> bool:
+        robot_states = self._split_state(state)
+        return check_homogeneous_fleet_collisions(
+            robot_states,
+            self.simulators[0].position_indices,
+            self.d_safe,
+        )
 
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
@@ -392,8 +420,18 @@ class MultiRobotSimulator(DynamicsSimulator):
         return self._sample_safe_initial_state(rng=rng, randomize_goals=False)
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
-        for sim in self.simulators:
-            sim.randomize_goal_for_reset(rng)
+        for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
+            for sim in self.simulators:
+                sim.randomize_goal_for_reset(rng)
+
+            goals = [sim.goal_state for sim in self.simulators]
+            if self._positions_respect_d_safe(goals):
+                return
+
+        raise RuntimeError(
+            "Failed to sample safe multi-robot goals. "
+            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
+        )
 
     def reset_random(self) -> np.ndarray:
         return self.reset(
@@ -401,23 +439,11 @@ class MultiRobotSimulator(DynamicsSimulator):
         )
 
     def _positions_respect_d_safe(self, states: list[np.ndarray]) -> bool:
-        if self.d_safe <= 0.0 or len(states) < 2:
-            return True
-
-        min_dist_sq = float(self.d_safe * self.d_safe)
-        for robot_idx, state in enumerate(states):
-            if state.shape[0] < 2:
-                raise ValueError(
-                    f"Robot {robot_idx} state must include x/y in first two entries for d_safe checks."
-                )
-
-        for i in range(len(states)):
-            p_i = states[i][:2]
-            for j in range(i + 1, len(states)):
-                p_j = states[j][:2]
-                if float(np.sum((p_i - p_j) ** 2)) < min_dist_sq:
-                    return False
-        return True
+        return not check_homogeneous_fleet_collisions(
+            states,
+            self.simulators[0].position_indices,
+            self.d_safe,
+        )
 
     def _sample_safe_initial_state(
         self,
@@ -555,17 +581,11 @@ class MultiRobotSimulator(DynamicsSimulator):
         neighbor_state = np.asarray(robot_obs[base_env_dim:env_end], dtype=np.float32)
         neighbor_mask = np.asarray(robot_obs[mask_start:mask_end], dtype=np.float32)
 
-        if mask_dim == 0:
-            neighbor_obs = np.empty((0, 2), dtype=np.float32)
-            neighbor_mask_2d = np.empty((0, 1), dtype=np.float32)
-        else:
-            neighbor_obs = neighbor_state.reshape(mask_dim, 2)
-            neighbor_mask_2d = neighbor_mask.reshape(mask_dim, 1)
-
         return {
-            "ego_obs": ego_obs,
-            "neighbor_obs": neighbor_obs,
-            "neighbor_mask": neighbor_mask_2d,
+            "observation.environment_state": np.asarray(ego_obs[:base_env_dim], dtype=np.float32),
+            "observation.state": np.asarray(ego_obs[base_env_dim:], dtype=np.float32),
+            "observation.neighbor_state": neighbor_state,
+            "observation.neighbor_mask": neighbor_mask,
         }
 
     def get_decentralized_dataset_features(self) -> dict[str, Any]:
@@ -620,26 +640,6 @@ class MultiRobotSimulator(DynamicsSimulator):
         frames: list[dict[str, Any]] = []
         for robot_id, robot_action in enumerate(split_action):
             robot_policy_obs = self.decentralized_policy_observation(obs, robot_id)
-            frames.append(
-                {
-                    "observation.environment_state": np.asarray(
-                        robot_policy_obs["ego_obs"][: self.robot_env_dims[robot_id]],
-                        dtype=np.float32,
-                    ),
-                    "observation.state": np.asarray(
-                        robot_policy_obs["ego_obs"][self.robot_env_dims[robot_id] :],
-                        dtype=np.float32,
-                    ),
-                    "observation.neighbor_state": np.asarray(
-                        robot_policy_obs["neighbor_obs"].reshape(-1),
-                        dtype=np.float32,
-                    ),
-                    "observation.neighbor_mask": np.asarray(
-                        robot_policy_obs["neighbor_mask"].reshape(-1),
-                        dtype=np.float32,
-                    ),
-                    "action": np.asarray(robot_action, dtype=np.float32),
-                }
-            )
+            frames.append({**robot_policy_obs, "action": np.asarray(robot_action, dtype=np.float32)})
 
         return frames
