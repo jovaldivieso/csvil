@@ -316,7 +316,8 @@ class CasadiPlanner(Planner):
             # One slack variable per pair and horizon step (including terminal step).
             # This avoids coupling violations across unrelated pairs.
             collision_slack = self.opti.variable(len(collision_pairs), self.N + 1)
-            self.opti.subject_to(collision_slack >= 0)
+            # vec() forces element-wise inequality; CasADi reads a non-square matrix comparison as a PSD constraint.
+            self.opti.subject_to(ca.vec(collision_slack) >= 0)
 
             for pair_idx, (i, j) in enumerate(collision_pairs):
                 xi_idx, yi_idx = xy_index_by_robot[i]

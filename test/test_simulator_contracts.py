@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import casadi as ca
 import numpy as np
 
 PROJECT_ROOT = os.path.dirname(
@@ -228,6 +229,46 @@ class SimulatorContractTests(unittest.TestCase):
                 expected,
                 f"{name}: angular_state_indices mismatch",
             )
+
+    def test_multi_robot_casadi_dynamics_maps_homogeneous_fleet(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": 0.05,
+                "robots": [
+                    {
+                        "system": "double_integrator",
+                        "config": {"dt": 0.05, "goal": [0.0, 0.0], "randomize_goal": False},
+                    },
+                    {
+                        "system": "double_integrator",
+                        "config": {"dt": 0.05, "goal": [1.0, 1.0], "randomize_goal": False},
+                    },
+                ],
+            },
+        )
+        state = np.arange(simulator.nx, dtype=float) / 10.0
+        action = np.arange(simulator.nu, dtype=float) / 20.0
+
+        mapped_result = np.asarray(
+            simulator.casadi_dynamics(ca.DM(state), ca.DM(action))
+        ).reshape(-1)
+        loop_result = np.concatenate(
+            [
+                np.asarray(sim.casadi_dynamics(ca.DM(state[state_slice]), ca.DM(action[action_slice]))).reshape(-1)
+                for sim, state_slice, action_slice in zip(
+                    simulator.simulators,
+                    simulator.robot_state_slices,
+                    simulator.robot_action_slices,
+                )
+            ]
+        )
+
+        np.testing.assert_allclose(mapped_result, loop_result)
+        mapped_function = simulator._casadi_mapped_dynamics
+        self.assertIsNotNone(mapped_function)
+        simulator.casadi_dynamics(ca.DM(state), ca.DM(action))
+        self.assertIs(simulator._casadi_mapped_dynamics, mapped_function)
 
     def test_multi_robot_non_euclidean_geometry_metadata(self) -> None:
         simulator = DynamicsFactory.create(

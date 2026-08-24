@@ -196,6 +196,7 @@ class ObservationFeaturePackCache:
 def build_observation_feature_pack_cache(
     simulator: DynamicsProtocol,
     feature_names: list[str],
+    allow_schema_subset: bool = False,
 ) -> ObservationFeaturePackCache:
     dataset_features = simulator.get_dataset_features()
     schema_observation_features = tuple(
@@ -205,7 +206,7 @@ def build_observation_feature_pack_cache(
     )
     provided_feature_names = tuple(feature_names)
 
-    if provided_feature_names != schema_observation_features:
+    if not allow_schema_subset and provided_feature_names != schema_observation_features:
         mismatch_index = next(
             (
                 idx
@@ -301,6 +302,56 @@ def pack_observation_features(
     if feature_cache is None:
         feature_cache = build_observation_feature_pack_cache(simulator, feature_names)
     return pack_observation_features_from_cache(observation, feature_cache)
+
+
+def uses_decentralized_policy(simulator: DynamicsProtocol, policy: object) -> bool:
+    return bool(getattr(policy, "use_neighbor_encoder", False)) and hasattr(
+        simulator, "decentralized_policy_observation"
+    )
+
+
+def build_decentralized_policy_input(
+    simulator: DynamicsProtocol,
+    observation: np.ndarray,
+    robot_id: int,
+    device: torch.device,
+    add_batch_dim: bool = True,
+) -> dict[str, torch.Tensor]:
+    robot_policy_obs = simulator.decentralized_policy_observation(observation, robot_id)
+
+    policy_input = {
+        name: torch.as_tensor(robot_policy_obs[name], dtype=torch.float32)
+        for name in ("ego_obs", "neighbor_obs", "neighbor_mask")
+    }
+    if add_batch_dim:
+        policy_input = {name: tensor.unsqueeze(0) for name, tensor in policy_input.items()}
+
+    if device.type != "cpu":
+        policy_input = {name: tensor.to(device) for name, tensor in policy_input.items()}
+
+    return policy_input
+
+
+def build_decentralized_joint_action(
+    simulator: DynamicsProtocol,
+    policy,
+    observation: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    """Query the shared decentralized policy once per robot and concatenate local actions."""
+    action_parts: list[np.ndarray] = []
+    for robot_id in range(int(simulator.num_robots)):
+        policy_input = build_decentralized_policy_input(
+            simulator=simulator,
+            observation=observation,
+            robot_id=robot_id,
+            device=device,
+        )
+        with torch.inference_mode():
+            action_tensor = policy.select_action(policy_input)
+        action_parts.append(action_tensor.squeeze(0)[0].detach().cpu().numpy())
+
+    return np.concatenate(action_parts)
 
 
 def scheduled_expert_mix_beta(
@@ -434,7 +485,10 @@ def collect_dagger_rollouts(
     expert_mixing_beta: float,
     policy_action_fn: Callable[[np.ndarray], np.ndarray] | None,
     policy_reset_fn: Callable[[], None] | None = None,
-    frame_builder: Callable[[np.ndarray, np.ndarray], dict[str, object]] | None = None,
+    frame_builder: Callable[
+        [np.ndarray, np.ndarray],
+        Mapping[str, object] | list[Mapping[str, object]] | tuple[Mapping[str, object], ...],
+    ] | None = None,
 ) -> DaggerEvalMetrics:
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
     if policy_action_fn is None and expert_mixing_beta < 1.0:
@@ -454,6 +508,12 @@ def collect_dagger_rollouts(
             frame = simulator.format_dataset_frame(observation, expert_action)
             frame["task"] = "reach target"
             return frame
+
+    def ensure_task_field(frame: dict[str, object]) -> dict[str, object]:
+        if "task" not in frame:
+            frame = dict(frame)
+            frame["task"] = "reach target"
+        return frame
 
     while successful_episodes < trajectories_per_iteration:
         attempted_episodes += 1
@@ -492,7 +552,7 @@ def collect_dagger_rollouts(
 
         reached_goal = False
         rollout_steps = steps_per_trajectory
-        episode_frames: list[dict[str, object]] = []
+        episode_frame_buffers: list[list[dict[str, object]]] | None = None
 
         for step in range(1, steps_per_trajectory + 1):
             observation = simulator.observe(state, validate=False)
@@ -515,7 +575,37 @@ def collect_dagger_rollouts(
                 planner_failed = True
                 break
 
-            episode_frames.append(frame_builder(observation, expert_action))
+            built_frame = frame_builder(observation, expert_action)
+            if isinstance(built_frame, (list, tuple)):
+                if episode_frame_buffers is None:
+                    episode_frame_buffers = [[] for _ in built_frame]
+                elif len(episode_frame_buffers) != len(built_frame):
+                    raise ValueError(
+                        "'frame_builder' must return the same number of per-robot frames "
+                        "at every rollout step."
+                    )
+
+                for robot_idx, frame in enumerate(built_frame):
+                    if not isinstance(frame, Mapping):
+                        raise TypeError(
+                            "'frame_builder' list/tuple items must be mappings, "
+                            f"got {type(frame).__name__}."
+                        )
+                    episode_frame_buffers[robot_idx].append(ensure_task_field(dict(frame)))
+            elif isinstance(built_frame, Mapping):
+                if episode_frame_buffers is None:
+                    episode_frame_buffers = [[]]
+                elif len(episode_frame_buffers) != 1:
+                    raise ValueError(
+                        "'frame_builder' cannot switch between per-robot and single-frame "
+                        "outputs within one rollout."
+                    )
+                episode_frame_buffers[0].append(ensure_task_field(dict(built_frame)))
+            else:
+                raise TypeError(
+                    "'frame_builder' must return a mapping or a list/tuple of mappings, "
+                    f"got {type(built_frame).__name__}."
+                )
 
             use_expert_action = bool(episode_expert_mixing_rng.random() < expert_mixing_beta)
             policy_action = None
@@ -546,9 +636,12 @@ def collect_dagger_rollouts(
         if planner_failed:
             continue
 
-        for frame_data in episode_frames:
-            dataset_writer.add_frame(frame_data)
-        dataset_writer.save_episode()
+        if episode_frame_buffers is None:
+            raise RuntimeError("'frame_builder' produced no frames for the rollout.")
+        for frame_buffer in episode_frame_buffers:
+            for frame_data in frame_buffer:
+                dataset_writer.add_frame(frame_data)
+            dataset_writer.save_episode()
         successful_episodes += 1
         reached_goal_count += int(reached_goal)
         steps_taken.append(int(rollout_steps))
