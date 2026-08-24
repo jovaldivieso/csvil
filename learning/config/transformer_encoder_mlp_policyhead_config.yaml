@@ -1,0 +1,10 @@
+model:
+  hidden_dims: [256, 256, 128]
+
+  encoder: transformer
+
+  transformer:
+    hidden_dim: 64
+    num_heads: 4
+    num_layers: 1
+    dropout: 0.1
