@@ -27,9 +27,12 @@ class EncoderFactory:
         normalized_type = encoder_type.strip().lower()
         if normalized_type == DEFAULT_ENCODER_TYPE:
             from learning.models.deep_set_encoder import DeepSetEncoder
-
             return DeepSetEncoder(in_features=in_features, **kwargs)
+        if normalized_type == "gnn":
+            from learning.models.gnn_encoder import GNNEncoder
+            return GNNEncoder(node_in=in_features, edge_in=kwargs.pop("edge_in"), **kwargs)
+            
         raise ValueError(
             f"Unknown observation encoder '{encoder_type}'. "
-            f"Supported encoders: '{DEFAULT_ENCODER_TYPE}'."
+            f"Supported encoders: '{DEFAULT_ENCODER_TYPE}', 'gnn'."
         )

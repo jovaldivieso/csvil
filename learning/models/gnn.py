@@ -24,11 +24,15 @@ import torch.nn as nn
 from torch_geometric.data import Data
 from torch_geometric.nn import MessagePassing
 
+from learning.models.encoder import ObservationEncoder
+
+
 
 # Zeroed by systems/multi_robot.py::observe() whenever the true offset exceeds
 # inter_robot_visibility_radius; a real offset is astronomically unlikely to
 # land exactly on 0.0, so "all-zero" is a safe stand-in for "not visible".
 VISIBILITY_ZERO_EPS = 1e-9
+
 
 
 # --------------------------------------------------------------------------- #
@@ -73,32 +77,32 @@ class MPLayer(MessagePassing):
 # --------------------------------------------------------------------------- #
 # Full model: node encoder -> L message-passing layers -> MLP action head       #
 # --------------------------------------------------------------------------- #
-class MultiRobotGNN(nn.Module):
-    def __init__(self, node_in, edge_in, hidden, action_dim, num_layers=1):
-        super().__init__()
-        # Single Robot LOCAL Observations
-        # node_in = Own state + relative goal position
-        # out: observation encoding (hidden)
+
+class GNNEncoder(ObservationEncoder):
+    def __init__(self, 
+                node_in: int,        # own local state (e.g. proprioception + relative goal position)
+                edge_in: int,        # relative observation (relative distance between robot i and j)
+                hidden: int = 128,  # hidden embedding size
+                num_layers=1    # number of communication hops 
+        ): 
+        super().__init__()   
+
+        # encoder local observations
         self.encoder = nn.Sequential(
             nn.Linear(node_in, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden),
         )
 
-        # GNN Communication: Observation Encoding (hidden) -> GNN encoding
+        # gnn encoder for communication: encode variable number of neighbors into a fixed-size embedding
         self.layers = nn.ModuleList([MPLayer(hidden, edge_in) for _ in range(num_layers)])
 
-        # MLP Action Head: GNN encoding -> Action
-        self.head = nn.Sequential(
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, action_dim),
-        )
+        def forward(self, graph):
+            x, edge_index, edge_attr = graph.x, graph.edge_index, graph.edge_attr
+            h = self.encoder(x)                       # [N_total, HIDDEN]
+            for layer in self.layers:
+                h = layer(h, edge_index, edge_attr)   # [N_total, HIDDEN]
+            return h
 
-    def forward(self, data):
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        h = self.encoder(x)                       # [N_total, HIDDEN]
-        for layer in self.layers:
-            h = layer(h, edge_index, edge_attr)   # [N_total, HIDDEN]
-        return self.head(h)                       # [N_total, ACTION_DIM]
 
 
 # --------------------------------------------------------------------------- #
@@ -214,7 +218,7 @@ def frame_to_graph(frame: Mapping[str, Any], num_robots: int) -> Data:
 # Rollout wrapper: gives the GNN the same policy API as MLPPolicy/ACT/Diffusion #
 # --------------------------------------------------------------------------- #
 class GNNPolicy(nn.Module):
-    """Adapts MultiRobotGNN to the `select_action` / `reset` policy interface.
+    """Adapts GNNEncoder to the `select_action` / `reset` policy interface.
 
     test/evaluate_policy.py hands policies a dict of batched observation tensors and
     expects one flat action row back, so this wrapper converts
@@ -227,15 +231,17 @@ class GNNPolicy(nn.Module):
     from currently visible neighbours.
     """
 
-    def __init__(self, gnn: MultiRobotGNN, num_robots: int):
+    def __init__(self, gnn: GNNEncoder, action_head, num_robots: int):
         super().__init__()
         if num_robots <= 0:
             raise ValueError(f"'num_robots' must be positive, got {num_robots}.")
         self.gnn = gnn
+        self.action_head = action_head
         self.num_robots = int(num_robots)
 
     def forward(self, data: Data) -> torch.Tensor:
-        return self.gnn(data)
+        gnn_encoding = self.gnn(data)
+        return self.action_head(gnn_encoding)
 
     def select_action(self, observation: Mapping[str, torch.Tensor]) -> torch.Tensor:
         if not isinstance(observation, Mapping):
@@ -247,7 +253,7 @@ class GNNPolicy(nn.Module):
         device = next(self.parameters()).device
         graph = frame_to_graph(observation, num_robots=self.num_robots).to(device)
 
-        per_node_action = self.gnn(graph)      # [num_robots, ACTION_DIM]
+        per_node_action = self.action_head(self.gnn(graph))  # [num_robots, ACTION_DIM]
         return per_node_action.reshape(1, -1)  # [1, num_robots * ACTION_DIM]
 
     def reset(self) -> None:
@@ -259,7 +265,7 @@ class GNNPolicy(nn.Module):
 # Checkpoint I/O                                                               #
 # --------------------------------------------------------------------------- #
 def gnn_checkpoint_data(
-    model: MultiRobotGNN,
+    model: GNNPolicy,
     node_in: int,
     edge_in: int,
     hidden: int,
@@ -300,16 +306,15 @@ def load_gnn_policy(
             f"GNN checkpoint '{checkpoint_path}' is missing architecture keys: {missing}."
         )
 
-    model = MultiRobotGNN(
+    model = GNNEncoder(
         node_in=int(checkpoint["node_in"]),
         edge_in=int(checkpoint["edge_in"]),
         hidden=int(checkpoint["hidden"]),
-        action_dim=int(checkpoint["action_dim"]),
         num_layers=int(checkpoint["num_layers"]),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    policy = GNNPolicy(gnn=model, num_robots=8) # num_robots is only used for frame -> graph conversion
+    policy = GNNPolicy(gnn=model, action_head=nn.Linear(int(checkpoint["hidden"]), int(checkpoint["action_dim"])), num_robots=8) # num_robots is only used for frame -> graph conversion
     policy.eval()
     policy.to(device)
     return policy

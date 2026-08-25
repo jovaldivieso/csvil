@@ -182,7 +182,23 @@ def main():
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=batch_size)
 
-    model = MultiRobotGNN(NODE_IN, EDGE_IN, HIDDEN, ACTION_DIM, num_layers=NUM_LAYERS).to(device)
+    gnn_encoder = EncoderFactory.create(
+        encoder_type="gnn",
+        in_features=EDGE_IN,
+        hidden=HIDDEN,
+    )
+
+    GNNPolicy = MLPPolicy(
+        state_dim=NODE_IN,
+        action_dim=ACTION_DIM,
+        hidden_dims=HIDDEN,
+        prediction_horizon=cfg.prediction_horizon,
+        neighbor_feature_dim=neighbor_feature_dim,
+        neighbor_slots=neighbor_slots,
+        neighbor_encoder=neighbor_encoder,
+    ).to(device)
+
+    model = GNNPolicy(NODE_IN, EDGE_IN, HIDDEN, ACTION_DIM, num_layers=NUM_LAYERS).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
