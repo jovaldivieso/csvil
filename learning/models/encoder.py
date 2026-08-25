@@ -35,7 +35,11 @@ class EncoderFactory:
             from learning.models.transformer_encoder import TransformerEncoder
             return TransformerEncoder(in_features=in_features, **kwargs)
 
+        if normalized_type == "gnn":
+            from learning.models.gnn_encoder import GNNEncoder
+            return GNNEncoder(in_features=in_features, **kwargs)
+
         raise ValueError(
             f"Unknown observation encoder '{encoder_type}'. "
-            f"Supported encoders: 'deepset', 'transformer'."
+            f"Supported encoders: 'deepset', 'transformer', 'gnn'."
         )
