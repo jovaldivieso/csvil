@@ -276,6 +276,7 @@ def load_encoder_config(mlp_config_path: Path | None) -> EncoderConfig:
         raise ValueError("MLP config 'model.encoder' must be a non-empty string.")
 
     normalized_type = encoder_type_raw.strip().lower()
+    # DEFAULT_ENCODER_TYPE = "deepset"
     if normalized_type == DEFAULT_ENCODER_TYPE:
         raw_kwargs = model_section.get(DEFAULT_ENCODER_TYPE, {})
         if not isinstance(raw_kwargs, Mapping):
@@ -285,6 +286,23 @@ def load_encoder_config(mlp_config_path: Path | None) -> EncoderConfig:
             "rho_dims": tuple(int(width) for width in raw_kwargs.get("rho_dims", (128,))),
             "pool_type": str(raw_kwargs.get("pool_type", "max")),
         }
+        return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
+    
+    if normalized_type == "transformer":
+        raw_kwargs = model_section.get("transformer", {})
+
+        if not isinstance(raw_kwargs, Mapping):
+            raise ValueError(
+                "MLP config 'model.transformer' must be a mapping."
+            )
+
+        kwargs: dict[str, object] = {
+            "hidden_dim": int(raw_kwargs.get("hidden_dim", 64)),
+            "num_heads": int(raw_kwargs.get("num_heads", 4)),
+            "num_layers": int(raw_kwargs.get("num_layers", 1)),
+            "dropout": float(raw_kwargs.get("dropout", 0.1)),
+        }
+
         return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
 
     return EncoderConfig(encoder_type=normalized_type, kwargs={})
@@ -482,6 +500,7 @@ def run_dagger(cfg: DaggerConfig) -> None:
         )
     print(f"MLP hidden dims: {list(cfg.mlp_hidden_dims)}")
     print(f"Prediction horizon: {cfg.prediction_horizon}")
+    print(f"Encoder: {encoder_config.encoder_type}")
     if cfg.start_with_aggregation:
         print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
     else:

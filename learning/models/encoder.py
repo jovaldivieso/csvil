@@ -25,14 +25,17 @@ class EncoderFactory:
     @staticmethod
     def create(encoder_type: str, in_features: int, **kwargs: object) -> ObservationEncoder:
         normalized_type = encoder_type.strip().lower()
+        
+        # DEFAULT_ENCODER_TYPE = "deepset"
         if normalized_type == DEFAULT_ENCODER_TYPE:
             from learning.models.deep_set_encoder import DeepSetEncoder
             return DeepSetEncoder(in_features=in_features, **kwargs)
-        if normalized_type == "gnn":
-            from learning.models.gnn_encoder import GNNEncoder
-            return GNNEncoder(node_in=in_features, edge_in=kwargs.pop("edge_in"), **kwargs)
             
+        if normalized_type == "transformer":
+            from learning.models.transformer_encoder import TransformerEncoder
+            return TransformerEncoder(in_features=in_features, **kwargs)
+
         raise ValueError(
             f"Unknown observation encoder '{encoder_type}'. "
-            f"Supported encoders: '{DEFAULT_ENCODER_TYPE}', 'gnn'."
+            f"Supported encoders: 'deepset', 'transformer'."
         )
