@@ -20,34 +20,6 @@ from .utils import evaluation_seed_specs, sample_initial_state
 from systems.initial_state_utils import normalize_initial_state_specs
 
 
-def uses_decentralized_policy(simulator: DynamicsProtocol, policy: object) -> bool:
-    # Check if the policy uses a DeepSetEncoder (which requires neighbor observations)
-    # This correctly handles centralized multi-robot policies and single-robot with decoder
-    from learning.models.deepset_encoder import DeepSetEncoder
-    if hasattr(policy, "obs_encoder") and isinstance(policy.obs_encoder, DeepSetEncoder):
-        return True
-    return False
-
-
-def build_decentralized_policy_input(
-    simulator: DynamicsProtocol,
-    observation: np.ndarray,
-    robot_id: int,
-    device: torch.device,
-    add_batch_dim: bool = True,
-) -> dict[str, torch.Tensor]:
-    robot_policy_obs = simulator.decentralized_policy_observation(observation, robot_id)
-    policy_input = {
-        name: torch.as_tensor(value, dtype=torch.float32)
-        for name, value in robot_policy_obs.items()
-    }
-    if add_batch_dim:
-        policy_input = {name: tensor.unsqueeze(0) for name, tensor in policy_input.items()}
-    if device.type != "cpu":
-        policy_input = {name: tensor.to(device) for name, tensor in policy_input.items()}
-    return policy_input
-
-
 def build_decentralized_joint_action(
     simulator: DynamicsProtocol,
     policy,
@@ -119,10 +91,14 @@ def collect_dagger_rollouts(
     expert_executed_steps = total_executed_steps = 0
 
     if frame_builder is None:
-        def frame_builder(observation: np.ndarray, expert_action: np.ndarray) -> dict[str, object]:
-            frame = simulator.format_dataset_frame(observation, expert_action)
-            frame["task"] = "reach target"
-            return frame
+        def frame_builder(
+            observation: np.ndarray,
+            expert_action: np.ndarray,
+        ) -> list[dict[str, object]]:
+            frames = simulator.format_dataset_frame(observation, expert_action)
+            for frame in frames:
+                frame["task"] = "reach target"
+            return frames
 
     def ensure_task_field(frame: dict[str, object]) -> dict[str, object]:
         if "task" not in frame:
@@ -147,6 +123,12 @@ def collect_dagger_rollouts(
             )
             sampled_initial_state = sample_initial_state(simulator, episode_initial_state_seed)
         state = simulator.reset(sampled_initial_state)
+        if simulator.is_collision(state):
+            print(
+                "Skipping DAgger episode due to colliding initial state "
+                f"(attempt={attempted_episodes})."
+            )
+            continue
         episode_initial_state = state.copy()
         episode_noise_seed = action_noise_seed_for_rollout(
             action_noise_seed,
@@ -270,8 +252,10 @@ def rollout_policy_with_action_fn(
     state = simulator.reset(initial_state)
     if reset_fn is not None:
         reset_fn()
+    if simulator.is_collision(state):
+        return False, 0
     if simulator.should_terminate_rollout(state):
-        return not simulator.is_collision(state), 0
+        return True, 0
     for step in range(1, num_steps + 1):
         action = action_fn(simulator.observe(state, validate=False))
         state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng), validate=False)

@@ -83,14 +83,15 @@ class FlowPolicy(ActionPolicy):
 
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
         """Load both uncompiled and TorchDynamo-compiled network checkpoints."""
-        if hasattr(self.net, "_orig_mod"):
-            state_dict = {
-                key.replace("net.", "net._orig_mod.", 1)
-                if key.startswith("net.") and not key.startswith("net._orig_mod.")
-                else key: value
-                for key, value in state_dict.items()
-            }
-        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+        target_is_compiled = hasattr(self.net, "_orig_mod")
+        normalized_state_dict = {}
+        for key, value in state_dict.items():
+            if target_is_compiled and key.startswith("net.") and not key.startswith("net._orig_mod."):
+                key = key.replace("net.", "net._orig_mod.", 1)
+            elif not target_is_compiled and key.startswith("net._orig_mod."):
+                key = key.replace("net._orig_mod.", "net.", 1)
+            normalized_state_dict[key] = value
+        return super().load_state_dict(normalized_state_dict, strict=strict, assign=assign)
 
     def _predict_velocity(
         self,

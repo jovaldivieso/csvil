@@ -80,11 +80,15 @@ def build_observation_feature_pack_cache(
             f"{mismatch_details}"
         )
 
-    total_dim = observation_dim_from_features(simulator)
+    total_dim = int(simulator.obs_dim)
     dummy_frame = simulator.format_dataset_frame(
         np.arange(total_dim, dtype=np.float32),
         np.zeros(int(simulator.nu), dtype=np.float32),
     )
+    if isinstance(dummy_frame, (list, tuple)):
+        if not dummy_frame:
+            raise ValueError("Simulator dataset formatter returned no frames.")
+        dummy_frame = dummy_frame[0]
     feature_indices: list[np.ndarray] = []
     feature_index_slices: list[slice] = []
     start = 0

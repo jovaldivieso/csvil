@@ -165,7 +165,7 @@ class MultiRobotMaskSemanticsTests(unittest.TestCase):
         state = simulator.random_initial_state(np.random.default_rng(3))
         observation = simulator.observe(state, validate=False)
         local_observation = simulator.decentralized_policy_observation(observation)
-        features = simulator.get_decentralized_dataset_features()
+        features = simulator.get_dataset_features()
 
         self.assertEqual(simulator.num_robots, 1)
         self.assertEqual(tuple(local_observation["observation.neighbor_state"].shape), (0,))

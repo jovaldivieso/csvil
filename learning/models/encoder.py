@@ -41,7 +41,16 @@ class EncoderFactory:
                 neighbor_slots=neighbor_slots,
                 **kwargs,
             )
+        if normalized_type == "transformer":
+            from learning.models.transformer_encoder import TransformerEncoder
+
+            return TransformerEncoder(
+                state_dim=state_dim,
+                neighbor_feature_dim=neighbor_feature_dim,
+                neighbor_slots=neighbor_slots,
+                **kwargs,
+            )
         raise ValueError(
             f"Unknown observation encoder '{encoder_type}'. "
-            f"Supported encoders: '{DEFAULT_ENCODER_TYPE}'."
+            f"Supported observation encoders: '{DEFAULT_ENCODER_TYPE}', 'transformer'."
         )

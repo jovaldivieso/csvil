@@ -102,6 +102,8 @@ class DeepSetEncoder(ObservationEncoder):
             raise ValueError(
                 "Flat neighbor tensors do not match the encoder's configured feature dimensions."
             ) from exc
+        if neighbor_obs.shape[1] != neighbor_mask.shape[1]:
+            raise ValueError("Neighbor state and mask tensors must contain the same number of slots.")
 
         max_items = neighbor_obs.shape[1]
         if max_items == 0:

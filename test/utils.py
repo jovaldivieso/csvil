@@ -7,72 +7,12 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 from matplotlib.patches import FancyArrowPatch
 
-from core.factory import DynamicsFactory, PlannerFactory
-from systems.initial_state_utils import normalize_initial_state_specs
-from data.data_collection import DataCollector
 
 
 def _heading_sample_stride(num_points: int) -> int:
     """Choose a sparse, readable stride for trajectory heading arrows."""
     return max(1, num_points // 20)
 
-def collect_expert_data(
-    simulator_name: str,
-    planner_name: str,
-    config: Mapping[str, Any],
-    repo_id: str,
-    local_dir: str,
-    num_traj: int,
-    num_steps: int,
-    action_noise_std: float = 0.0,
-    initial_states: Any | None = None,
-):
-    """
-    generates and saves expert trajectories for a dynamics system
-
-    creates a simulator, planner and data collector,
-    then stores generated expert trajectories as a local LeRobot dataset
-
-    args:
-        simulator_name: dynamics simulator key (e.g. unicycle2)
-        planner_name: planner key (e.g. casadi)
-        config: configuration dictionary for simulator and planner
-        repo_id: identifier stored in LeRobot dataset metadata
-        local_dir: local directory where the generated dataset is saved
-        num_traj: number of expert trajectories to collect
-        num_steps: maximum number of simulation steps per trajectory
-        action_noise_std: std-dev of Gaussian action noise applied during execution
-
-    returns:
-        result of DataCollector.collect_trajectories()
-    """
-    
-    simulator = DynamicsFactory.create(system_name=simulator_name, config=config)
-    planner = PlannerFactory.create(
-        planner_name=planner_name,
-        simulator=simulator,
-        config=config,
-    )
-
-    collector = DataCollector(
-        simulator=simulator,
-        repo_id=repo_id,
-        local_dir=local_dir,
-    )
-
-    normalized_initial_states = normalize_initial_state_specs(
-        simulator=simulator,
-        initial_states=initial_states,
-    )
-
-    return collector.collect_trajectories(
-        motion_planner=planner,
-        num_trajectories=num_traj,
-        num_steps=num_steps,
-        action_noise_std=action_noise_std,
-        initial_states=normalized_initial_states,
-    )
- 
 def plot_xy_trajectories(
     simulator,
     trajectories,

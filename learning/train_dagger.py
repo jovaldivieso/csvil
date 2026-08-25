@@ -177,12 +177,7 @@ class DaggerTrainer:
 
         self.action_noise_seed = default_action_noise_seed_for_config(self.seeded_config)
         self.initial_state_seed = resolve_initial_state_seed(self.seeded_config, self.cfg.seed)
-        # Use decentralized dataset schema for MLP/Flow policies (which require DeepSetEncoder),
-        # regardless of robot count. Only ACT/Diffusion use centralized schema.
-        if self.cfg.policy_type in ["mlp", "flow"]:
-            features = self.simulator.get_decentralized_dataset_features()
-        else:
-            features = self.simulator.get_dataset_features()
+        features = self.simulator.get_dataset_features()
         self.obs_feature_names = [n for n in features if n.startswith("observation.")]
         self.state_dim = sum(
             int(v["shape"][0])
@@ -211,7 +206,7 @@ class DaggerTrainer:
             hidden_dims=self.cfg.mlp_hidden_dims,
             prediction_horizon=self.cfg.prediction_horizon,
             **flow,
-        ).to(self.device)
+        ).to(self.device).eval()
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.cfg.learning_rate)
         self.cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -306,6 +301,7 @@ class DaggerTrainer:
 
         if progress is not None:
             progress.close()
+        self.policy.eval()
         return running_loss / float(num_steps)
 
     def train_on_aggregate(self, label: str, training_round: int, target_epochs: float) -> None:
@@ -351,12 +347,13 @@ class DaggerTrainer:
         if self.cfg.eval_episodes == 0:
             return None
         eval_config = copy.deepcopy(dict(self.seeded_config))
-        if "robots" in eval_config:
-            for robot_entry in eval_config["robots"]:
-                if isinstance(robot_entry.get("config"), dict):
-                    robot_entry["config"]["randomize_goal"] = True
-        else:
-            eval_config["randomize_goal"] = True
+        if self.dynamic_goal_randomization:
+            if "robots" in eval_config:
+                for robot_entry in eval_config["robots"]:
+                    if isinstance(robot_entry.get("config"), dict):
+                        robot_entry["config"]["randomize_goal"] = True
+            else:
+                eval_config["randomize_goal"] = True
         simulator = DynamicsFactory.create(
             system_name=self.cfg.system,
             config=eval_config,
@@ -499,11 +496,7 @@ class DaggerTrainer:
             )
 
             if self.cfg.start_with_aggregation and not self.cfg.dataset_root.exists():
-                # Use decentralized schema for MLP/Flow policies, centralized for ACT/Diffusion
-                if self.cfg.policy_type in ["mlp", "flow"]:
-                    features = simulator.get_decentralized_dataset_features()
-                else:
-                    features = simulator.get_dataset_features()
+                features = simulator.get_dataset_features()
                 writer = LeRobotDataset.create(
                     repo_id=self.cfg.repo_id,
                     fps=int(1 / simulator.dt),
@@ -523,16 +516,7 @@ class DaggerTrainer:
                     obs,
                     self.device,
                 )
-                writer_features = getattr(
-                    getattr(writer, "meta", None),
-                    "features",
-                    {},
-                )
-                frames = (
-                    simulator.format_decentralized_dataset_frames
-                    if "observation.neighbor_state" in writer_features
-                    else simulator.format_dataset_frame
-                )
+                frames = simulator.format_dataset_frame
                 metrics = collect_dagger_rollouts(
                     simulator=simulator,
                     expert_planner=planner,
@@ -562,20 +546,6 @@ class DaggerTrainer:
             print(f"aggregation_goal_source: {aggregation_goal_source}")
 
             success_threshold = self.cfg.randomize_goal_with_eval_success
-            success_pct = metrics.success_rate * 100.0
-            if (
-                success_threshold is not None
-                and round_beta == 0.0
-                and success_pct >= success_threshold
-            ):
-                if not self.dynamic_goal_randomization:
-                    print(
-                        "Curriculum milestone reached: "
-                        f"success rate {success_pct:.1f}% >= threshold {success_threshold}% "
-                        "with beta=0.0. Enabling goal randomization."
-                    )
-                self.dynamic_goal_randomization = True
-
             self.train_on_aggregate(
                 f"DAgger round {display}/{self.cfg.dagger_iterations}: retrain"
                 if self.cfg.start_with_aggregation
@@ -642,7 +612,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--expert-mix-beta-end", type=float, default=0.0)
     p.add_argument("--expert-mix-beta-decay-rate", type=float)
     p.add_argument("--expert-mix-decay-after-success-rate", type=float)
-    p.add_argument("--adaptive-beta-recovery", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--adaptive-beta-recovery", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--target-epochs-per-round", nargs="+", type=float, default=[30.0])
     p.add_argument("--eval-episodes", type=int, default=10)
     p.add_argument("--eval-steps", type=int)

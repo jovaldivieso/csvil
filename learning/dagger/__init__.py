@@ -13,11 +13,9 @@ from .metrics import DaggerEvalMetrics
 from .rollouts import (
     apply_execution_noise,
     build_decentralized_joint_action,
-    build_decentralized_policy_input,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
     rollout_policy_with_action_fn,
-    uses_decentralized_policy,
 )
 from .utils import (
     evaluation_seed_specs,
@@ -43,11 +41,9 @@ __all__ = [
     "pack_observation_features_from_cache",
     "apply_execution_noise",
     "build_decentralized_joint_action",
-    "build_decentralized_policy_input",
     "collect_dagger_rollouts",
     "evaluate_policy_rollouts",
     "rollout_policy_with_action_fn",
-    "uses_decentralized_policy",
     "evaluation_seed_specs",
     "print_rollout_metrics",
     "resolve_initial_state_seed",

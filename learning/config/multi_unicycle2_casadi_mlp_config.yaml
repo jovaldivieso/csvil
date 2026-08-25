@@ -3,8 +3,18 @@ model:
   policy_type: mlp              # options: mlp, flow
   prediction_horizon: 15        # number of future action steps to predict, set to 1 for single-step prediction
   hidden_dims: [256, 256, 256]  # Trajectory prediction network hidden layers
+
   encoder: deepset              # Set to transformer, GNN, etc
+
   deepset:
     phi_dims: [128, 128]
     rho_dims: [128]
     pool_type: sum              # Can be sum, max, mean
+
+  #encoder: transformer
+  
+  #transformer:
+  #  hidden_dim: 64
+  #  num_heads: 4
+  #  num_layers: 1
+  #  dropout: 0.1

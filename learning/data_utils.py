@@ -64,7 +64,6 @@ def format_sample_for_policy(
 
     if simulator.num_robots > 1 and "observation.neighbor_state" not in sample:
         raise RuntimeError(
-            "Legacy centralized multi-robot datasets are no longer supported. "
             "Multi-robot training requires a decentralized dataset format. "
             "Please regenerate your dataset."
         )
@@ -91,7 +90,6 @@ def format_sample_for_policy(
             "Decentralized action dimension does not match the simulator's local action dimension: "
             f"got {action.numel()}, expected {expected_action_dim}."
         )
-
     observation = {
         "observation.environment_state": environment_state,
         "observation.state": state,
@@ -100,8 +98,7 @@ def format_sample_for_policy(
     }
     
     # Build action sequence with proper horizon handling
-    if subsequent_samples is None:
-        subsequent_samples = []
+    subsequent_samples = list(subsequent_samples or [])
     actions = _build_action_sequence(sample, subsequent_samples, prediction_horizon)
     
     return observation, actions
@@ -127,13 +124,14 @@ def collate_batch_for_policy(
     if not batch:
         raise ValueError("Cannot collate an empty dataset batch.")
 
+    normalized_batch = list(batch)
     subsequent_samples_by_item = _bulk_future_samples(
-        batch=batch,
+        batch=normalized_batch,
         dataset=dataset,
         prediction_horizon=prediction_horizon,
     )
     formatted = []
-    for sample, subsequent_samples in zip(batch, subsequent_samples_by_item):
+    for sample, subsequent_samples in zip(normalized_batch, subsequent_samples_by_item):
         formatted_obs, formatted_actions = format_sample_for_policy(
             sample=sample,
             simulator=simulator,
@@ -178,12 +176,20 @@ def _bulk_future_samples(
     if not all_future_indices:
         return [[] for _ in batch]
 
+    dataset_length = len(dataset)
+    valid_future_indices = [
+        index for index in all_future_indices
+        if 0 <= index < dataset_length
+    ]
+    if not valid_future_indices:
+        return [[] for _ in batch]
+
     try:
-        bulk_future_samples = dataset[all_future_indices]
+        bulk_future_samples = dataset[valid_future_indices]
     except (IndexError, KeyError, TypeError, AttributeError):
         return [[] for _ in batch]
 
-    fetched_by_index = _samples_by_index(bulk_future_samples, all_future_indices)
+    fetched_by_index = _samples_by_index(bulk_future_samples, valid_future_indices)
     subsequent_samples_by_item: list[list[Mapping[str, Any]]] = []
     for sample, future_indices in zip(batch, future_indices_by_item):
         if "episode_index" not in sample:

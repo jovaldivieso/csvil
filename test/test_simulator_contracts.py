@@ -147,7 +147,9 @@ class SimulatorContractTests(unittest.TestCase):
             action = np.zeros(int(simulator.nu), dtype=np.float32)
 
             features = simulator.get_dataset_features()
-            frame = simulator.format_dataset_frame(observation, action)
+            frames = simulator.format_dataset_frame(observation, action)
+            self.assertTrue(isinstance(frames, list) and frames, name)
+            frame = frames[0]
 
             obs_feature_dim = 0
             action_feature_dim = 0
@@ -181,15 +183,20 @@ class SimulatorContractTests(unittest.TestCase):
                 elif feature_name == "action" or feature_name.endswith(".action"):
                     action_feature_dim += expected_dim
 
+            expected_obs_dim = int(simulator.obs_dim)
+            expected_action_dim = int(simulator.nu)
+            if simulator.num_robots > 1:
+                expected_obs_dim = int(simulator.robot_observation_slices[0].stop)
+                expected_action_dim = int(simulator.robot_action_slices[0].stop)
             self.assertEqual(
                 obs_feature_dim,
-                int(simulator.obs_dim),
-                f"{name}: observation feature sum {obs_feature_dim} != obs_dim {simulator.obs_dim}",
+                expected_obs_dim,
+                f"{name}: observation feature sum {obs_feature_dim} != expected {expected_obs_dim}",
             )
             self.assertEqual(
                 action_feature_dim,
-                int(simulator.nu),
-                f"{name}: action feature sum {action_feature_dim} != nu {simulator.nu}",
+                expected_action_dim,
+                f"{name}: action feature sum {action_feature_dim} != expected {expected_action_dim}",
             )
 
     def test_geometry_metadata_contract(self) -> None:
