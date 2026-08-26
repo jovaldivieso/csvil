@@ -61,6 +61,7 @@ class DynamicsProtocol(Protocol):
     max_action: float
     is_euclidean: bool
     angular_state_indices: tuple[int, ...]
+    position_indices: tuple[int, ...]
     num_robots: int
     simulators: list["DynamicsProtocol"]
     robot_state_slices: list[slice]
@@ -92,13 +93,9 @@ class DynamicsProtocol(Protocol):
 
     def should_terminate_rollout(self, state: np.ndarray) -> bool: ...
 
-    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, Any]: ...
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, Any]]: ...
 
     def decentralized_policy_observation(self, obs: np.ndarray, robot_id: int = 0) -> dict[str, np.ndarray]: ...
-
-    def get_decentralized_dataset_features(self) -> dict[str, Any]: ...
-
-    def format_decentralized_dataset_frames(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, Any]]: ...
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray: ...
 
@@ -110,6 +107,8 @@ class DynamicsProtocol(Protocol):
     def goal_state(self) -> np.ndarray: ...
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray: ...
+
+    def is_collision(self, state: np.ndarray) -> bool: ...
 
     def simulate(
         self,
@@ -209,6 +208,11 @@ class DynamicsSimulator(ABC):
         return ()
 
     @property
+    def position_indices(self) -> tuple[int, ...]:
+        """State coordinate indices representing spatial position (for collision detection, etc.)."""
+        return (0, 1)
+
+    @property
     def num_robots(self) -> int:
         return getattr(self, "_num_robots", 1)
 
@@ -299,57 +303,23 @@ class DynamicsSimulator(ABC):
         return self.reset(self.random_initial_state(self._sampling_rng))
 
     @abstractmethod
-    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, Any]:
-        """Package the observation and action into a dictionary for LeRobot"""
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, Any]]:
+        """Package the observation and action into a list of frame dictionaries (one per robot) for the dataset."""
         pass
 
     def decentralized_policy_observation(self, obs: np.ndarray, robot_id: int = 0) -> dict[str, np.ndarray]:
         if robot_id != 0:
             raise IndexError("Fleet-of-1 simulators only expose robot_id=0.")
 
-        frame = self.format_dataset_frame(obs, np.zeros(int(self.nu), dtype=np.float32))
+        frame = self.format_dataset_frame(obs, np.zeros(int(self.nu), dtype=np.float32))[0]
         environment_state = np.asarray(frame["observation.environment_state"], dtype=np.float32).reshape(-1)
         state = np.asarray(frame["observation.state"], dtype=np.float32).reshape(-1)
         return {
-            "ego_obs": np.concatenate([environment_state, state]),
-            "neighbor_obs": np.empty((0, 2), dtype=np.float32),
-            "neighbor_mask": np.empty((0, 1), dtype=np.float32),
+            "observation.environment_state": environment_state,
+            "observation.state": state,
+            "observation.neighbor_state": np.empty(0, dtype=np.float32),
+            "observation.neighbor_mask": np.empty(0, dtype=np.float32),
         }
-
-    def get_decentralized_dataset_features(self) -> dict[str, Any]:
-        features = self.get_dataset_features()
-        environment_feature = features["observation.environment_state"]
-        state_feature = features["observation.state"]
-        action_feature = features["action"]
-        return {
-            "observation.environment_state": dict(environment_feature),
-            "observation.state": dict(state_feature),
-            "observation.neighbor_state": {
-                "dtype": "float32",
-                "shape": (0,),
-                "names": [],
-            },
-            "observation.neighbor_mask": {
-                "dtype": "float32",
-                "shape": (0,),
-                "names": [],
-            },
-            "action": dict(action_feature),
-        }
-
-    def format_decentralized_dataset_frames(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, Any]]:
-        frame = self.format_dataset_frame(obs, action)
-        return [
-            {
-                "observation.environment_state": np.asarray(
-                    frame["observation.environment_state"], dtype=np.float32
-                ),
-                "observation.state": np.asarray(frame["observation.state"], dtype=np.float32),
-                "observation.neighbor_state": np.empty(0, dtype=np.float32),
-                "observation.neighbor_mask": np.empty(0, dtype=np.float32),
-                "action": np.asarray(frame["action"], dtype=np.float32),
-            }
-        ]
 
     @abstractmethod
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
@@ -374,6 +344,9 @@ class DynamicsSimulator(ABC):
         self.time = 0
         self.reset_rollout_termination()
         return self.state
+
+    def is_collision(self, state: np.ndarray) -> bool:
+        return False
 
     def simulate(
         self,

@@ -141,14 +141,14 @@ def validate_mlp_architecture_config(raw_config: Mapping[str, Any]) -> MLPArchit
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
         raise ConfigurationError(
-            "MLP config must be a mapping with either a top-level 'hidden_dims' key "
+            "Policy config must be a mapping with either a top-level 'hidden_dims' key "
             "or a nested 'model.hidden_dims' key."
         )
 
     hidden_dims_raw = model_section.get("hidden_dims")
     if hidden_dims_raw is None:
         raise ConfigurationError(
-            "Missing 'hidden_dims' in MLP config. "
+            "Missing 'hidden_dims' in policy config. "
             "Expected e.g. model: {hidden_dims: [256, 256, 128]}."
         )
     if not isinstance(hidden_dims_raw, list) or len(hidden_dims_raw) == 0:

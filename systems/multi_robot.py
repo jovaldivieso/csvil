@@ -6,6 +6,7 @@ import casadi as ca
 import numpy as np
 
 from core.types import VectorSpec, as_vector
+from systems.collision_checker import check_homogeneous_fleet_collisions
 from systems.dynamics import DynamicsProtocol, DynamicsSimulator
 
 
@@ -38,14 +39,16 @@ class MultiRobotSimulator(DynamicsSimulator):
         Dataset schema invariants
         -------------------------
         ``get_dataset_features()`` and ``format_dataset_frame()`` expose unified
-        top-level keys:
+        per-robot frame dictionaries with these keys:
 
         - ``observation.environment_state``
+        - ``observation.neighbor_state``
         - ``observation.neighbor_mask``
         - ``observation.state``
         - ``action``
 
-        with dimensions equal to concatenated per-robot contributions.
+        ``format_dataset_frame()`` returns one frame dictionary per robot, using
+        local observation and action dimensions from the homogeneous fleet.
 
         Visibility-gated relative observation invariant
         ----------------------------------------------
@@ -173,6 +176,25 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         return tuple(global_indices)
 
+    @property
+    def position_indices(self) -> tuple[int, ...]:
+        """Aggregate global position indices from all sub-simulators."""
+        global_indices: list[int] = []
+        for sub_sim, state_slice in zip(self.simulators, self.robot_state_slices):
+            local_indices = tuple(getattr(sub_sim, "position_indices", (0, 1)))
+            local_state_dim = int(sub_sim.nx)
+
+            for local_idx_raw in local_indices:
+                local_idx = int(local_idx_raw)
+                if local_idx < 0 or local_idx >= local_state_dim:
+                    raise ValueError(
+                        f"Sub-simulator {type(sub_sim).__name__} declares invalid position_indices "
+                        f"entry {local_idx} for local state dimension {local_state_dim}."
+                    )
+                global_indices.append(int(state_slice.start) + local_idx)
+
+        return tuple(global_indices)
+
     @staticmethod
     def _observation_feature_dims(simulator: DynamicsProtocol) -> tuple[int, int]:
         env_dim = 0
@@ -240,6 +262,14 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.time = 0
         self.reset_rollout_termination()
         return self.state
+
+    def is_collision(self, state: np.ndarray) -> bool:
+        robot_states = self._split_state(state)
+        return check_homogeneous_fleet_collisions(
+            robot_states,
+            self.simulators[0].position_indices,
+            self.d_safe,
+        )
 
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
@@ -321,79 +351,48 @@ class MultiRobotSimulator(DynamicsSimulator):
         return ca.vec(mapped_next)
 
     def get_dataset_features(self) -> dict[str, Any]:
-        features: dict[str, Any] = {}
-        env_names: list[str] = []
-        mask_names: list[str] = []
-        state_names: list[str] = []
-        action_names: list[str] = []
-        env_dim = 0
-        mask_dim = 0
-        state_dim = 0
-        action_dim = 0
-
-        for robot_id, sim in enumerate(self.simulators):
-            base_features = sim.get_dataset_features()
-
-            env_feature = base_features.get("observation.environment_state")
-            proprio_feature = base_features.get("observation.state")
-            action_feature = base_features.get("action")
-            if env_feature is None or proprio_feature is None or action_feature is None:
-                raise ValueError(
-                    "Each robot simulator must define observation.environment_state, "
-                    "observation.state, and action features."
-                )
-
-            robot_env_dim = int(env_feature["shape"][0]) + 2 * (len(self.simulators) - 1)
-            robot_mask_dim = len(self.simulators) - 1
-            robot_state_dim = int(proprio_feature["shape"][0])
-            robot_action_dim = int(action_feature["shape"][0])
-
-            env_dim += robot_env_dim
-            mask_dim += robot_mask_dim
-            state_dim += robot_state_dim
-            action_dim += robot_action_dim
-
-            env_names.extend([f"robot_{robot_id}.{name}" for name in env_feature.get("names", [])])
-            for other_id in range(len(self.simulators)):
-                if other_id == robot_id:
-                    continue
-                env_names.extend([
-                    f"robot_{robot_id}.rel_robot_{other_id}_x",
-                    f"robot_{robot_id}.rel_robot_{other_id}_y",
-                ])
-                mask_names.append(f"robot_{robot_id}.neighbor_mask_robot_{other_id}")
-
-            state_names.extend([f"robot_{robot_id}.{name}" for name in proprio_feature.get("names", [])])
-            action_names.extend([f"robot_{robot_id}.{name}" for name in action_feature.get("names", [])])
-
-        features["observation.environment_state"] = {
-            "dtype": "float32",
-            "shape": (env_dim,),
-            "names": env_names,
+        env_dim, proprio_dim, action_dim = self._validate_homogeneous_decentralized_dimensions()
+        neighbor_count = len(self.simulators) - 1
+        base_features = self.simulators[0].get_dataset_features()
+        env_feature = base_features["observation.environment_state"]
+        state_feature = base_features["observation.state"]
+        action_feature = base_features["action"]
+        return {
+            "observation.environment_state": dict(env_feature),
+            "observation.state": dict(state_feature),
+            "observation.neighbor_state": {
+                "dtype": "float32",
+                "shape": (2 * neighbor_count,),
+                "names": [
+                    name
+                    for neighbor_idx in range(neighbor_count)
+                    for name in (f"neighbor_{neighbor_idx}_x", f"neighbor_{neighbor_idx}_y")
+                ],
+            },
+            "observation.neighbor_mask": {
+                "dtype": "float32",
+                "shape": (neighbor_count,),
+                "names": [f"neighbor_{neighbor_idx}_visible" for neighbor_idx in range(neighbor_count)],
+            },
+            "action": dict(action_feature),
         }
-        features["observation.neighbor_mask"] = {
-            "dtype": "float32",
-            "shape": (mask_dim,),
-            "names": mask_names,
-        }
-        features["observation.state"] = {
-            "dtype": "float32",
-            "shape": (state_dim,),
-            "names": state_names,
-        }
-        features["action"] = {
-            "dtype": "float32",
-            "shape": (action_dim,),
-            "names": action_names,
-        }
-        return features
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
         return self._sample_safe_initial_state(rng=rng, randomize_goals=False)
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
-        for sim in self.simulators:
-            sim.randomize_goal_for_reset(rng)
+        for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
+            for sim in self.simulators:
+                sim.randomize_goal_for_reset(rng)
+
+            goals = [sim.goal_state for sim in self.simulators]
+            if self._positions_respect_d_safe(goals):
+                return
+
+        raise RuntimeError(
+            "Failed to sample safe multi-robot goals. "
+            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
+        )
 
     def reset_random(self) -> np.ndarray:
         return self.reset(
@@ -401,23 +400,11 @@ class MultiRobotSimulator(DynamicsSimulator):
         )
 
     def _positions_respect_d_safe(self, states: list[np.ndarray]) -> bool:
-        if self.d_safe <= 0.0 or len(states) < 2:
-            return True
-
-        min_dist_sq = float(self.d_safe * self.d_safe)
-        for robot_idx, state in enumerate(states):
-            if state.shape[0] < 2:
-                raise ValueError(
-                    f"Robot {robot_idx} state must include x/y in first two entries for d_safe checks."
-                )
-
-        for i in range(len(states)):
-            p_i = states[i][:2]
-            for j in range(i + 1, len(states)):
-                p_j = states[j][:2]
-                if float(np.sum((p_i - p_j) ** 2)) < min_dist_sq:
-                    return False
-        return True
+        return not check_homogeneous_fleet_collisions(
+            states,
+            self.simulators[0].position_indices,
+            self.d_safe,
+        )
 
     def _sample_safe_initial_state(
         self,
@@ -426,9 +413,9 @@ class MultiRobotSimulator(DynamicsSimulator):
     ) -> np.ndarray:
         for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
             states: list[np.ndarray] = []
+            if randomize_goals:
+                self.randomize_goal_for_reset(rng)
             for sim in self.simulators:
-                if randomize_goals:
-                    sim.randomize_goal_for_reset(rng)
                 states.append(sim.random_initial_state(rng))
 
             if self._positions_respect_d_safe(states):
@@ -452,39 +439,6 @@ class MultiRobotSimulator(DynamicsSimulator):
     def goal_state(self) -> np.ndarray:
         goals = [sim.goal_state for sim in self.simulators]
         return self.validate_state(np.concatenate(goals))
-
-    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, Any]:
-        split_obs = self._split_observation(obs)
-        split_action = self._split_action(action)
-
-        env_tensors: list[np.ndarray] = []
-        mask_tensors: list[np.ndarray] = []
-        state_tensors: list[np.ndarray] = []
-        action_tensors: list[np.ndarray] = []
-        for robot_id, (sim, robot_obs, robot_action) in enumerate(
-            zip(self.simulators, split_obs, split_action)
-        ):
-            base_env_dim = self.robot_env_dims[robot_id]
-            rel_dim = self.robot_relative_dims[robot_id]
-            mask_dim = self.robot_neighbor_mask_dims[robot_id]
-            proprio_dim = self.robot_proprio_dims[robot_id]
-            env_end = base_env_dim + rel_dim
-            mask_start = env_end
-            mask_end = mask_start + mask_dim
-            proprio_start = mask_end
-            proprio_end = proprio_start + proprio_dim
-
-            env_tensors.append(np.asarray(robot_obs[:env_end], dtype=np.float32))
-            mask_tensors.append(np.asarray(robot_obs[mask_start:mask_end], dtype=np.float32))
-            state_tensors.append(np.asarray(robot_obs[proprio_start:proprio_end], dtype=np.float32))
-            action_tensors.append(np.asarray(robot_action, dtype=np.float32))
-
-        return {
-            "observation.environment_state": np.concatenate(env_tensors),
-            "observation.neighbor_mask": np.concatenate(mask_tensors) if len(mask_tensors) > 0 else np.empty(0, dtype=np.float32),
-            "observation.state": np.concatenate(state_tensors),
-            "action": np.concatenate(action_tensors),
-        }
 
     def _validate_homogeneous_decentralized_dimensions(self) -> tuple[int, int, int]:
         env_dim = int(self.robot_env_dims[0])
@@ -555,91 +509,21 @@ class MultiRobotSimulator(DynamicsSimulator):
         neighbor_state = np.asarray(robot_obs[base_env_dim:env_end], dtype=np.float32)
         neighbor_mask = np.asarray(robot_obs[mask_start:mask_end], dtype=np.float32)
 
-        if mask_dim == 0:
-            neighbor_obs = np.empty((0, 2), dtype=np.float32)
-            neighbor_mask_2d = np.empty((0, 1), dtype=np.float32)
-        else:
-            neighbor_obs = neighbor_state.reshape(mask_dim, 2)
-            neighbor_mask_2d = neighbor_mask.reshape(mask_dim, 1)
-
         return {
-            "ego_obs": ego_obs,
-            "neighbor_obs": neighbor_obs,
-            "neighbor_mask": neighbor_mask_2d,
+            "observation.environment_state": np.asarray(ego_obs[:base_env_dim], dtype=np.float32),
+            "observation.state": np.asarray(ego_obs[base_env_dim:], dtype=np.float32),
+            "observation.neighbor_state": neighbor_state,
+            "observation.neighbor_mask": neighbor_mask,
         }
 
-    def get_decentralized_dataset_features(self) -> dict[str, Any]:
-        env_dim, proprio_dim, action_dim = self._validate_homogeneous_decentralized_dimensions()
-        neighbor_count = len(self.simulators) - 1
-
-        env_feature = self.simulators[0].get_dataset_features().get("observation.environment_state")
-        proprio_feature = self.simulators[0].get_dataset_features().get("observation.state")
-        action_feature = self.simulators[0].get_dataset_features().get("action")
-        if env_feature is None or proprio_feature is None or action_feature is None:
-            raise ValueError(
-                "Each robot simulator must define observation.environment_state, observation.state, and action features."
-            )
-
-        return {
-            "observation.environment_state": {
-                "dtype": "float32",
-                "shape": (env_dim,),
-                "names": [name for name in env_feature.get("names", [])],
-            },
-            "observation.state": {
-                "dtype": "float32",
-                "shape": (proprio_dim,),
-                "names": [name for name in proprio_feature.get("names", [])],
-            },
-            "observation.neighbor_state": {
-                "dtype": "float32",
-                "shape": (2 * neighbor_count,),
-                "names": [
-                    name
-                    for neighbor_idx in range(neighbor_count)
-                    for name in (f"neighbor_{neighbor_idx}_x", f"neighbor_{neighbor_idx}_y")
-                ],
-            },
-            "observation.neighbor_mask": {
-                "dtype": "float32",
-                "shape": (neighbor_count,),
-                "names": [f"neighbor_{neighbor_idx}_visible" for neighbor_idx in range(neighbor_count)],
-            },
-            "action": {
-                "dtype": "float32",
-                "shape": (action_dim,),
-                "names": [name for name in action_feature.get("names", [])],
-            },
-        }
-
-    def format_decentralized_dataset_frames(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, Any]]:
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, Any]]:
         self._validate_homogeneous_decentralized_dimensions()
         split_obs = self._split_observation(obs)
         split_action = self._split_action(action)
-
-        frames: list[dict[str, Any]] = []
-        for robot_id, robot_action in enumerate(split_action):
-            robot_policy_obs = self.decentralized_policy_observation(obs, robot_id)
-            frames.append(
-                {
-                    "observation.environment_state": np.asarray(
-                        robot_policy_obs["ego_obs"][: self.robot_env_dims[robot_id]],
-                        dtype=np.float32,
-                    ),
-                    "observation.state": np.asarray(
-                        robot_policy_obs["ego_obs"][self.robot_env_dims[robot_id] :],
-                        dtype=np.float32,
-                    ),
-                    "observation.neighbor_state": np.asarray(
-                        robot_policy_obs["neighbor_obs"].reshape(-1),
-                        dtype=np.float32,
-                    ),
-                    "observation.neighbor_mask": np.asarray(
-                        robot_policy_obs["neighbor_mask"].reshape(-1),
-                        dtype=np.float32,
-                    ),
-                    "action": np.asarray(robot_action, dtype=np.float32),
-                }
-            )
-
-        return frames
+        return [
+            {
+                **self.decentralized_policy_observation(obs, robot_id),
+                "action": np.asarray(robot_action, dtype=np.float32),
+            }
+            for robot_id, robot_action in enumerate(split_action)
+        ]

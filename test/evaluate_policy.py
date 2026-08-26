@@ -23,22 +23,18 @@ from systems.seed_utils import (
     default_seed_argument_for_simulator,
 )
 from planning.casadi_planner import PlannerSolveError
-from learning.dagger import (
-    build_decentralized_joint_action,
-    build_observation_feature_pack_cache,
-    uses_decentralized_policy,
+from learning.dagger import build_decentralized_joint_action
+from learning.models.flow_policy import FlowPolicy
+from learning.models.mlp_policy import MLPPolicy
+from learning.models.encoder import (
+    DEFAULT_ENCODER_TYPE,
+    EncoderFactory,
+    ObservationEncoder,
 )
-from learning.models.mlp import MLPPolicy
-from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 
 # Import both policy types
-from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
-from lerobot.policies.act.modeling_act import ACTPolicy
-from lerobot.configs.policies import PreTrainedConfig
-from lerobot.policies.factory import make_pre_post_processors
-
 from utils import plot_xy_trajectories, save_xy_rollout_video
 
 
@@ -46,34 +42,33 @@ def default_evaluation_output_path(system: str, policy_type: str) -> str:
     return os.path.join("outputs", "plots", f"{system}_casadi_{policy_type}_evaluation.pdf")
 
 
+def evaluation_rollout_title(system: str, policy_display_name: str) -> str:
+    system_name = system.replace("_", " ").title()
+    return f"{system_name} Expert Rollout vs {policy_display_name} Policy"
+
+
 def is_observation_feature(feature_name: str) -> bool:
     return feature_name.startswith("observation.") or ".observation." in feature_name
 
 
 def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, ...]:
-    linear_layers = [
-        (int(key.split(".")[1]), int(value.shape[0]))
-        for key, value in state_dict.items()
-        if key.startswith("network.")
-        and key.endswith(".weight")
-        and value.ndim == 2
-        and key.split(".")[1].isdigit()
-    ]
+    linear_layers: list[tuple[int, int]] = []
+    for prefix in ("network", "net"):
+        linear_layers = [
+            (int(key.split(".")[1]), int(value.shape[0]))
+            for key, value in state_dict.items()
+            if key.startswith(f"{prefix}.")
+            and key.endswith(".weight")
+            and value.ndim == 2
+            and key.split(".")[1].isdigit()
+        ]
+        if linear_layers:
+            break
+
     linear_layers.sort(key=lambda item: item[0])
     if len(linear_layers) < 2:
         return (256, 256, 128)
     return tuple(out_dim for _, out_dim in linear_layers[:-1])
-
-
-def infer_mlp_dimensions_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, int]:
-    linear_weights = [
-        value
-        for key, value in state_dict.items()
-        if key.startswith("network.") and key.endswith(".weight") and value.ndim == 2
-    ]
-    if not linear_weights:
-        raise ValueError("MLP checkpoint does not contain network linear weights.")
-    return int(linear_weights[0].shape[1]), int(linear_weights[-1].shape[0])
 
 
 def parse_seed_argument(raw_seeds: str | None) -> list[int] | list[list[int]]:
@@ -156,8 +151,7 @@ def sample_initial_state(
 
     joint_seed_seq = np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec])
     rng = np.random.default_rng(joint_seed_seq)
-    for sub_sim in sub_simulators:
-        sub_sim.randomize_goal_for_reset(rng)
+    simulator.randomize_goal_for_reset(rng)
 
     return simulator.random_initial_state(rng)
 
@@ -172,44 +166,6 @@ def get_inference_device():
         return torch.device("mps")
 
     return torch.device("cpu")
-
-
-def create_policy_input(
-    simulator: DynamicsProtocol,
-    observation: np.ndarray,
-    device: torch.device,
-    add_batch_dim: bool = True,
-    observation_feature_cache=None,
-) -> dict[str, torch.Tensor]:
-    """
-    Dynamically slices the flat observation array based on the
-    feature shapes defined by the simulator.
-    """
-    from learning.dagger import (  # local import keeps this helper self-contained
-        build_observation_feature_pack_cache,
-        pack_observation_features_from_cache,
-    )
-
-    if observation_feature_cache is None:
-        feature_names = [
-            feature_name
-            for feature_name in simulator.get_dataset_features().keys()
-            if is_observation_feature(feature_name)
-        ]
-        observation_feature_cache = build_observation_feature_pack_cache(simulator, feature_names)
-
-    packed_features = pack_observation_features_from_cache(observation, observation_feature_cache)
-    policy_input: dict[str, torch.Tensor] = {}
-    for feature_name in observation_feature_cache.feature_names:
-        feature_tensor = torch.as_tensor(packed_features[feature_name], dtype=torch.float32)
-        if add_batch_dim:
-            feature_tensor = feature_tensor.view(1, -1)
-        policy_input[feature_name] = feature_tensor
-
-    if device.type != "cpu":
-        policy_input = {feature_name: tensor.to(device) for feature_name, tensor in policy_input.items()}
-
-    return policy_input
 
 
 def apply_execution_noise(
@@ -254,6 +210,8 @@ def rollout_planner(
     planner.reset()
     trajectory = [state.copy()]
 
+    if simulator.is_collision(state):
+        return np.asarray(trajectory)
     if simulator.should_terminate_rollout(state):
         return np.asarray(trajectory)
 
@@ -287,6 +245,9 @@ def rollout_planner(
         state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
+        if simulator.is_collision(state):
+            break
+
         if simulator.should_terminate_rollout(state):
             break
 
@@ -295,16 +256,13 @@ def rollout_planner(
 
 def rollout_policy(
     simulator: DynamicsProtocol,
-    policy: DiffusionPolicy | ACTPolicy | MLPPolicy,
+    policy: MLPPolicy | FlowPolicy,
     device: torch.device,
     initial_state: np.ndarray,
     num_steps: int,
     action_noise_std: float = 0.0,
     action_noise_rng: np.random.Generator | None = None,
-    policy_preprocessor=None,
-    policy_postprocessor=None,
-    observation_feature_cache=None,
-) -> tuple[np.ndarray, bool, int]:
+) -> tuple[np.ndarray, bool, int, bool]:
     """
     Rolls out the neural policy from a given initial state.
     
@@ -312,44 +270,26 @@ def rollout_policy(
         trajectory: array containing visited simulator states
         reached_goal: whether simulator reached goal state
         steps_taken: number of executed simulation steps
+        collided: whether robots collided during the rollout
     """
     state = simulator.reset(initial_state)
     trajectory = [state.copy()]
     policy.reset()
+    collided = simulator.is_collision(state)
 
-    decentralized_inference = uses_decentralized_policy(simulator, policy)
+    if collided:
+        return np.asarray(trajectory), False, 0, True
+    if simulator.should_terminate_rollout(state):
+        return np.asarray(trajectory), True, 0, False
 
     for step in range(1, num_steps + 1):
         observation = simulator.observe(state, validate=False)
-
-        if decentralized_inference:
-            action = build_decentralized_joint_action(
-                simulator=simulator,
-                policy=policy,
-                observation=observation,
-                device=device,
-            )
-        else:
-            policy_input = create_policy_input(
-                simulator=simulator,
-                observation=observation,
-                device=device,
-                add_batch_dim=policy_preprocessor is None,
-                observation_feature_cache=observation_feature_cache,
-            )
-            if policy_preprocessor is not None:
-                policy_input = policy_preprocessor(policy_input)
-
-            with torch.inference_mode():
-                action_tensor = policy.select_action(policy_input)
-            if policy_postprocessor is not None:
-                action_tensor = policy_postprocessor(action_tensor)
-
-            if isinstance(policy, MLPPolicy):
-                action = action_tensor.squeeze(0)[0].cpu().numpy()
-            else:
-                action = action_tensor.squeeze(0).cpu().numpy()
-
+        action = build_decentralized_joint_action(
+            simulator=simulator,
+            policy=policy,
+            observation=observation,
+            device=device,
+        )
         executed_action = apply_execution_noise(
             simulator=simulator,
             action=action,
@@ -360,10 +300,14 @@ def rollout_policy(
         state = simulator.step(state, executed_action, validate=False)
         trajectory.append(state.copy())
 
-        if simulator.should_terminate_rollout(state):
-            return np.asarray(trajectory), True, step
+        if simulator.is_collision(state):
+            collided = True
+            break
 
-    return np.asarray(trajectory), False, num_steps
+        if simulator.should_terminate_rollout(state):
+            return np.asarray(trajectory), True, step, collided
+
+    return np.asarray(trajectory), False, len(trajectory) - 1, collided
 
 
 def run_evaluation(
@@ -395,14 +339,64 @@ def run_evaluation(
     print(f"action noise seed: {action_noise_seed}")
 
     # Dynamically load the requested policy
-    policy_preprocessor = None
-    policy_postprocessor = None
-    if policy_type == "diffusion":
-        policy = DiffusionPolicy.from_pretrained(model_dir)
-        policy_display_name = "Diffusion"
-    elif policy_type == "act":
-        policy = ACTPolicy.from_pretrained(model_dir)
-        policy_display_name = "ACT"
+    if policy_type == "flow":
+        state_dim = sum(
+            int(feature_info["shape"][0])
+            for feature_name, feature_info in simulator.get_dataset_features().items()
+            if is_observation_feature(feature_name)
+        )
+        action_dim = int(simulator.nu)
+
+        checkpoint = torch.load(model_dir, map_location=device)
+        checkpoint_metadata = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
+        if not checkpoint_metadata:
+            raise ValueError(
+                "Flow models require a metadata checkpoint to infer the prediction_horizon "
+                "and cannot be loaded from raw state dictionaries."
+            )
+        state_dict = checkpoint["model_state_dict"] if checkpoint_metadata else checkpoint
+        if not isinstance(state_dict, Mapping):
+            raise ValueError("Flow checkpoint must contain a state dictionary.")
+
+        hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+        prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
+        num_inference_steps = 10
+        neighbor_feature_dim = 2
+        neighbor_slots = max(0, int(simulator.num_robots) - 1)
+        
+        if checkpoint_metadata:
+            state_dim = int(checkpoint.get("state_dim", state_dim))
+            action_dim = int(checkpoint.get("action_dim", action_dim))
+            hidden_dims_raw = checkpoint.get("hidden_dims")
+            if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
+                hidden_dims = tuple(int(width) for width in hidden_dims_raw)
+            flow_config_raw = checkpoint.get("flow_config")
+            if isinstance(flow_config_raw, Mapping):
+                num_inference_steps = int(flow_config_raw.get("num_inference_steps", 10))
+        
+        neighbor_feature_dim = int(checkpoint.get("neighbor_feature_dim", neighbor_feature_dim)) if checkpoint_metadata else neighbor_feature_dim
+        neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots)) if checkpoint_metadata else neighbor_slots
+        encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE)) if checkpoint_metadata else DEFAULT_ENCODER_TYPE
+        encoder_kwargs_raw = checkpoint.get("encoder_kwargs") if checkpoint_metadata else {}
+        encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
+        obs_encoder: ObservationEncoder = EncoderFactory.create(
+            encoder_type=encoder_type,
+            state_dim=state_dim,
+            neighbor_feature_dim=neighbor_feature_dim,
+            neighbor_slots=neighbor_slots,
+            **encoder_kwargs,
+        )
+
+        policy = FlowPolicy(
+            action_dim=action_dim,
+            obs_encoder=obs_encoder,
+            hidden_dims=hidden_dims,
+            prediction_horizon=prediction_horizon,
+            num_inference_steps=num_inference_steps,
+        )
+        policy.load_state_dict(state_dict)
+
+        policy_display_name = "Flow"
     elif policy_type == "mlp":
         state_dim = sum(
             int(feature_info["shape"][0])
@@ -413,90 +407,54 @@ def run_evaluation(
 
         checkpoint = torch.load(model_dir, map_location=device)
         checkpoint_metadata = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
+        if not checkpoint_metadata:
+            raise ValueError(
+                "MLP models require a metadata checkpoint to infer the prediction_horizon "
+                "and cannot be loaded from raw state dictionaries."
+            )
         state_dict = checkpoint["model_state_dict"] if checkpoint_metadata else checkpoint
         if not isinstance(state_dict, Mapping):
             raise ValueError("MLP checkpoint must contain a state dictionary.")
 
-        state_dim, action_dim = infer_mlp_dimensions_from_state_dict(state_dict)
         hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-        use_neighbor_encoder = (
-            bool(checkpoint.get("use_neighbor_encoder", checkpoint.get("use_deep_set", False)))
-            if checkpoint_metadata
-            else False
-        )
         prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
-        neighbor_feature_dim = None
-        neighbor_slots = 0
-        neighbor_encoder = None
+        neighbor_feature_dim = 2
+        neighbor_slots = max(0, int(simulator.num_robots) - 1)
+        
         if checkpoint_metadata:
             state_dim = int(checkpoint.get("state_dim", state_dim))
             action_dim = int(checkpoint.get("action_dim", action_dim))
             hidden_dims_raw = checkpoint.get("hidden_dims")
             if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
                 hidden_dims = tuple(int(width) for width in hidden_dims_raw)
-            if use_neighbor_encoder:
-                neighbor_feature_dim = int(checkpoint["neighbor_feature_dim"])
-                neighbor_slots = int(checkpoint["neighbor_slots"])
-                encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE))
-                encoder_kwargs_raw = checkpoint.get("encoder_kwargs")
-                encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
-                neighbor_encoder = EncoderFactory.create(
-                    encoder_type=encoder_type,
-                    in_features=neighbor_feature_dim,
-                    **encoder_kwargs,
-                )
-
-        policy = MLPPolicy(
+        
+        neighbor_feature_dim = int(checkpoint.get("neighbor_feature_dim", neighbor_feature_dim)) if checkpoint_metadata else neighbor_feature_dim
+        neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots)) if checkpoint_metadata else neighbor_slots
+        encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE)) if checkpoint_metadata else DEFAULT_ENCODER_TYPE
+        encoder_kwargs_raw = checkpoint.get("encoder_kwargs") if checkpoint_metadata else {}
+        encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
+        obs_encoder: ObservationEncoder = EncoderFactory.create(
+            encoder_type=encoder_type,
             state_dim=state_dim,
-            action_dim=action_dim,
-            hidden_dims=hidden_dims,
-            prediction_horizon=prediction_horizon,
             neighbor_feature_dim=neighbor_feature_dim,
             neighbor_slots=neighbor_slots,
-            neighbor_encoder=neighbor_encoder,
+            **encoder_kwargs,
+        )
+
+        policy = MLPPolicy(
+            action_dim=action_dim,
+            obs_encoder=obs_encoder,
+            hidden_dims=hidden_dims,
+            prediction_horizon=prediction_horizon,
         )
         policy.load_state_dict(state_dict)
 
         policy_display_name = "MLP"
     else:
-        raise ValueError("'policy_type' must be one of {'diffusion', 'act', 'mlp'}.")
+        raise ValueError("'policy_type' must be one of {'mlp', 'flow'}.")
 
     policy.eval()
     policy.to(device)
-
-    mlp_observation_feature_cache = None
-    if policy_type == "mlp" and not policy.use_neighbor_encoder:
-        dataset_features = simulator.get_dataset_features()
-        current_feature_names = [
-            name for name in dataset_features if is_observation_feature(name)
-        ]
-        saved_feature_names = None
-        if checkpoint_metadata:
-            raw_names = checkpoint.get("obs_feature_names")
-            if isinstance(raw_names, list) and all(isinstance(name, str) for name in raw_names):
-                saved_feature_names = raw_names
-
-        if saved_feature_names is None:
-            saved_feature_names = [
-                name for name in current_feature_names if name != "observation.neighbor_mask"
-            ]
-
-        mlp_observation_feature_cache = build_observation_feature_pack_cache(
-            simulator,
-            saved_feature_names,
-            allow_schema_subset=True,
-        )
-
-    if policy_type in {"diffusion", "act"}:
-        policy_cfg = PreTrainedConfig.from_pretrained(model_dir)
-        policy_cfg.device = str(device)
-        policy_preprocessor, policy_postprocessor = make_pre_post_processors(
-            policy_cfg=policy_cfg,
-            pretrained_path=model_dir,
-            preprocessor_overrides={
-                "device_processor": {"device": str(device)},
-            },
-        )
 
     # Instantiate expert planner once and reset it for each rollout.
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
@@ -593,7 +551,7 @@ def run_evaluation(
             action_noise_rng=expert_action_noise_rng,
         )
 
-        policy_trajectory, reached_goal, steps_taken = rollout_policy(
+        policy_trajectory, reached_goal, steps_taken, policy_collided = rollout_policy(
             simulator=simulator,
             policy=policy,
             device=device,
@@ -601,10 +559,8 @@ def run_evaluation(
             num_steps=num_steps,
             action_noise_std=action_noise_std,
             action_noise_rng=policy_action_noise_rng,
-            policy_preprocessor=policy_preprocessor,
-            policy_postprocessor=policy_postprocessor,
-            observation_feature_cache=mlp_observation_feature_cache,
         )
+        expert_collided = simulator.is_collision(expert_trajectory[-1])
 
         policy_final_state = policy_trajectory[-1]
         expert_final_state = expert_trajectory[-1]
@@ -620,6 +576,8 @@ def run_evaluation(
                 "goal_state": goal_state,
                 "initial_state": initial_state,
                 "policy_reached_goal": reached_goal,
+                "policy_collided": policy_collided,
+                "expert_collided": expert_collided,
                 "policy_steps": max(len(policy_trajectory) - 1, 0),
                 "expert_steps": max(len(expert_trajectory) - 1, 0),
                 "policy_goal_error_l2": policy_goal_error,
@@ -629,7 +587,9 @@ def run_evaluation(
 
     total_runs = len(per_seed_metrics)
     total_successes = sum(
-        1 for metric in per_seed_metrics if metric["policy_reached_goal"]
+        1
+        for metric in per_seed_metrics
+        if metric["policy_reached_goal"] and not metric["policy_collided"]
     )
     success_rate = (total_successes / total_runs) if total_runs > 0 else 0.0
     mean_policy_error = float(
@@ -665,6 +625,16 @@ def run_evaluation(
     print(f"num_trajectories: {total_runs}")
     print(f"policy_successes: {total_successes}/{total_runs}")
     print(f"success_rate: {success_rate:.4f}")
+    policy_collision_rate = (
+        np.mean([metric["policy_collided"] for metric in per_seed_metrics])
+        if total_runs > 0 else 0.0
+    )
+    expert_collision_rate = (
+        np.mean([metric["expert_collided"] for metric in per_seed_metrics])
+        if total_runs > 0 else 0.0
+    )
+    print(f"policy_collision_rate: {policy_collision_rate:.4f}")
+    print(f"expert_collision_rate: {expert_collision_rate:.4f}")
     print(f"mean_policy_steps: {mean_policy_steps:.3f}")
     print(f"mean_expert_steps: {mean_expert_steps:.3f}")
     print(f"mean_policy_goal_error_l2: {mean_policy_error:.6f}")
@@ -676,7 +646,7 @@ def run_evaluation(
         policy_type=policy_type,
     )
 
-    system_title = system.replace("_", " ").title()
+    comparison_title = evaluation_rollout_title(system, policy_display_name)
 
     all_trajectories = expert_trajectories + policy_trajectories
     num_expert = len(expert_trajectories)
@@ -695,7 +665,7 @@ def run_evaluation(
         simulator=simulator,
         trajectories=all_trajectories,
         path_to_output=output_path,
-        title=f"{system_title} {policy_display_name} vs Expert",
+        title=comparison_title,
         path_labels=path_labels,
         show_heading=show_heading,
         marker="o",
@@ -708,7 +678,7 @@ def run_evaluation(
         simulator=simulator,
         trajectories=all_trajectories,
         path_to_output=output_path,
-        title=f"{system_title} {policy_display_name} rollout vs Expert",
+        title=comparison_title,
         show_heading=show_heading,
         fps=12,
         path_labels=path_labels,
@@ -730,6 +700,8 @@ def run_evaluation(
         "num_trajectories": total_runs,
         "policy_successes": total_successes,
         "success_rate": success_rate,
+        "policy_collision_rate": float(policy_collision_rate),
+        "expert_collision_rate": float(expert_collision_rate),
         "mean_policy_steps": mean_policy_steps,
         "mean_expert_steps": mean_expert_steps,
         "mean_policy_goal_error_l2": mean_policy_error,
@@ -758,7 +730,7 @@ def main():
     parser.add_argument(
         "--policy-type",
         type=str.lower,
-        choices=["diffusion", "act", "mlp"],
+        choices=["mlp", "flow"],
         required=True,
         help="the type of policy architecture to evaluate",
     )

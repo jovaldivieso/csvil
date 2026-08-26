@@ -100,6 +100,8 @@ class SingleIntegrator(DynamicsSimulator):
                 "shape": (2,),
                 "names": proprioception_names,
             },
+            "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
+            "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "action": {
                 "dtype": "float32",
                 "shape": (2,),
@@ -135,12 +137,14 @@ class SingleIntegrator(DynamicsSimulator):
                 size=self.goal.shape[0],
             )
 
-    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> dict[str, np.ndarray]:
+    def format_dataset_frame(self, obs: np.ndarray, action: np.ndarray) -> list[dict[str, np.ndarray]]:
         """Package the observation and action into a dictionary for LeRobot"""
         obs = self.validate_observation(obs)
         action = self.validate_action(action)
-        return {
+        return [{
             "observation.environment_state": np.asarray(obs[:2], dtype=np.float32),
             "observation.state": np.asarray(obs[2:4], dtype=np.float32),
+            "observation.neighbor_state": np.empty(0, dtype=np.float32),
+            "observation.neighbor_mask": np.empty(0, dtype=np.float32),
             "action": np.asarray(action, dtype=np.float32),
-        }
+        }]

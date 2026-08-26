@@ -5,95 +5,14 @@ from typing import Any, Mapping
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
-from matplotlib import colors as mcolors
 from matplotlib.patches import FancyArrowPatch
 
-from core.factory import DynamicsFactory, PlannerFactory
-from systems.initial_state_utils import normalize_initial_state_specs
-from data.data_collection import DataCollector
-
-
-def _blend_robot_family_color(
-    family_color: str,
-    robot_color: Any,
-    robot_idx: int,
-    robot_count: int,
-) -> tuple[float, float, float]:
-    """Blend rollout-family and robot colors to keep both distinctions visible."""
-    base_rgb = np.asarray(mcolors.to_rgb(family_color), dtype=float)
-    robot_rgb = np.asarray(mcolors.to_rgb(robot_color), dtype=float)
-
-    # Increase robot influence as the robot index grows to create distinct shades.
-    if robot_count <= 1:
-        robot_weight = 0.25
-    else:
-        robot_weight = 0.2 + 0.4 * (robot_idx / max(robot_count - 1, 1))
-
-    blended = (1.0 - robot_weight) * base_rgb + robot_weight * robot_rgb
-    return tuple(np.clip(blended, 0.0, 1.0))
 
 
 def _heading_sample_stride(num_points: int) -> int:
     """Choose a sparse, readable stride for trajectory heading arrows."""
     return max(1, num_points // 20)
 
-def collect_expert_data(
-    simulator_name: str,
-    planner_name: str,
-    config: Mapping[str, Any],
-    repo_id: str,
-    local_dir: str,
-    num_traj: int,
-    num_steps: int,
-    action_noise_std: float = 0.0,
-    initial_states: Any | None = None,
-):
-    """
-    generates and saves expert trajectories for a dynamics system
-
-    creates a simulator, planner and data collector,
-    then stores generated expert trajectories as a local LeRobot dataset
-
-    args:
-        simulator_name: dynamics simulator key (e.g. unicycle2)
-        planner_name: planner key (e.g. casadi)
-        config: configuration dictionary for simulator and planner
-        repo_id: identifier stored in LeRobot dataset metadata
-        local_dir: local directory where the generated dataset is saved
-        num_traj: number of expert trajectories to collect
-        num_steps: maximum number of simulation steps per trajectory
-        action_noise_std: std-dev of Gaussian action noise applied during execution
-
-    returns:
-        result of DataCollector.collect_trajectories()
-    """
-    
-    simulator = DynamicsFactory.create(system_name=simulator_name, config=config)
-    planner = PlannerFactory.create(
-        planner_name=planner_name,
-        simulator=simulator,
-        config=config,
-    )
-
-    collector = DataCollector(
-        simulator=simulator,
-        repo_id=repo_id,
-        local_dir=local_dir,
-    )
-
-    normalized_initial_states = normalize_initial_state_specs(
-        simulator=simulator,
-        initial_states=initial_states,
-    )
-
-    return collector.collect_trajectories(
-        motion_planner=planner,
-        num_trajectories=num_traj,
-        num_steps=num_steps,
-        action_noise_std=action_noise_std,
-        initial_states=normalized_initial_states,
-    )
- 
 def plot_xy_trajectories(
     simulator,
     trajectories,
@@ -185,7 +104,7 @@ def plot_xy_trajectories(
         if trajectory_index < len(path_labels):
             current_label = path_labels[trajectory_index]
 
-        # For fleet comparisons, per-trajectory colors separate rollout families.
+        # Fleet colors identify robot IDs; line styles distinguish rollout families.
         base_color = None
         if trajectory_colors is not None and trajectory_index < len(trajectory_colors):
             base_color = trajectory_colors[trajectory_index]
@@ -195,15 +114,7 @@ def plot_xy_trajectories(
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
             if base_color is not None:
-                if robot_count > 1:
-                    robot_color = _blend_robot_family_color(
-                        family_color=base_color,
-                        robot_color=robot_color_map(robot_idx),
-                        robot_idx=robot_idx,
-                        robot_count=robot_count,
-                    )
-                else:
-                    robot_color = base_color
+                robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
 
@@ -363,15 +274,7 @@ def save_xy_rollout_video(
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
             if base_color is not None:
-                if robot_count > 1:
-                    robot_color = _blend_robot_family_color(
-                        family_color=base_color,
-                        robot_color=robot_color_map(robot_idx),
-                        robot_idx=robot_idx,
-                        robot_count=robot_count,
-                    )
-                else:
-                    robot_color = base_color
+                robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
 
