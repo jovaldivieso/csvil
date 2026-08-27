@@ -81,7 +81,7 @@ class DbLacamPlanner(Planner):
         self.step_idx = 0
 
     def _create_states_list(self, obs):
-        global_state = self.sim.invert_obs(obs, validate=False)
+        global_state = self.sim.invert_obs(obs)
         return [global_state[s] for s in self.sim.robot_state_slices]
     
     def _define_dblacam_problem(self, obs):
