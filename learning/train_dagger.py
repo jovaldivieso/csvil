@@ -16,7 +16,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -42,6 +42,27 @@ from learning.models.policy import ActionPolicy, PolicyFactory
 from systems.dynamics import DynamicsProtocol
 from systems.initial_state_utils import parse_initial_states_argument
 from systems.seed_utils import default_action_noise_seed_for_config
+
+
+def _validate_resumable_dataset_schema(
+    existing_features: Mapping[str, Any],
+    expected_features: Mapping[str, Any],
+) -> None:
+    """Fail fast when a dataset being resumed doesn't match the current observation schema."""
+    for name, expected_info in expected_features.items():
+        expected_shape = tuple(int(value) for value in expected_info.get("shape", ()))
+        existing_info = existing_features.get(name)
+        existing_shape = (
+            tuple(int(value) for value in existing_info["shape"]) if existing_info else None
+        )
+        if existing_shape != expected_shape:
+            raise ValueError(
+                "Cannot resume DAgger collection: the on-disk dataset's "
+                f"'{name}' feature has shape {existing_shape}, but the current run's observation "
+                f"schema expects shape {expected_shape}. The dataset was likely recorded with a "
+                "different neighbor/observation feature layout. Start a fresh dataset "
+                "(omit --repo-id/--dataset-root) or resume a dataset recorded with the current schema."
+            )
 
 
 @dataclass(frozen=True)
@@ -590,6 +611,7 @@ class DaggerTrainer:
                     initial_states=self.cfg.initial_states,
                     expert_mixing_beta=round_beta,
                     policy_action_fn=action_fn,
+                    policy_reset_fn=reset_policy_state,
                     frame_builder=frames,
                 )
             finally:
@@ -691,6 +713,25 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     validated = load_and_validate_system_config(args.system, args.expert_config)
+    training_config = load_dagger_training_config(args.policy_config)
+
+    def option(name: str, default: Any) -> Any:
+        cli_value = getattr(args, name)
+        return cli_value if cli_value is not None else training_config.get(name, default)
+
+    dagger_iterations = int(option("dagger_iterations", 4))
+    trajectories_per_iteration = [
+        int(value) for value in option("trajectories_per_iteration", [20])
+    ]
+    target_epochs_per_round = [
+        float(value) for value in option("target_epochs_per_round", [30.0])
+    ]
+    initial_states_config = option("initial_states", None)
+    initial_states = (
+        parse_initial_states_argument(initial_states_config)
+        if isinstance(initial_states_config, str)
+        else initial_states_config
+    )
     if (args.repo_id is None) != (args.dataset_root is None):
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both.")
     fresh = args.repo_id is None

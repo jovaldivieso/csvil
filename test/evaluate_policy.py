@@ -23,14 +23,13 @@ from systems.seed_utils import (
     default_seed_argument_for_simulator,
 )
 from planning.casadi_planner import PlannerSolveError
-from learning.dagger import build_decentralized_joint_action
-from learning.models.flow_policy import FlowPolicy
-from learning.models.mlp_policy import MLPPolicy
+from learning.dagger import ObservationHistoryBuffer, build_decentralized_joint_action
 from learning.models.encoder import (
     DEFAULT_ENCODER_TYPE,
     EncoderFactory,
     ObservationEncoder,
 )
+from learning.models.policy import ActionPolicy, PolicyFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
 
@@ -49,6 +48,87 @@ def evaluation_rollout_title(system: str, policy_display_name: str) -> str:
 
 def is_observation_feature(feature_name: str) -> bool:
     return feature_name.startswith("observation.") or ".observation." in feature_name
+
+
+def detect_collision(simulator: DynamicsProtocol, state: np.ndarray) -> tuple[bool, str]:
+    """Single collision-distance pass; returns (collided, human-readable summary)."""
+    details_fn = getattr(simulator, "collision_details", None)
+    if not callable(details_fn):
+        return bool(simulator.is_collision(state)), "collision details unavailable"
+    details = details_fn(state)
+    if details is None:
+        return False, "collision details unavailable"
+    return True, (
+        f"robots=({details['robot_i']}, {details['robot_j']}), "
+        f"distance={float(details['distance']):.6f}, "
+        f"d_collision={float(details['threshold']):.6f}"
+    )
+
+
+def resolve_checkpoint_observation_dimensions(
+    checkpoint: Mapping[str, Any],
+    simulator: DynamicsProtocol,
+    requested_policy_type: str,
+) -> tuple[int, int, int, int]:
+    """Resolve and validate checkpoint dimensions against the evaluation simulator."""
+    features = simulator.get_dataset_features()
+    runtime_state_dim = sum(
+        int(feature_info["shape"][0])
+        for feature_name, feature_info in features.items()
+        if is_observation_feature(feature_name)
+    )
+    neighbor_slots = max(0, int(simulator.num_robots) - 1)
+    neighbor_state_dim = int(features["observation.neighbor_state"]["shape"][0])
+    runtime_neighbor_feature_dim = (
+        neighbor_state_dim // neighbor_slots if neighbor_slots > 0 else 1
+    )
+
+    checkpoint_policy_type = checkpoint.get("policy_type")
+    if checkpoint_policy_type is not None and str(checkpoint_policy_type).lower() != requested_policy_type:
+        raise ValueError(
+            f"Checkpoint was trained as '{checkpoint_policy_type}', but evaluation requested "
+            f"'{requested_policy_type}'."
+        )
+
+    raw_horizon = checkpoint.get("observation_horizon", 1)
+    observation_horizon = 1 if raw_horizon is None else int(raw_horizon)
+    if observation_horizon <= 0:
+        raise ValueError("Checkpoint 'observation_horizon' must be positive.")
+
+    ego_base_dim = sum(
+        int(features[name]["shape"][0])
+        for name in ("observation.environment_state", "observation.state")
+    )
+    expected_neighbor_feature_dim = runtime_neighbor_feature_dim * observation_horizon
+    checkpoint_neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots))
+    neighbor_feature_dim = int(
+        checkpoint.get("neighbor_feature_dim", expected_neighbor_feature_dim)
+    )
+    if checkpoint_neighbor_slots < 0:
+        raise ValueError("Checkpoint 'neighbor_slots' must be non-negative.")
+    if neighbor_feature_dim != expected_neighbor_feature_dim:
+        raise ValueError(
+            "Checkpoint neighbor feature schema is incompatible with the evaluation simulator: "
+            f"checkpoint=(neighbor_feature_dim={neighbor_feature_dim}, observation_horizon={observation_horizon}), "
+            f"expected=(neighbor_feature_dim={expected_neighbor_feature_dim}, observation_horizon={observation_horizon}). "
+            "The policy can be evaluated with a different number of robots, but the per-neighbor feature schema "
+            "and observation horizon must match."
+        )
+    expected_state_dim = (
+        ego_base_dim * observation_horizon
+        + checkpoint_neighbor_slots * neighbor_feature_dim
+        + checkpoint_neighbor_slots * observation_horizon
+    )
+    state_dim = int(checkpoint.get("state_dim", expected_state_dim))
+    if state_dim != expected_state_dim:
+        raise ValueError(
+            "Checkpoint ego observation schema is incompatible with the evaluation simulator: "
+            f"checkpoint=(state_dim={state_dim}, neighbor_slots={checkpoint_neighbor_slots}, "
+            f"neighbor_feature_dim={neighbor_feature_dim}, observation_horizon={observation_horizon}), "
+            f"expected_state_dim={expected_state_dim}. "
+            "Use a checkpoint trained with the same ego observation schema and horizon."
+        )
+    return state_dim, neighbor_feature_dim, checkpoint_neighbor_slots, observation_horizon
 
 
 def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, ...]:
@@ -210,13 +290,18 @@ def rollout_planner(
     planner.reset()
     trajectory = [state.copy()]
 
-    if simulator.is_collision(state):
+    collided, summary = detect_collision(simulator, state)
+    if collided:
+        print(
+            "Expert rollout starts in collision "
+            f"(rollout={rollout_id}, {summary})."
+        )
         return np.asarray(trajectory)
     if simulator.should_terminate_rollout(state):
         return np.asarray(trajectory)
 
     for _ in range(num_steps):
-        obs = simulator.observe(state, validate=False)
+        obs = simulator.observe(state)
         
         try:
             action = planner(obs)
@@ -242,10 +327,16 @@ def rollout_planner(
             action_noise_std=action_noise_std,
             rng=action_noise_rng,
         )
-        state = simulator.step(state, executed_action, validate=False)
+        state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
 
-        if simulator.is_collision(state):
+        collided, summary = detect_collision(simulator, state)
+        if collided:
+            print(
+                "Expert rollout collision "
+                f"(rollout={rollout_id}, step={len(trajectory) - 1}, "
+                f"{summary})."
+            )
             break
 
         if simulator.should_terminate_rollout(state):
@@ -256,12 +347,13 @@ def rollout_planner(
 
 def rollout_policy(
     simulator: DynamicsProtocol,
-    policy: MLPPolicy | FlowPolicy,
+    policy: ActionPolicy,
     device: torch.device,
     initial_state: np.ndarray,
     num_steps: int,
     action_noise_std: float = 0.0,
     action_noise_rng: np.random.Generator | None = None,
+    observation_horizon: int = 1,
 ) -> tuple[np.ndarray, bool, int, bool]:
     """
     Rolls out the neural policy from a given initial state.
@@ -275,20 +367,27 @@ def rollout_policy(
     state = simulator.reset(initial_state)
     trajectory = [state.copy()]
     policy.reset()
-    collided = simulator.is_collision(state)
+    history_buffer = ObservationHistoryBuffer(observation_horizon, int(simulator.num_robots))
+    collided, summary = detect_collision(simulator, state)
 
     if collided:
+        print(
+            "Policy rollout starts in collision "
+            f"({summary})."
+        )
         return np.asarray(trajectory), False, 0, True
     if simulator.should_terminate_rollout(state):
         return np.asarray(trajectory), True, 0, False
 
     for step in range(1, num_steps + 1):
-        observation = simulator.observe(state, validate=False)
+        observation = simulator.observe(state)
         action = build_decentralized_joint_action(
             simulator=simulator,
             policy=policy,
             observation=observation,
             device=device,
+            observation_horizon=observation_horizon,
+            history_buffer=history_buffer,
         )
         executed_action = apply_execution_noise(
             simulator=simulator,
@@ -297,17 +396,84 @@ def rollout_policy(
             rng=action_noise_rng,
         )
 
-        state = simulator.step(state, executed_action, validate=False)
+        state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
 
-        if simulator.is_collision(state):
+        collision_now, summary = detect_collision(simulator, state)
+        if collision_now:
             collided = True
+            print(
+                "Policy rollout collision "
+                f"(step={step}, {summary})."
+            )
             break
 
         if simulator.should_terminate_rollout(state):
             return np.asarray(trajectory), True, step, collided
 
     return np.asarray(trajectory), False, len(trajectory) - 1, collided
+
+
+def _load_checkpoint_policy_components(
+    model_dir: str,
+    simulator: DynamicsProtocol,
+    policy_type: str,
+    device: torch.device,
+) -> tuple[
+    Mapping[str, Any],
+    Mapping[str, torch.Tensor],
+    ObservationEncoder,
+    int,
+    tuple[int, ...],
+    int,
+    int,
+]:
+    """Load a metadata checkpoint and resolve its encoder/action/hidden-dim schema.
+
+    Returns (checkpoint, state_dict, obs_encoder, action_dim, hidden_dims,
+    prediction_horizon, observation_horizon).
+    """
+    checkpoint = torch.load(model_dir, map_location=device)
+    if not (isinstance(checkpoint, dict) and "model_state_dict" in checkpoint):
+        raise ValueError(
+            f"'{policy_type}' models require a metadata checkpoint to infer the prediction_horizon "
+            "and cannot be loaded from raw state dictionaries."
+        )
+    state_dict = checkpoint["model_state_dict"]
+    if not isinstance(state_dict, Mapping):
+        raise ValueError(f"'{policy_type}' checkpoint must contain a state dictionary.")
+
+    hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
+    prediction_horizon = int(checkpoint.get("prediction_horizon", 1))
+
+    state_dim, neighbor_feature_dim, neighbor_slots, observation_horizon = resolve_checkpoint_observation_dimensions(
+        checkpoint, simulator, policy_type
+    )
+    action_dim = int(checkpoint.get("action_dim", int(simulator.nu)))
+    hidden_dims_raw = checkpoint.get("hidden_dims")
+    if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
+        hidden_dims = tuple(int(width) for width in hidden_dims_raw)
+
+    encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE))
+    encoder_kwargs_raw = checkpoint.get("encoder_kwargs")
+    encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
+    obs_encoder: ObservationEncoder = EncoderFactory.create(
+        encoder_type=encoder_type,
+        state_dim=state_dim,
+        neighbor_feature_dim=neighbor_feature_dim,
+        neighbor_slots=neighbor_slots,
+        observation_horizon=observation_horizon,
+        **encoder_kwargs,
+    )
+    return (
+        checkpoint,
+        state_dict,
+        obs_encoder,
+        action_dim,
+        hidden_dims,
+        prediction_horizon,
+        observation_horizon,
+    )
 
 
 def run_evaluation(
@@ -338,120 +504,25 @@ def run_evaluation(
     print(f"running inference on {device}")
     print(f"action noise seed: {action_noise_seed}")
 
-    # Dynamically load the requested policy
+    checkpoint, state_dict, obs_encoder, action_dim, hidden_dims, prediction_horizon, observation_horizon = (
+        _load_checkpoint_policy_components(model_dir, simulator, policy_type, device)
+    )
+    policy_kwargs: dict[str, object] = {
+        "action_dim": action_dim,
+        "obs_encoder": obs_encoder,
+        "hidden_dims": hidden_dims,
+        "prediction_horizon": prediction_horizon,
+    }
     if policy_type == "flow":
-        state_dim = sum(
-            int(feature_info["shape"][0])
-            for feature_name, feature_info in simulator.get_dataset_features().items()
-            if is_observation_feature(feature_name)
-        )
-        action_dim = int(simulator.nu)
-
-        checkpoint = torch.load(model_dir, map_location=device)
-        checkpoint_metadata = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
-        if not checkpoint_metadata:
-            raise ValueError(
-                "Flow models require a metadata checkpoint to infer the prediction_horizon "
-                "and cannot be loaded from raw state dictionaries."
-            )
-        state_dict = checkpoint["model_state_dict"] if checkpoint_metadata else checkpoint
-        if not isinstance(state_dict, Mapping):
-            raise ValueError("Flow checkpoint must contain a state dictionary.")
-
-        hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-        prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
         num_inference_steps = 10
-        neighbor_feature_dim = 2
-        neighbor_slots = max(0, int(simulator.num_robots) - 1)
-        
-        if checkpoint_metadata:
-            state_dim = int(checkpoint.get("state_dim", state_dim))
-            action_dim = int(checkpoint.get("action_dim", action_dim))
-            hidden_dims_raw = checkpoint.get("hidden_dims")
-            if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
-                hidden_dims = tuple(int(width) for width in hidden_dims_raw)
-            flow_config_raw = checkpoint.get("flow_config")
-            if isinstance(flow_config_raw, Mapping):
-                num_inference_steps = int(flow_config_raw.get("num_inference_steps", 10))
-        
-        neighbor_feature_dim = int(checkpoint.get("neighbor_feature_dim", neighbor_feature_dim)) if checkpoint_metadata else neighbor_feature_dim
-        neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots)) if checkpoint_metadata else neighbor_slots
-        encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE)) if checkpoint_metadata else DEFAULT_ENCODER_TYPE
-        encoder_kwargs_raw = checkpoint.get("encoder_kwargs") if checkpoint_metadata else {}
-        encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
-        obs_encoder: ObservationEncoder = EncoderFactory.create(
-            encoder_type=encoder_type,
-            state_dim=state_dim,
-            neighbor_feature_dim=neighbor_feature_dim,
-            neighbor_slots=neighbor_slots,
-            **encoder_kwargs,
-        )
+        flow_config_raw = checkpoint.get("flow_config")
+        if isinstance(flow_config_raw, Mapping):
+            num_inference_steps = int(flow_config_raw.get("num_inference_steps", 10))
+        policy_kwargs["num_inference_steps"] = num_inference_steps
 
-        policy = FlowPolicy(
-            action_dim=action_dim,
-            obs_encoder=obs_encoder,
-            hidden_dims=hidden_dims,
-            prediction_horizon=prediction_horizon,
-            num_inference_steps=num_inference_steps,
-        )
-        policy.load_state_dict(state_dict)
-
-        policy_display_name = "Flow"
-    elif policy_type == "mlp":
-        state_dim = sum(
-            int(feature_info["shape"][0])
-            for feature_name, feature_info in simulator.get_dataset_features().items()
-            if is_observation_feature(feature_name)
-        )
-        action_dim = int(simulator.nu)
-
-        checkpoint = torch.load(model_dir, map_location=device)
-        checkpoint_metadata = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
-        if not checkpoint_metadata:
-            raise ValueError(
-                "MLP models require a metadata checkpoint to infer the prediction_horizon "
-                "and cannot be loaded from raw state dictionaries."
-            )
-        state_dict = checkpoint["model_state_dict"] if checkpoint_metadata else checkpoint
-        if not isinstance(state_dict, Mapping):
-            raise ValueError("MLP checkpoint must contain a state dictionary.")
-
-        hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
-        prediction_horizon = int(checkpoint.get("prediction_horizon", 1)) if checkpoint_metadata else 1
-        neighbor_feature_dim = 2
-        neighbor_slots = max(0, int(simulator.num_robots) - 1)
-        
-        if checkpoint_metadata:
-            state_dim = int(checkpoint.get("state_dim", state_dim))
-            action_dim = int(checkpoint.get("action_dim", action_dim))
-            hidden_dims_raw = checkpoint.get("hidden_dims")
-            if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
-                hidden_dims = tuple(int(width) for width in hidden_dims_raw)
-        
-        neighbor_feature_dim = int(checkpoint.get("neighbor_feature_dim", neighbor_feature_dim)) if checkpoint_metadata else neighbor_feature_dim
-        neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots)) if checkpoint_metadata else neighbor_slots
-        encoder_type = str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE)) if checkpoint_metadata else DEFAULT_ENCODER_TYPE
-        encoder_kwargs_raw = checkpoint.get("encoder_kwargs") if checkpoint_metadata else {}
-        encoder_kwargs = dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}
-        obs_encoder: ObservationEncoder = EncoderFactory.create(
-            encoder_type=encoder_type,
-            state_dim=state_dim,
-            neighbor_feature_dim=neighbor_feature_dim,
-            neighbor_slots=neighbor_slots,
-            **encoder_kwargs,
-        )
-
-        policy = MLPPolicy(
-            action_dim=action_dim,
-            obs_encoder=obs_encoder,
-            hidden_dims=hidden_dims,
-            prediction_horizon=prediction_horizon,
-        )
-        policy.load_state_dict(state_dict)
-
-        policy_display_name = "MLP"
-    else:
-        raise ValueError("'policy_type' must be one of {'mlp', 'flow'}.")
+    policy = PolicyFactory.create(policy_type, **policy_kwargs)
+    policy.load_state_dict(state_dict)
+    policy_display_name = policy_type.title()
 
     policy.eval()
     policy.to(device)
@@ -559,6 +630,7 @@ def run_evaluation(
             num_steps=num_steps,
             action_noise_std=action_noise_std,
             action_noise_rng=policy_action_noise_rng,
+            observation_horizon=observation_horizon,
         )
         expert_collided = simulator.is_collision(expert_trajectory[-1])
 
