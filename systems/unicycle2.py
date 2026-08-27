@@ -71,7 +71,7 @@ class Unicycle2(DynamicsSimulator):
     def angular_state_indices(self) -> tuple[int, ...]:
         return (2,)
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
         """
         applies one simulation step
         """
@@ -91,6 +91,9 @@ class Unicycle2(DynamicsSimulator):
 
         return np.array([x, y, theta, v, omega], dtype=float)
 
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+        return self.predict_next_state(state, action, validate=validate)
+
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray:
         """
         rotates a global 2D vector by -theta into the robot body frame
@@ -101,7 +104,7 @@ class Unicycle2(DynamicsSimulator):
         ego_y = -np.sin(theta) * vec[0] + np.cos(theta) * vec[1]
         return np.array([ego_x, ego_y], dtype=float)
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray:
         """
         turns absoulte simulator state into observation,
         [goal_ego_x, goal_ego_y, sin(rel_theta), cos(rel_theta), velocity, angular velocity]
@@ -123,7 +126,7 @@ class Unicycle2(DynamicsSimulator):
         )
         return self.validate_observation(obs) if validate else obs
 
-    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray:
         """
         reconstructs absolute state from observation
         """
@@ -153,7 +156,7 @@ class Unicycle2(DynamicsSimulator):
         """
         return np.array([self.goal[0], self.goal[1], self.goal[2], 0.0, 0.0])
 
-    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+    def is_done(self, state: np.ndarray, validate: bool = False) -> bool:
         """
         checks whether robot has successfully completed task
         """

@@ -35,7 +35,7 @@ class DoubleIntegrator(DynamicsSimulator):
             )
         )
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
         clipped_action = np.clip(action_array, -self.max_action, self.max_action)
@@ -46,12 +46,15 @@ class DoubleIntegrator(DynamicsSimulator):
         next_vel = velocity + clipped_action * self.dt
         return np.concatenate([next_pos, next_vel])
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+        return self.predict_next_state(state, action, validate=validate)
+
+    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         obs = np.concatenate([self.goal - state_array[:2], state_array[2:4]])
         return self.validate_observation(obs) if validate else obs
 
-    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+    def is_done(self, state: np.ndarray, validate: bool = False) -> bool:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         # Must reach goal and stop moving
         dist = np.linalg.norm(state_array[:2] - self.goal)
@@ -107,7 +110,7 @@ class DoubleIntegrator(DynamicsSimulator):
         start_pos = self.goal + offset
         return np.array([start_pos[0], start_pos[1], 0.0, 0.0])
 
-    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray:
         obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)
         absolute_pos = self.goal - obs_array[:2]
         return np.concatenate([absolute_pos, obs_array[2:4]])

@@ -141,6 +141,7 @@ def collect_dagger_rollouts(
         )
         episode_expert_mixing_rng = np.random.default_rng(episode_expert_mixing_seed)
         planner_failed = False
+        expert_label_collision = False
         if policy_reset_fn is not None:
             policy_reset_fn()
         if hasattr(expert_planner, "reset"):
@@ -150,7 +151,7 @@ def collect_dagger_rollouts(
         episode_frame_buffers: list[list[dict[str, object]]] | None = None
 
         for step in range(1, steps_per_trajectory + 1):
-            observation = simulator.observe(state, validate=False)
+            observation = simulator.observe(state)
             try:
                 expert_action = expert_planner(observation)
             except PlannerSolveError as exc:
@@ -167,6 +168,19 @@ def collect_dagger_rollouts(
                 )
                 print(f"Underlying solver error: {exc}")
                 planner_failed = True
+                break
+
+            expert_next_state = simulator.predict_next_state(state, expert_action)
+            expert_label_collided, expert_label_summary = _detect_collision(
+                simulator, expert_next_state
+            )
+            if expert_label_collided:
+                print(
+                    "Discarding DAgger episode because the expert corrective label "
+                    "leads to collision "
+                    f"(attempt={attempted_episodes}, step={step}, {expert_label_summary})."
+                )
+                expert_label_collision = True
                 break
 
             built_frame = frame_builder(observation, expert_action)
@@ -196,12 +210,14 @@ def collect_dagger_rollouts(
             state = simulator.step(
                 state,
                 apply_execution_noise(simulator, base_action, action_noise_std, episode_action_noise_rng),
-                validate=False,
             )
-            if simulator.is_collision(state):
+            collided, summary = _detect_collision(simulator, state)
+            if collided:
                 print(
                     "Stopping DAgger episode after collision "
-                    f"(attempt={attempted_episodes})."
+                    f"(attempt={attempted_episodes}, step={step}, "
+                    f"actor={'expert' if use_expert_action else 'policy'}, "
+                    f"{summary})."
                 )
                 rollout_steps = step
                 break
@@ -210,7 +226,7 @@ def collect_dagger_rollouts(
                 rollout_steps = step
                 break
 
-        if planner_failed:
+        if planner_failed or expert_label_collision:
             continue
         if episode_frame_buffers is None:
             raise RuntimeError("'frame_builder' produced no frames for the rollout.")
@@ -257,8 +273,8 @@ def rollout_policy_with_action_fn(
     if simulator.should_terminate_rollout(state):
         return True, 0
     for step in range(1, num_steps + 1):
-        action = action_fn(simulator.observe(state, validate=False))
-        state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng), validate=False)
+        action = action_fn(simulator.observe(state))
+        state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng))
         if simulator.is_collision(state):
             return False, step
         if simulator.should_terminate_rollout(state):

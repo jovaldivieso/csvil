@@ -73,13 +73,15 @@ class DynamicsProtocol(Protocol):
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray: ...
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray: ...
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray: ...
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray: ...
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray: ...
+
+    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray: ...
 
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray: ...
 
-    def is_done(self, state: np.ndarray, validate: bool = True) -> bool: ...
+    def is_done(self, state: np.ndarray, validate: bool = False) -> bool: ...
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any: ...
 
@@ -101,7 +103,7 @@ class DynamicsProtocol(Protocol):
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None: ...
 
-    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray: ...
+    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray: ...
 
     @property
     def goal_state(self) -> np.ndarray: ...
@@ -190,7 +192,7 @@ class DynamicsSimulator(ABC):
         if hold_steps <= 0:
             raise ValueError("'done_hold_steps' must be a positive integer.")
 
-        if self.is_done(state, validate=False):
+        if self.is_done(state):
             self._rollout_done_counter += 1
         else:
             self._rollout_done_counter = 0
@@ -274,12 +276,17 @@ class DynamicsSimulator(ABC):
         return as_vector(observation, VectorSpec(name="observation", size=int(self.obs_dim)))
 
     @abstractmethod
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+        """Return the next state without changing simulator state or time."""
+        pass
+
+    @abstractmethod
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
         """Get next state"""
         pass
 
     @abstractmethod
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray:
         """Get observation"""
         pass
 
@@ -327,7 +334,7 @@ class DynamicsSimulator(ABC):
         pass
 
     @abstractmethod
-    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray:
         """Reconstruct absolute state from observation (inverse of observe())"""
         pass
 
@@ -359,9 +366,9 @@ class DynamicsSimulator(ABC):
         state = self.reset(initial_state)
 
         for _ in range(num_steps):
-            obs = self.observe(state, validate=False)
+            obs = self.observe(state)
             action = policy_fn(obs)  # Call your motion planner here
-            state = self.step(state, action, validate=False)
+            state = self.step(state, action)
             states.append(state.copy())
             observations.append(obs)
             actions.append(action)

@@ -55,19 +55,25 @@ class SingleIntegrator(DynamicsSimulator):
         self.current_action = np.zeros(self.nu, dtype=float)
         return state
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
+        clipped_action = np.clip(action_array, -self.max_action, self.max_action)
+        return state_array + clipped_action * self.dt
+
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
         clipped_action = np.clip(action_array, -self.max_action, self.max_action)
         self.current_action = clipped_action.copy()
-        return state_array + clipped_action * self.dt
+        return self.predict_next_state(state_array, clipped_action)
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         obs = np.concatenate([self.goal - state_array, self.current_action])
         return self.validate_observation(obs) if validate else obs
 
-    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+    def is_done(self, state: np.ndarray, validate: bool = False) -> bool:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         dist = np.linalg.norm(state_array - self.goal)
         return dist < self.error_tolerance
@@ -121,7 +127,7 @@ class SingleIntegrator(DynamicsSimulator):
             if np.all((initial_state >= self.environment_min) & (initial_state <= self.environment_max)):
                 return initial_state
 
-    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray:
         obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)
         return self.goal - obs_array[:2]
 

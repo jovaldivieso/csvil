@@ -58,11 +58,10 @@ class Unicycle1(DynamicsSimulator):
         self.current_action = np.zeros(self.nu, dtype=float)
         return state
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
         clipped_action = np.clip(action_array, -self.max_action, self.max_action)
-        self.current_action = clipped_action.copy()
 
         x, y, theta = state_array
         v, omega = clipped_action
@@ -70,6 +69,13 @@ class Unicycle1(DynamicsSimulator):
         next_y = y + v * np.sin(theta) * self.dt
         next_theta = np.arctan2(np.sin(theta + omega * self.dt), np.cos(theta + omega * self.dt))
         return np.array([next_x, next_y, next_theta], dtype=float)
+
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
+        clipped_action = np.clip(action_array, -self.max_action, self.max_action)
+        self.current_action = clipped_action.copy()
+        return self.predict_next_state(state_array, clipped_action)
 
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray:
         """
@@ -81,7 +87,7 @@ class Unicycle1(DynamicsSimulator):
         ego_y = -np.sin(theta) * vec[0] + np.cos(theta) * vec[1]
         return np.array([ego_x, ego_y], dtype=float)
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         rel_pos = self.goal[0:2] - state_array[:2]
         ego_pos = self.global_vector_to_ego(rel_pos, state_array)
@@ -96,7 +102,7 @@ class Unicycle1(DynamicsSimulator):
         ], dtype=float)
         return self.validate_observation(obs) if validate else obs
 
-    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
+    def is_done(self, state: np.ndarray, validate: bool = False) -> bool:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         pos_error = np.linalg.norm(state_array[:2] - self.goal[0:2])
         theta_error = abs(np.arctan2(np.sin(self.goal[2] - state_array[2]), np.cos(self.goal[2] - state_array[2])))
@@ -159,7 +165,7 @@ class Unicycle1(DynamicsSimulator):
                 theta = rng.uniform(-np.pi, np.pi)
                 return np.array([pos[0], pos[1], theta])
 
-    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray:
         obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)
         rel_theta = np.arctan2(obs_array[2], obs_array[3])
         theta = self.goal[2] - rel_theta
