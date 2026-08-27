@@ -80,7 +80,7 @@ class DaggerConfig:
     expert_mix_beta_start: float
     expert_mix_beta_end: float
     expert_mix_beta_decay_rate: float | None
-    expert_mix_decay_after_success_rate: float | None
+    expert_mix_decay_after_eval_success: float | None
     adaptive_beta_recovery: bool
     target_epochs_per_round: list[float]
     eval_episodes: int
@@ -99,7 +99,7 @@ class DaggerConfig:
     seed: int
     max_train_steps: int | None
     initial_states: list[np.ndarray] | None = None
-    randomize_goal_with_eval_success: float | None = None
+    randomize_goal_after_eval_success: float | None = None
 
     def __post_init__(self) -> None:
         if self.dagger_iterations < 0:
@@ -124,8 +124,8 @@ class DaggerConfig:
         ):
             raise ValueError("Beta decay rate must be non-negative.")
         if (
-            self.expert_mix_decay_after_success_rate is not None
-            and not 0 <= self.expert_mix_decay_after_success_rate <= 1
+            self.expert_mix_decay_after_eval_success is not None
+            and not 0 <= self.expert_mix_decay_after_eval_success <= 1
         ):
             raise ValueError("Beta gate must be in [0, 1].")
         if len(self.target_epochs_per_round) not in {1, self.dagger_iterations}:
@@ -142,8 +142,8 @@ class DaggerConfig:
             raise ValueError("Batch size and learning rate must be positive.")
         if self.max_train_steps is not None and self.max_train_steps <= 0:
             raise ValueError("Max train steps must be positive.")
-        if self.randomize_goal_with_eval_success is not None and not 0.0 <= self.randomize_goal_with_eval_success <= 100.0:
-            raise ValueError("'randomize_goal_with_eval_success' must be between 0 and 100 percent.")
+        if self.randomize_goal_after_eval_success is not None and not 0.0 <= self.randomize_goal_after_eval_success <= 100.0:
+            raise ValueError("'randomize_goal_after_eval_success' must be between 0 and 100 percent.")
         if not self.dataset_root.exists() and not self.start_with_aggregation:
             raise FileNotFoundError(self.dataset_root)
 
@@ -274,7 +274,7 @@ class DaggerTrainer:
                 f"beta_start={self.cfg.expert_mix_beta_start:.3f}, "
                 f"beta_decay_rate={self.cfg.expert_mix_beta_decay_rate:.3f}/round, "
                 f"beta_floor=0.000, "
-                f"decay_after_eval_success={self.cfg.expert_mix_decay_after_success_rate if self.cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
+                f"decay_after_eval_success={self.cfg.expert_mix_decay_after_eval_success if self.cfg.expert_mix_decay_after_eval_success is not None else 'none'}"
             )
         else:
             print(
@@ -282,7 +282,7 @@ class DaggerTrainer:
                 f"beta_start={self.cfg.expert_mix_beta_start:.3f}, "
                 f"beta_end={self.cfg.expert_mix_beta_end:.3f}, "
                 f"decay_rounds={self.cfg.dagger_iterations}, "
-                f"decay_after_eval_success={self.cfg.expert_mix_decay_after_success_rate if self.cfg.expert_mix_decay_after_success_rate is not None else 'none'}"
+                f"decay_after_eval_success={self.cfg.expert_mix_decay_after_eval_success if self.cfg.expert_mix_decay_after_eval_success is not None else 'none'}"
             )
         print(f"MLP hidden dims: {list(self.cfg.mlp_hidden_dims)}")
         print(f"Prediction horizon: {self.cfg.prediction_horizon}")
@@ -486,7 +486,7 @@ class DaggerTrainer:
             beta_end=self.cfg.expert_mix_beta_end,
             decay_rounds=max(1, self.cfg.dagger_iterations),
             beta_decay_rate=self.cfg.expert_mix_beta_decay_rate,
-            decay_after_success_rate=self.cfg.expert_mix_decay_after_success_rate,
+            decay_after_success_rate=self.cfg.expert_mix_decay_after_eval_success,
             adaptive_recovery=self.cfg.adaptive_beta_recovery,
         )
 
@@ -628,7 +628,7 @@ class DaggerTrainer:
             )
             print(f"aggregation_goal_source: {aggregation_goal_source}")
 
-            success_threshold = self.cfg.randomize_goal_with_eval_success
+            success_threshold = self.cfg.randomize_goal_after_eval_success
             self.train_on_aggregate(
                 f"DAgger round {display}/{self.cfg.dagger_iterations}: retrain"
                 if self.cfg.start_with_aggregation
@@ -646,14 +646,13 @@ class DaggerTrainer:
                 eval_success_pct = eval_metrics.success_rate * 100.0
                 if (
                     success_threshold is not None
-                    and round_beta == 0.0
-                    and eval_success_pct >= success_threshold
+                    and eval_success_pct > success_threshold
                 ):
                     if not self.dynamic_goal_randomization:
                         print(
                             "Curriculum milestone reached during evaluation: "
-                            f"success rate {eval_success_pct:.1f}% >= threshold {success_threshold}% "
-                            "with beta=0.0. Enabling goal randomization."
+                            f"success rate {eval_success_pct:.1f}% > threshold {success_threshold}%. "
+                            "Enabling goal randomization."
                         )
                     self.dynamic_goal_randomization = True
 
@@ -669,16 +668,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--expert-config", required=True)
     p.add_argument("--repo-id")
     p.add_argument("--dataset-root", type=Path)
-    p.add_argument("--planner", default="casadi", choices=["casadi"])
-    p.add_argument("--dagger-iterations", type=int, default=4)
-    p.add_argument("--trajectories-per-iteration", nargs="+", type=int, default=[20])
-    p.add_argument("--steps-per-trajectory", type=int, default=150)
-    p.add_argument("--action-noise-std", type=float, default=0.0)
+    p.add_argument("--planner", choices=["casadi"])
+    p.add_argument("--dagger-iterations", type=int)
+    p.add_argument("--trajectories-per-iteration", nargs="+", type=int)
+    p.add_argument("--steps-per-trajectory", type=int)
+    p.add_argument("--action-noise-std", type=float)
     p.add_argument(
-        "--randomize-goal-with-eval-success",
+        "--randomize-goal-after-eval-success",
         type=float,
         default=None,
-        help="enable goal randomization when a beta=0.0 round reaches this evaluation success percentage",
+        help="enable goal randomization when evaluation reaches this success percentage",
     )
     p.add_argument(
         "--initial-states",
@@ -691,21 +690,21 @@ def parse_args() -> argparse.Namespace:
             "When exhausted, collection falls back to simulator RNG sampling."
         ),
     )
-    p.add_argument("--expert-mix-beta-start", type=float, default=0.8)
-    p.add_argument("--expert-mix-beta-end", type=float, default=0.0)
+    p.add_argument("--expert-mix-beta-start", type=float)
+    p.add_argument("--expert-mix-beta-end", type=float)
     p.add_argument("--expert-mix-beta-decay-rate", type=float)
-    p.add_argument("--expert-mix-decay-after-success-rate", type=float)
-    p.add_argument("--adaptive-beta-recovery", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--target-epochs-per-round", nargs="+", type=float, default=[30.0])
-    p.add_argument("--eval-episodes", type=int, default=10)
+    p.add_argument("--expert-mix-decay-after-eval-success", type=float)
+    p.add_argument("--adaptive-beta-recovery", action=argparse.BooleanOptionalAction)
+    p.add_argument("--target-epochs-per-round", nargs="+", type=float)
+    p.add_argument("--eval-episodes", type=int)
     p.add_argument("--eval-steps", type=int)
-    p.add_argument("--eval-seed-start", type=int, default=10000)
-    p.add_argument("--eval-action-noise-std", type=float, default=0.0)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--learning-rate", type=float, default=1e-3)
+    p.add_argument("--eval-seed-start", type=int)
+    p.add_argument("--eval-action-noise-std", type=float)
+    p.add_argument("--batch-size", type=int)
+    p.add_argument("--learning-rate", type=float)
     p.add_argument("--policy-config", type=Path)
     p.add_argument("--checkpoint-dir", type=Path)
-    p.add_argument("--seed", type=int, default=99)
+    p.add_argument("--seed", type=int)
     p.add_argument("--max-train-steps", type=int)
     return p.parse_args()
 
@@ -747,9 +746,9 @@ def main() -> None:
         else Path(args.dataset_root)
     )
     trajectories, epochs = DaggerTrainer.schedules(
-        args.trajectories_per_iteration,
-        args.target_epochs_per_round,
-        args.dagger_iterations,
+        trajectories_per_iteration,
+        target_epochs_per_round,
+        dagger_iterations,
     )
     cfg = DaggerConfig(
         system=args.system,
@@ -757,33 +756,34 @@ def main() -> None:
         repo_id=repo_id,
         dataset_root=dataset_root,
         start_with_aggregation=fresh,
-        planner_name=args.planner,
-        dagger_iterations=args.dagger_iterations,
+        planner_name=str(option("planner", "casadi")),
+        dagger_iterations=dagger_iterations,
         trajectories_per_iteration=trajectories,
-        steps_per_trajectory=args.steps_per_trajectory,
-        action_noise_std=args.action_noise_std,
-        initial_states=parse_initial_states_argument(args.initial_states),
-        expert_mix_beta_start=args.expert_mix_beta_start,
-        expert_mix_beta_end=args.expert_mix_beta_end,
-        expert_mix_beta_decay_rate=args.expert_mix_beta_decay_rate,
-        expert_mix_decay_after_success_rate=args.expert_mix_decay_after_success_rate,
-        adaptive_beta_recovery=args.adaptive_beta_recovery,
+        steps_per_trajectory=int(option("steps_per_trajectory", 150)),
+        action_noise_std=float(option("action_noise_std", 0.0)),
+        initial_states=initial_states,
+        expert_mix_beta_start=float(option("expert_mix_beta_start", 0.8)),
+        expert_mix_beta_end=float(option("expert_mix_beta_end", 0.0)),
+        expert_mix_beta_decay_rate=option("expert_mix_beta_decay_rate", None),
+        expert_mix_decay_after_eval_success=option("expert_mix_decay_after_eval_success", None),
+        adaptive_beta_recovery=bool(option("adaptive_beta_recovery", False)),
         target_epochs_per_round=epochs,
-        eval_episodes=args.eval_episodes,
-        eval_steps=args.eval_steps,
-        eval_seed_start=args.eval_seed_start,
-        eval_action_noise_std=args.eval_action_noise_std,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
+        eval_episodes=int(option("eval_episodes", 10)),
+        eval_steps=option("eval_steps", None),
+        eval_seed_start=int(option("eval_seed_start", 10000)),
+        eval_action_noise_std=float(option("eval_action_noise_std", 0.0)),
+        batch_size=int(option("batch_size", 64)),
+        learning_rate=float(option("learning_rate", 1e-3)),
         mlp_hidden_dims=load_mlp_hidden_dims(args.policy_config),
         prediction_horizon=load_prediction_horizon(args.policy_config),
+        observation_horizon=load_observation_horizon(args.policy_config),
         encoder_config=load_encoder_config(args.policy_config),
         policy_type=load_policy_type(args.policy_config),
         flow_config=load_flow_config(args.policy_config),
         checkpoint_dir=args.checkpoint_dir or default_checkpoint_dir_for_system(args.system),
-        seed=args.seed,
-        max_train_steps=args.max_train_steps,
-        randomize_goal_with_eval_success=args.randomize_goal_with_eval_success,
+        seed=int(option("seed", 99)),
+        max_train_steps=option("max_train_steps", None),
+        randomize_goal_after_eval_success=option("randomize_goal_after_eval_success", None),
     )
     DaggerTrainer(cfg).run()
 

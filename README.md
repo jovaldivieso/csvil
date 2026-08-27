@@ -200,7 +200,7 @@ python learning/train_dagger.py \
 --action-noise-std 0.03 \
 --expert-mix-beta-start 0.5 \
 --expert-mix-beta-decay-rate 0.25 \
---expert-mix-decay-after-success-rate 0.0 \
+--expert-mix-decay-after-eval-success 0.0 \
 --eval-episodes 100
 ```
 
@@ -233,7 +233,7 @@ python learning/train_dagger.py \
 --action-noise-std 0.03 \
 --expert-mix-beta-start 0.5 \
 --expert-mix-beta-decay-rate 0.25 \
---expert-mix-decay-after-success-rate 0.0 \
+--expert-mix-decay-after-eval-success 0.0 \
 --eval-episodes 100
 ```
 
@@ -264,7 +264,8 @@ round does: aggregate learner rollouts with expert labels, then retrain.
 - `--dagger-iterations 1`: one aggregate + retrain refinement
 - `--expert-mix-beta-start` / `--expert-mix-beta-end`: control how often the expert action is executed during aggregation rollouts; set both to `0.0` to recover the old no-mixing behavior
 - `--expert-mix-beta-decay-rate`: optional additive per-round schedule `beta_t = max(0, beta_start - rate * t)`; when set, this overrides `--expert-mix-beta-end`
-- `--expert-mix-decay-after-success-rate`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` for a strict "start decaying only after success is nonzero" gate
+- `--expert-mix-decay-after-eval-success`: optional gate that delays beta decay until evaluation success exceeds a threshold; set to `0.0` for a strict "start decaying only after success is nonzero" gate
+- `--randomize-goal-after-eval-success`: optional threshold that enables randomized goals after evaluation success reaches the configured percentage
 - `--adaptive-beta-recovery`: optional (default `true`); when enabled, beta increases by one schedule step after an eval-success regression; when disabled, beta follows monotonic decay
 - `--policy-config`: optional YAML file for the policy architecture (MLP or flow), e.g. `learning/config/multi_double_integrator_casadi_mlp_config.yaml` with default `model.hidden_dims: [256, 256, 128]`, or `learning/config/multi_double_integrator_casadi_flow_config.yaml` with `model.policy_type: flow`
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate` and `aggregation_mean_steps`.
@@ -339,7 +340,7 @@ Use this as a compact quick reference for current entrypoint flags.
 - `learning/train_dagger.py`
   - required args: `--system`, `--expert-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
-  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-success-rate`, `--adaptive-beta-recovery`
+  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--randomize-goal-after-eval-success`, `--adaptive-beta-recovery`
   - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 Optional multi-robot visibility gating can be set in the simulator config:
 
