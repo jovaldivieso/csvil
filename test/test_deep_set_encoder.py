@@ -163,7 +163,7 @@ class MultiRobotMaskSemanticsTests(unittest.TestCase):
             },
         )
         state = simulator.random_initial_state(np.random.default_rng(3))
-        observation = simulator.observe(state, validate=False)
+        observation = simulator.observe(state)
         local_observation = simulator.decentralized_policy_observation(observation)
         features = simulator.get_dataset_features()
 
@@ -204,8 +204,8 @@ class MultiRobotMaskSemanticsTests(unittest.TestCase):
         colliding_state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
         invisible_state = np.array([0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0], dtype=float)
 
-        colliding_obs = simulator.observe(colliding_state, validate=False)
-        invisible_obs = simulator.observe(invisible_state, validate=False)
+        colliding_obs = simulator.observe(colliding_state)
+        invisible_obs = simulator.observe(invisible_state)
 
         colliding_robot_obs = simulator.decentralized_policy_observation(colliding_obs, 0)
         invisible_robot_obs = simulator.decentralized_policy_observation(invisible_obs, 0)

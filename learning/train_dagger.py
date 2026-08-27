@@ -26,14 +26,15 @@ from core.factory import DynamicsFactory, PlannerFactory
 from learning.config_loaders import (
     EncoderConfig, FlowConfig, default_checkpoint_dir_for_system,
     default_dataset_root_for_system, default_repo_id_for_system,
+    load_dagger_training_config,
     load_encoder_config, load_flow_config, load_mlp_hidden_dims,
-    load_policy_type, load_prediction_horizon,
+    load_observation_horizon, load_policy_type, load_prediction_horizon,
 )
 from learning.data_utils import collate_batch_for_policy, create_collate_fn_with_dataset
 from learning.dagger import (
     DaggerEvalMetrics, ExpertMixBetaController, build_decentralized_joint_action,
     collect_dagger_rollouts, evaluate_policy_rollouts, print_rollout_metrics,
-    resolve_initial_state_seed, resolve_round_steps, set_seed,
+    ObservationHistoryBuffer, resolve_initial_state_seed, resolve_round_steps, set_seed,
     with_seeded_initial_state_config,
 )
 from learning.models.encoder import EncoderFactory
@@ -69,6 +70,7 @@ class DaggerConfig:
     learning_rate: float
     mlp_hidden_dims: tuple[int, ...]
     prediction_horizon: int
+    observation_horizon: int
     encoder_config: EncoderConfig
     policy_type: str
     flow_config: FlowConfig
@@ -89,6 +91,8 @@ class DaggerConfig:
             raise ValueError("Trajectory targets must be positive.")
         if self.steps_per_trajectory <= 0:
             raise ValueError("'steps_per_trajectory' must be positive.")
+        if self.observation_horizon <= 0:
+            raise ValueError("'observation_horizon' must be positive.")
         if self.action_noise_std < 0 or self.eval_action_noise_std < 0:
             raise ValueError("Action noise must be non-negative.")
         if not 0 <= self.expert_mix_beta_start <= 1 or not 0 <= self.expert_mix_beta_end <= 1:
@@ -136,7 +140,8 @@ class DaggerTrainer:
         self.dynamic_goal_randomization = False
         self.obs_feature_names: list[str] = []
         self.state_dim = self.action_dim = self.neighbor_slots = 0
-        self.neighbor_feature_dim = 2
+        self.neighbor_feature_dim: int | None = None
+        self.observation_horizon = 1
 
     @staticmethod
     def schedules(
@@ -177,21 +182,46 @@ class DaggerTrainer:
 
         self.action_noise_seed = default_action_noise_seed_for_config(self.seeded_config)
         self.initial_state_seed = resolve_initial_state_seed(self.seeded_config, self.cfg.seed)
+        self.observation_horizon = self.cfg.observation_horizon
         features = self.simulator.get_dataset_features()
         self.obs_feature_names = [n for n in features if n.startswith("observation.")]
-        self.state_dim = sum(
-            int(v["shape"][0])
-            for n, v in features.items()
-            if n.startswith("observation.")
+        base_ego_dim = sum(
+            int(features[name]["shape"][0])
+            for name in ("observation.environment_state", "observation.state")
         )
         self.action_dim = int(features["action"]["shape"][0])
         self.neighbor_slots = max(0, int(self.simulator.num_robots) - 1)
+        neighbor_state_dim = int(features["observation.neighbor_state"]["shape"][0])
+        if self.neighbor_slots > 0:
+            if neighbor_state_dim <= 0 or neighbor_state_dim % self.neighbor_slots != 0:
+                raise ValueError(
+                    "observation.neighbor_state dimension must be a positive multiple of the neighbor count; "
+                    f"got dimension {neighbor_state_dim} for {self.neighbor_slots} neighbors."
+                )
+            self.neighbor_feature_dim = (
+                neighbor_state_dim // self.neighbor_slots
+            ) * self.observation_horizon
+            stacked_neighbor_mask_dim = self.neighbor_slots * self.observation_horizon
+        else:
+            # The encoder still requires a valid input width when there are no slots.
+            self.neighbor_feature_dim = max(1, neighbor_state_dim) * self.observation_horizon
+            stacked_neighbor_mask_dim = 0
+
+        self.state_dim = (
+            base_ego_dim * self.observation_horizon
+            + self.neighbor_slots * self.neighbor_feature_dim
+            + stacked_neighbor_mask_dim
+        )
+
+        if self.neighbor_feature_dim is None:
+            raise RuntimeError("Neighbor feature dimension was not initialized from the dataset schema.")
 
         enc = EncoderFactory.create(
             self.cfg.encoder_config.encoder_type,
             self.state_dim,
             self.neighbor_feature_dim,
             self.neighbor_slots,
+            observation_horizon=self.observation_horizon,
             **self.cfg.encoder_config.kwargs,
         )
         flow = (
@@ -324,6 +354,7 @@ class DaggerTrainer:
                 dataset=dataset,
                 simulator=self.simulator,
                 prediction_horizon=self.cfg.prediction_horizon,
+                observation_horizon=self.cfg.observation_horizon,
             ),
         )
         steps, approx = resolve_round_steps(
@@ -358,18 +389,32 @@ class DaggerTrainer:
             system_name=self.cfg.system,
             config=eval_config,
         )
-        action_fn = lambda obs: build_decentralized_joint_action(
-            simulator,
-            self.policy,
-            obs,
-            self.device,
+        history_buffer = ObservationHistoryBuffer(
+            self.cfg.observation_horizon,
+            int(simulator.num_robots),
         )
+
+        def action_fn(obs: np.ndarray) -> np.ndarray:
+            return build_decentralized_joint_action(
+                simulator,
+                self.policy,
+                obs,
+                self.device,
+                observation_horizon=self.cfg.observation_horizon,
+                history_buffer=history_buffer,
+            )
+
+        def reset_policy_state() -> None:
+            history_buffer.reset()
+            self.policy.reset()
+
         metrics = evaluate_policy_rollouts(
             simulator,
             self.cfg.eval_episodes,
             self.cfg.eval_steps or self.cfg.steps_per_trajectory,
             self.cfg.eval_seed_start,
             action_fn,
+            reset_fn=reset_policy_state,
             action_noise_std=self.cfg.eval_action_noise_std,
             action_noise_seed=self.action_noise_seed,
         )
@@ -387,6 +432,7 @@ class DaggerTrainer:
             "state_dim": self.state_dim,
             "action_dim": self.action_dim,
             "prediction_horizon": self.cfg.prediction_horizon,
+            "observation_horizon": self.cfg.observation_horizon,
             "hidden_dims": list(self.cfg.mlp_hidden_dims),
             "obs_feature_names": self.obs_feature_names,
             "system": self.cfg.system,
@@ -504,18 +550,33 @@ class DaggerTrainer:
                     features=features,
                 )
             else:
+                existing_meta = LeRobotDatasetMetadata(repo_id=self.cfg.repo_id, root=self.cfg.dataset_root)
+                _validate_resumable_dataset_schema(existing_meta.features, simulator.get_dataset_features())
                 writer = LeRobotDataset.resume(
                     repo_id=self.cfg.repo_id,
                     root=self.cfg.dataset_root,
                 )
 
             try:
-                action_fn = lambda obs: build_decentralized_joint_action(
-                    simulator,
-                    self.policy,
-                    obs,
-                    self.device,
+                history_buffer = ObservationHistoryBuffer(
+                    self.cfg.observation_horizon,
+                    int(simulator.num_robots),
                 )
+
+                def action_fn(obs: np.ndarray) -> np.ndarray:
+                    return build_decentralized_joint_action(
+                        simulator,
+                        self.policy,
+                        obs,
+                        self.device,
+                        observation_horizon=self.cfg.observation_horizon,
+                        history_buffer=history_buffer,
+                    )
+
+                def reset_policy_state() -> None:
+                    history_buffer.reset()
+                    self.policy.reset()
+
                 frames = simulator.format_dataset_frame
                 metrics = collect_dagger_rollouts(
                     simulator=simulator,

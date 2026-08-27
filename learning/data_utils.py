@@ -50,6 +50,8 @@ def format_sample_for_policy(
     simulator: DynamicsProtocol,
     prediction_horizon: int = 1,
     subsequent_samples: list[Mapping[str, Any]] | None = None,
+    observation_horizon: int = 1,
+    past_samples: list[Mapping[str, Any]] | None = None,
 ) -> tuple[StructuredObservation, torch.Tensor]:
     """Convert one native decentralized LeRobot frame into policy tensors.
     
@@ -58,9 +60,13 @@ def format_sample_for_policy(
         simulator: The dynamics simulator for validation
         prediction_horizon: Number of future action steps to predict
         subsequent_samples: List of subsequent frame samples for multi-step predictions
+        observation_horizon: Number of observation frames, including the current frame
+        past_samples: Same-episode frames before the current frame, oldest first
     """
     if prediction_horizon <= 0:
         raise ValueError("'prediction_horizon' must be positive.")
+    if observation_horizon <= 0:
+        raise ValueError("'observation_horizon' must be positive.")
 
     if simulator.num_robots > 1 and "observation.neighbor_state" not in sample:
         raise RuntimeError(
@@ -74,12 +80,13 @@ def format_sample_for_policy(
     neighbor_mask = _tensor_field(sample, "observation.neighbor_mask")
     action = _tensor_field(sample, "action")
 
-    if neighbor_mask.numel() == 0 and neighbor_state.numel() != 0:
-        raise ValueError(
-            "Neighbor state and mask feature dimensions must agree: "
-            f"got {neighbor_state.numel()} and {neighbor_mask.numel()}."
-        )
-    if neighbor_mask.numel() > 0 and neighbor_state.numel() % neighbor_mask.numel() != 0:
+    if neighbor_mask.numel() == 0:
+        if neighbor_state.numel() != 0:
+            raise ValueError(
+                "Neighbor state and mask feature dimensions must agree: "
+                f"got {neighbor_state.numel()} and {neighbor_mask.numel()}."
+            )
+    elif neighbor_state.numel() == 0 or neighbor_state.numel() % neighbor_mask.numel() != 0:
         raise ValueError(
             "Neighbor state and mask feature dimensions must agree: "
             f"got {neighbor_state.numel()} and {neighbor_mask.numel()}."
@@ -90,11 +97,22 @@ def format_sample_for_policy(
             "Decentralized action dimension does not match the simulator's local action dimension: "
             f"got {action.numel()}, expected {expected_action_dim}."
         )
+    history = list(past_samples or []) + [sample]
+    if len(history) > observation_horizon:
+        history = history[-observation_horizon:]
+    if len(history) < observation_horizon:
+        earliest = history[0]
+        history = [earliest] * (observation_horizon - len(history)) + history
+
+    observation_fields = (
+        "observation.environment_state",
+        "observation.state",
+        "observation.neighbor_state",
+        "observation.neighbor_mask",
+    )
     observation = {
-        "observation.environment_state": environment_state,
-        "observation.state": state,
-        "observation.neighbor_state": neighbor_state,
-        "observation.neighbor_mask": neighbor_mask,
+        name: torch.cat([_tensor_field(frame, name) for frame in history], dim=0)
+        for name in observation_fields
     }
     
     # Build action sequence with proper horizon handling
@@ -109,6 +127,7 @@ def collate_batch_for_policy(
     simulator: DynamicsProtocol,
     prediction_horizon: int = 1,
     dataset: object | None = None,
+    observation_horizon: int = 1,
 ) -> tuple[StructuredObservation, torch.Tensor]:
     """Collate native LeRobot frames into batched policy observations and actions.
     
@@ -116,6 +135,7 @@ def collate_batch_for_policy(
         batch: Sequence of sample dictionaries from LeRobotDataset
         simulator: The dynamics simulator for validation
         prediction_horizon: Number of future action steps to predict per frame
+        observation_horizon: Number of observation frames to stack per frame
         dataset: Optional LeRobotDataset instance to fetch subsequent actions for horizons > 1
     
     Returns:
@@ -130,13 +150,22 @@ def collate_batch_for_policy(
         dataset=dataset,
         prediction_horizon=prediction_horizon,
     )
+    past_samples_by_item = _bulk_past_samples(
+        batch=normalized_batch,
+        dataset=dataset,
+        observation_horizon=observation_horizon,
+    )
     formatted = []
-    for sample, subsequent_samples in zip(normalized_batch, subsequent_samples_by_item):
+    for sample, subsequent_samples, past_samples in zip(
+        normalized_batch, subsequent_samples_by_item, past_samples_by_item
+    ):
         formatted_obs, formatted_actions = format_sample_for_policy(
             sample=sample,
             simulator=simulator,
             prediction_horizon=prediction_horizon,
             subsequent_samples=subsequent_samples,
+            observation_horizon=observation_horizon,
+            past_samples=past_samples,
         )
         formatted.append((formatted_obs, formatted_actions))
     
@@ -184,10 +213,7 @@ def _bulk_future_samples(
     if not valid_future_indices:
         return [[] for _ in batch]
 
-    try:
-        bulk_future_samples = dataset[valid_future_indices]
-    except (IndexError, KeyError, TypeError, AttributeError):
-        return [[] for _ in batch]
+    bulk_future_samples = _fetch_samples(dataset, valid_future_indices)
 
     fetched_by_index = _samples_by_index(bulk_future_samples, valid_future_indices)
     subsequent_samples_by_item: list[list[Mapping[str, Any]]] = []
@@ -209,6 +235,64 @@ def _bulk_future_samples(
             same_episode_samples.append(future_sample)
         subsequent_samples_by_item.append(same_episode_samples)
     return subsequent_samples_by_item
+
+
+def _bulk_past_samples(
+    batch: Sequence[Mapping[str, Any]],
+    dataset: object | None,
+    observation_horizon: int,
+) -> list[list[Mapping[str, Any]]]:
+    """Fetch same-episode history frames, ordered from oldest to newest."""
+    past_indices_by_item: list[list[int]] = [[] for _ in batch]
+    all_past_indices: list[int] = []
+
+    if dataset is None or observation_horizon <= 1:
+        return past_indices_by_item
+
+    for item_idx, sample in enumerate(batch):
+        if "index" not in sample or "episode_index" not in sample:
+            continue
+        current_index = int(torch.as_tensor(sample["index"]).item())
+        past_indices = [
+            current_index - history_step
+            for history_step in range(observation_horizon - 1, 0, -1)
+            if current_index - history_step >= 0
+        ]
+        past_indices_by_item[item_idx] = past_indices
+        all_past_indices.extend(past_indices)
+
+    if not all_past_indices:
+        return past_indices_by_item
+
+    dataset_length = len(dataset)
+    valid_past_indices = [
+        index for index in all_past_indices
+        if 0 <= index < dataset_length
+    ]
+    if not valid_past_indices:
+        return [[] for _ in batch]
+
+    bulk_past_samples = _fetch_samples(dataset, valid_past_indices)
+
+    fetched_by_index = _samples_by_index(bulk_past_samples, valid_past_indices)
+    past_samples_by_item: list[list[Mapping[str, Any]]] = []
+    for sample, past_indices in zip(batch, past_indices_by_item):
+        if "episode_index" not in sample:
+            past_samples_by_item.append([])
+            continue
+        current_episode = int(torch.as_tensor(sample["episode_index"]).item())
+        same_episode_samples: list[Mapping[str, Any]] = []
+        for past_index in past_indices:
+            past_sample = fetched_by_index.get(past_index)
+            if past_sample is None:
+                continue
+            past_episode = past_sample.get("episode_index")
+            if past_episode is None:
+                continue
+            if int(torch.as_tensor(past_episode).item()) == current_episode:
+                same_episode_samples.append(past_sample)
+        past_samples_by_item.append(same_episode_samples)
+    return past_samples_by_item
 
 
 def _samples_by_index(
@@ -235,6 +319,14 @@ def _samples_by_index(
     }
 
 
+def _fetch_samples(dataset: object, indices: Sequence[int]) -> Mapping[str, Any] | Sequence[Mapping[str, Any]]:
+    """Fetch dataset rows, supporting datasets with scalar-only indexing."""
+    try:
+        return dataset[list(indices)]
+    except (IndexError, KeyError, TypeError, AttributeError):
+        return [dataset[index] for index in indices]
+
+
 def _bulk_value_at_index(value: Any, index: int, sample_count: int) -> Any:
     """Read one row from a column returned by a bulk dataset query."""
     if isinstance(value, torch.Tensor):
@@ -250,6 +342,7 @@ def create_collate_fn_with_dataset(
     dataset: object,
     simulator: DynamicsProtocol,
     prediction_horizon: int = 1,
+    observation_horizon: int = 1,
 ):
     """Factory function to create a collate_fn with dataset access for action horizon prediction.
     
@@ -270,6 +363,7 @@ def create_collate_fn_with_dataset(
             batch=batch,
             simulator=simulator,
             prediction_horizon=prediction_horizon,
+            observation_horizon=observation_horizon,
             dataset=dataset,
         )
     return collate_fn

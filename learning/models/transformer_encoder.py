@@ -15,6 +15,7 @@ class TransformerEncoder(ObservationEncoder):
         state_dim: int,
         neighbor_feature_dim: int,
         neighbor_slots: int,
+        observation_horizon: int = 1,
         hidden_dim: int = 64,
         num_heads: int = 4,
         num_layers: int = 1,
@@ -24,11 +25,14 @@ class TransformerEncoder(ObservationEncoder):
 
         if state_dim <= 0 or neighbor_feature_dim <= 0 or neighbor_slots < 0:
             raise ValueError("Transformer encoder dimensions must be valid.")
+        if observation_horizon <= 0:
+            raise ValueError("'observation_horizon' must be positive.")
         self.neighbor_feature_dim = int(neighbor_feature_dim)
         self.neighbor_slots = int(neighbor_slots)
-        self.ego_dim = int(state_dim) - self.neighbor_slots * (self.neighbor_feature_dim + 1)
-        if self.ego_dim <= 0:
-            raise ValueError("'state_dim' is too small for the packed observation layout.")
+        self.observation_horizon = int(observation_horizon)
+        self.ego_dim = self._compute_ego_dim(
+            int(state_dim), self.neighbor_slots, self.neighbor_feature_dim, self.observation_horizon
+        )
 
         # no positional encoding to obtain a permutation invariant embedding
 
@@ -63,8 +67,10 @@ class TransformerEncoder(ObservationEncoder):
         neighbor_mask = observation_dict["observation.neighbor_mask"]
         ego_obs = torch.cat([environment_state, state], dim=-1)
         batch_size = ego_obs.shape[0]
-        neighbor_obs = neighbor_state.view(batch_size, -1, self.neighbor_feature_dim)
-        neighbor_mask = neighbor_mask.view(batch_size, -1, 1).bool()
+        neighbor_obs, neighbor_mask = self._split_neighbor_tensors(
+            neighbor_state, neighbor_mask, self.neighbor_feature_dim, self.observation_horizon
+        )
+        neighbor_mask = neighbor_mask.bool()
 
         x = self.input_projection(neighbor_obs)
 
@@ -72,7 +78,7 @@ class TransformerEncoder(ObservationEncoder):
         pool_token = self.pool_token.expand(x.shape[0], -1, -1)
         x = torch.cat([pool_token, x], dim=1)   # [B, N + 1, hidden_dim]
 
-        neighbor_mask = neighbor_mask.squeeze(-1)
+        neighbor_mask = neighbor_mask[:, :, -1]
 
         # converts neighbor_mask to transformer padding mask (true = ignored):
         padding_mask = ~torch.cat(

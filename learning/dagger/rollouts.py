@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping
 
 import numpy as np
@@ -20,20 +21,73 @@ from .utils import evaluation_seed_specs, sample_initial_state
 from systems.initial_state_utils import normalize_initial_state_specs
 
 
+class ObservationHistoryBuffer:
+    """Per-robot rolling buffer with earliest-frame padding during warm-up."""
+
+    def __init__(self, observation_horizon: int, num_robots: int) -> None:
+        if observation_horizon <= 0:
+            raise ValueError("'observation_horizon' must be positive.")
+        if num_robots <= 0:
+            raise ValueError("'num_robots' must be positive.")
+        self.observation_horizon = int(observation_horizon)
+        self._buffers: list[deque[Mapping[str, np.ndarray]]] = [
+            deque(maxlen=self.observation_horizon) for _ in range(num_robots)
+        ]
+
+    def reset(self) -> None:
+        for buffer in self._buffers:
+            buffer.clear()
+
+    def append_and_stack(
+        self,
+        robot_id: int,
+        observation: Mapping[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        if robot_id < 0 or robot_id >= len(self._buffers):
+            raise IndexError(f"robot_id {robot_id} is out of bounds for {len(self._buffers)} robots.")
+        frame = {
+            name: np.asarray(value, dtype=np.float32).reshape(-1)
+            for name, value in observation.items()
+        }
+        buffer = self._buffers[robot_id]
+        buffer.append(frame)
+        frames = list(buffer)
+        if len(frames) < self.observation_horizon:
+            frames = [frames[0]] * (self.observation_horizon - len(frames)) + frames
+        return {
+            name: np.concatenate([frame[name] for frame in frames]).astype(np.float32, copy=False)
+            for name in frame
+        }
+
+
 def build_decentralized_joint_action(
     simulator: DynamicsProtocol,
     policy,
     observation: np.ndarray,
     device: torch.device,
+    observation_horizon: int = 1,
+    history_buffer: ObservationHistoryBuffer | None = None,
 ) -> np.ndarray:
     """Query the shared decentralized policy once for the entire robot fleet."""
     robot_observations = [
         simulator.decentralized_policy_observation(observation, robot_id)
         for robot_id in range(int(simulator.num_robots))
     ]
+    if observation_horizon <= 0:
+        raise ValueError("'observation_horizon' must be positive.")
+    if observation_horizon > 1 and history_buffer is None:
+        raise ValueError("history_buffer is required when observation_horizon is greater than one.")
+    if history_buffer is not None and history_buffer.observation_horizon != observation_horizon:
+        raise ValueError("history_buffer horizon must match observation_horizon.")
+    stacked_robot_observations = [
+        history_buffer.append_and_stack(robot_id, robot_observation)
+        if history_buffer is not None
+        else robot_observation
+        for robot_id, robot_observation in enumerate(robot_observations)
+    ]
     policy_input = {
         name: torch.as_tensor(
-            np.stack([robot_observation[name] for robot_observation in robot_observations]),
+            np.stack([robot_observation[name] for robot_observation in stacked_robot_observations]),
             dtype=torch.float32,
         ).to(device)
         for name in robot_observations[0]
