@@ -401,7 +401,7 @@ class CasadiPlanner(Planner):
 
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         if self.mode == "mpc":
-            x0 = self.sim.invert_obs(obs, validate=False)
+            x0 = self.sim.invert_obs(obs)
             self.opti.set_value(self.x0_param, x0)
             self.opti.set_value(self.goal_param, self.sim.goal_state)
 
@@ -425,7 +425,7 @@ class CasadiPlanner(Planner):
         elif self.mode == "open_loop":
             # Plan once on the first step
             if self.cached_plan is None:
-                x0 = self.sim.invert_obs(obs, validate=False)
+                x0 = self.sim.invert_obs(obs)
                 self.opti.set_value(self.x0_param, x0)
                 self.opti.set_value(self.goal_param, self.sim.goal_state)
 

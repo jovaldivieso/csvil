@@ -66,6 +66,21 @@ def apply_execution_noise(
     return np.clip(action + noise, -simulator.max_action, simulator.max_action)
 
 
+def _detect_collision(simulator: DynamicsProtocol, state: np.ndarray) -> tuple[bool, str]:
+    """Single collision-distance pass; returns (collided, human-readable summary)."""
+    details_fn = getattr(simulator, "collision_details", None)
+    if not callable(details_fn):
+        return bool(simulator.is_collision(state)), "collision details unavailable"
+    details = details_fn(state)
+    if details is None:
+        return False, "collision details unavailable"
+    return True, (
+        f"robots=({details['robot_i']}, {details['robot_j']}), "
+        f"distance={float(details['distance']):.6f}, "
+        f"d_collision={float(details['threshold']):.6f}"
+    )
+
+
 def collect_dagger_rollouts(
     simulator: DynamicsProtocol,
     expert_planner: PlannerProtocol,
@@ -123,10 +138,11 @@ def collect_dagger_rollouts(
             )
             sampled_initial_state = sample_initial_state(simulator, episode_initial_state_seed)
         state = simulator.reset(sampled_initial_state)
-        if simulator.is_collision(state):
+        collided, summary = _detect_collision(simulator, state)
+        if collided:
             print(
                 "Skipping DAgger episode due to colliding initial state "
-                f"(attempt={attempted_episodes})."
+                f"(attempt={attempted_episodes}, {summary})."
             )
             continue
         episode_initial_state = state.copy()

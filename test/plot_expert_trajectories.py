@@ -65,7 +65,7 @@ def default_plot_output_path(system: str, planner_name: str) -> str:
 def pairwise_distance_report(
     simulator: DynamicsProtocol,
     trajectories: list[np.ndarray],
-    d_safe: float,
+    d_collision: float,
 ) -> str | None:
     state_slices = simulator.robot_state_slices
     if len(state_slices) < 2 or len(trajectories) == 0:
@@ -87,15 +87,15 @@ def pairwise_distance_report(
                     dist = float(np.linalg.norm(p_i - p_j))
                     min_distance = min(min_distance, dist)
                     total_checked += 1
-                    if dist < d_safe - tolerance:
+                    if dist < d_collision - tolerance:
                         violation_steps += 1
-                        worst_violation = max(worst_violation, d_safe - dist)
-                    elif abs(dist - d_safe) <= tolerance:
+                        worst_violation = max(worst_violation, d_collision - dist)
+                    elif abs(dist - d_collision) <= tolerance:
                         near_boundary_steps += 1
 
     return (
         "Pairwise distance check: "
-        f"min_dist={min_distance:.4f}, d_safe={d_safe:.4f}, "
+        f"min_dist={min_distance:.4f}, d_collision={d_collision:.4f}, "
         f"violations={violation_steps}/{total_checked}, "
         f"near_boundary={near_boundary_steps}/{total_checked}, "
         f"max_shortfall={worst_violation:.4f}"
@@ -181,8 +181,7 @@ def sample_initial_state(simulator: DynamicsProtocol, seed_spec: int | list[int]
 
     joint_seed_seq = np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec])
     rng = np.random.default_rng(joint_seed_seq)
-    for sub_sim in sub_simulators:
-        sub_sim.randomize_goal_for_reset(rng)
+    simulator.randomize_goal_for_reset(rng)
 
     return simulator.random_initial_state(rng)
 
@@ -222,7 +221,7 @@ def rollout_trajectory(
     planner_failed = False
 
     for _ in range(num_steps):
-        observation = simulator.observe(state, validate=False)
+        observation = simulator.observe(state)
         try:
             action = planner(observation)
         except PlannerSolveError as exc:
@@ -258,7 +257,7 @@ def rollout_trajectory(
         else:
             executed_action = action
 
-        state = simulator.step(state, executed_action, validate=False)
+        state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
         if simulator.should_terminate_rollout(state):
             reached_goal = True
@@ -451,11 +450,11 @@ def run_plotting(
             fps=video_fps,
         )
 
-    d_safe = float(validated_config.get("d_safe", 0.0))
+    d_collision = float(validated_config.get("d_collision", validated_config.get("d_safe", 0.0)))
     distance_report = pairwise_distance_report(
         simulator=simulator,
         trajectories=trajectories,
-        d_safe=d_safe,
+        d_collision=d_collision,
     )
 
     print(f"goal reached in {goals_reached}/{len(trajectories)} successful trajectories")
