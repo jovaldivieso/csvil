@@ -3,6 +3,7 @@
 
 model:
   policy_type: flow  # options: mlp, flow
+  observation_horizon: 1
   prediction_horizon: 16  # number of future action steps to predict
 
   flow:

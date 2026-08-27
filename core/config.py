@@ -111,6 +111,7 @@ class MultiRobotMemberConfig:
 class MultiRobotSystemConfig:
     dt: float = 0.05
     d_safe: float = 0.0
+    d_collision: float = 0.0
     robots: tuple[MultiRobotMemberConfig, ...] = ()
     inter_robot_visibility_radius: float | tuple[float, ...] = float("inf")
     error_tolerance: float = 0.05
@@ -405,6 +406,7 @@ def _allowed_multi_robot_keys() -> set[str]:
     return {
         "dt",
         "d_safe",
+        "d_collision",
         "robots",
         "inter_robot_visibility_radius",
         "error_tolerance",
@@ -724,6 +726,9 @@ def validate_system_config(
         d_safe = _float(raw_config, "d_safe", 0.0)
         if d_safe < 0:
             raise ConfigurationError("'d_safe' must be non-negative.")
+        d_collision = _float(raw_config, "d_collision", d_safe)
+        if d_collision < 0:
+            raise ConfigurationError("'d_collision' must be non-negative.")
 
         error_tolerance = _float(raw_config, "error_tolerance", 0.05)
         if error_tolerance <= 0:
@@ -831,6 +836,7 @@ def validate_system_config(
         fleet_cfg = MultiRobotSystemConfig(
             dt=dt,
             d_safe=d_safe,
+            d_collision=d_collision,
             robots=tuple(members),
             inter_robot_visibility_radius=visibility_radius,
             error_tolerance=error_tolerance,
@@ -842,6 +848,7 @@ def validate_system_config(
         config_out: dict[str, Any] = {
             "dt": fleet_cfg.dt,
             "d_safe": fleet_cfg.d_safe,
+            "d_collision": fleet_cfg.d_collision,
             "error_tolerance": fleet_cfg.error_tolerance,
             "action_noise_seed": action_noise_seed,
             "robots": [

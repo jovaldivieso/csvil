@@ -5,13 +5,25 @@ from typing import Any, Mapping
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.patches import Circle, FancyArrowPatch
 
 
 
 def _heading_sample_stride(num_points: int) -> int:
     """Choose a sparse, readable stride for trajectory heading arrows."""
     return max(1, num_points // 20)
+
+
+def _unicycle_collision_radius(simulator: Any, collision_distance: float | None = None) -> float | None:
+    """Return the plotted point-robot radius for unicycle fleet members."""
+    if type(simulator).__name__ not in {"Unicycle1", "Unicycle2"}:
+        return None
+    if collision_distance is None:
+        collision_distance = getattr(simulator, "d_collision", None)
+    if collision_distance is None:
+        collision_distance = getattr(simulator, "config", {}).get("d_collision", 0.0)
+    radius = float(collision_distance) / 2.0
+    return radius if radius > 0.0 else None
 
 def plot_xy_trajectories(
     simulator,
@@ -137,6 +149,24 @@ def plot_xy_trajectories(
                 label=robot_label,
                 **robot_line_kwargs,
             )
+
+            footprint_radius = _unicycle_collision_radius(
+                robot_simulators[robot_idx],
+                getattr(simulator, "d_collision", None),
+            )
+            if footprint_radius is not None:
+                for x, y in zip(robot_traj[:, 0], robot_traj[:, 1]):
+                    ax.add_patch(
+                        Circle(
+                            (x, y),
+                            footprint_radius,
+                            facecolor=line.get_color(),
+                            edgecolor=line.get_color(),
+                            alpha=0.06,
+                            linewidth=0.5,
+                            zorder=1,
+                        )
+                    )
 
             ax.scatter(
                 robot_traj[0, 0],
@@ -311,6 +341,7 @@ def save_xy_rollout_video(
     line_artists = []
     point_artists = []
     heading_artists = []
+    footprint_artists = []
     heading_length = 0.22
     for item in series:
         line, = ax.plot(
@@ -327,6 +358,27 @@ def save_xy_rollout_video(
         point, = ax.plot([], [], marker="o", color=item["color"], markersize=3)
         line_artists.append(line)
         point_artists.append(point)
+
+        robot_idx = len(footprint_artists) % robot_count
+        footprint_radius = _unicycle_collision_radius(
+            robot_simulators[robot_idx],
+            getattr(simulator, "d_collision", None),
+        )
+        if footprint_radius is not None:
+            footprint = Circle(
+                (0.0, 0.0),
+                footprint_radius,
+                facecolor=item["color"],
+                edgecolor=item["color"],
+                alpha=0.2,
+                linewidth=1.0,
+                zorder=2,
+            )
+            footprint.set_visible(False)
+            ax.add_patch(footprint)
+            footprint_artists.append(footprint)
+        else:
+            footprint_artists.append(None)
 
         theta_series = item.get("theta")
         if theta_series is not None:
@@ -394,19 +446,21 @@ def save_xy_rollout_video(
             if heading is not None:
                 heading.set_positions((0.0, 0.0), (0.0, 0.0))
                 heading.set_visible(False)
-        return [*line_artists, *point_artists, *[h for h in heading_artists if h is not None]]
+        return [*line_artists, *point_artists, *[f for f in footprint_artists if f is not None], *[h for h in heading_artists if h is not None]]
 
     def _update(frame_idx: int):
         phase_idx = int(np.searchsorted(phase_frame_offsets[1:], frame_idx, side="right"))
         phase_start = int(phase_frame_offsets[phase_idx])
         phase_frame_idx = frame_idx - phase_start
 
-        for item, item_phase, line, point, heading in zip(
-            series, series_phases, line_artists, point_artists, heading_artists
+        for item, item_phase, line, point, footprint, heading in zip(
+            series, series_phases, line_artists, point_artists, footprint_artists, heading_artists
         ):
             if item_phase > phase_idx:
                 line.set_data([], [])
                 point.set_data([], [])
+                if footprint is not None:
+                    footprint.set_visible(False)
                 if heading is not None:
                     heading.set_visible(False)
                 continue
@@ -419,6 +473,9 @@ def save_xy_rollout_video(
             y_data = item["y"][:end]
             line.set_data(x_data, y_data)
             point.set_data([x_data[-1]], [y_data[-1]])
+            if footprint is not None:
+                footprint.center = (x_data[-1], y_data[-1])
+                footprint.set_visible(True)
             theta_series = item.get("theta")
             if heading is not None and theta_series is not None:
                 theta = theta_series[end - 1]
@@ -430,7 +487,7 @@ def save_xy_rollout_video(
                     ),
                 )
                 heading.set_visible(True)
-        return [*line_artists, *point_artists, *[h for h in heading_artists if h is not None]]
+        return [*line_artists, *point_artists, *[f for f in footprint_artists if f is not None], *[h for h in heading_artists if h is not None]]
 
     anim = animation.FuncAnimation(
         fig,
