@@ -119,8 +119,7 @@ class MultiRobotSystemConfig:
 
 @dataclass(frozen=True)
 class MLPArchitectureConfig:
-    hidden_dims: tuple[int, ...] = (256, 256, 128)
-
+    hidden_dims: tuple[int, ...]
 
 def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     """Load YAML into a dictionary and fail with context when invalid."""

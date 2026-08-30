@@ -22,10 +22,8 @@ class FlowConfig:
     num_inference_steps: int = 10
 
 
-def load_mlp_hidden_dims(policy_config_path: Path | None) -> tuple[int, ...]:
-    if policy_config_path is None:
-        return DEFAULT_MLP_HIDDEN_DIMS
-
+def load_mlp_hidden_dims(policy_config_path: Path) -> tuple[int, ...]:
+   
     policy_type = load_policy_type(policy_config_path)
     if policy_type == "flow":
         raw_config = load_yaml_config(policy_config_path)
@@ -39,9 +37,8 @@ def load_mlp_hidden_dims(policy_config_path: Path | None) -> tuple[int, ...]:
     return validated.hidden_dims
 
 
-def load_policy_type(policy_config_path: Path | None) -> str:
-    if policy_config_path is None:
-        return "mlp"
+def load_policy_type(policy_config_path: Path) -> str:
+    
     raw_config = load_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
@@ -52,10 +49,8 @@ def load_policy_type(policy_config_path: Path | None) -> str:
     return policy_type_raw.strip().lower()
 
 
-def load_flow_config(policy_config_path: Path | None) -> FlowConfig:
-    if policy_config_path is None:
-        return FlowConfig()
-
+def load_flow_config(policy_config_path: Path) -> FlowConfig:
+    
     raw_config = load_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
@@ -68,9 +63,8 @@ def load_flow_config(policy_config_path: Path | None) -> FlowConfig:
     return FlowConfig(num_inference_steps=int(flow_section.get("num_inference_steps", 10)))
 
 
-def load_prediction_horizon(policy_config_path: Path | None) -> int:
-    if policy_config_path is None:
-        return 1
+def load_prediction_horizon(policy_config_path: Path) -> int:
+    
     raw_config = load_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if isinstance(model_section, Mapping):
@@ -78,10 +72,8 @@ def load_prediction_horizon(policy_config_path: Path | None) -> int:
     return 1
 
 
-def load_encoder_config(policy_config_path: Path | None) -> EncoderConfig:
-    if policy_config_path is None:
-        return EncoderConfig(encoder_type=DEFAULT_ENCODER_TYPE, kwargs={})
-
+def load_encoder_config(policy_config_path: Path) -> EncoderConfig:
+    
     raw_config = load_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
