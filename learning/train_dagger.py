@@ -688,11 +688,11 @@ def main() -> None:
    
     # saves configs before training (in case of failure):
     save_experiment_configs(
-            args=args,
-            experiment_dir=experiment_dir,
-            repo_id=repo_id,
-            dataset_root=dataset_root,
-        )
+        args=args,
+        experiment_dir=experiment_dir,
+        repo_id=repo_id,
+        dataset_root=dataset_root,
+    )
     
     cfg = DaggerConfig(
         system=args.system,
