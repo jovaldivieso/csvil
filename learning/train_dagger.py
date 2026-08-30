@@ -211,11 +211,7 @@ class DaggerTrainer:
         ).to(self.device).eval()
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.cfg.learning_rate)
         
-        # does not allow to override existing directory:
-        try:
-            self.cfg.checkpoint_dir.mkdir(parents=True, exist_ok=False)
-        except FileExistsError:
-            raise FileExistsError(f"checkpoint directory {self.cfg.checkpoint_dir} already exists.")
+        self.cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         # Print rich startup diagnostic logs
         print("Starting DAgger training")
@@ -687,6 +683,17 @@ def main() -> None:
         args.checkpoint_dir or default_checkpoint_dir_for_system(args.system)
     ) / args.experiment_name  
     
+    # allows to override existing experiment directory:
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+   
+    # saves configs before training (in case of failure):
+    save_experiment_configs(
+            args=args,
+            experiment_dir=experiment_dir,
+            repo_id=repo_id,
+            dataset_root=dataset_root,
+        )
+    
     cfg = DaggerConfig(
         system=args.system,
         experiment_config=validated,
@@ -723,13 +730,5 @@ def main() -> None:
     )
     DaggerTrainer(cfg).run()
     
-    save_experiment_configs(
-        args=args,
-        experiment_dir=experiment_dir,
-        repo_id=repo_id,
-        dataset_root=dataset_root,
-    )
-
-
 if __name__ == "__main__":
     main()
