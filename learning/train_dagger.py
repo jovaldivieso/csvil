@@ -5,6 +5,7 @@ import copy
 import gc
 import os
 import sys
+import csv
 import time
 import yaml
 import shutil
@@ -307,7 +308,7 @@ class DaggerTrainer:
         self.policy.eval()
         return running_loss / float(num_steps)
 
-    def train_on_aggregate(self, label: str, training_round: int, target_epochs: float) -> None:
+    def train_on_aggregate(self, label: str, training_round: int, target_epochs: float) -> float:
         assert self.simulator is not None
         assert self.policy is not None
         assert self.optimizer is not None
@@ -342,6 +343,7 @@ class DaggerTrainer:
         )
         mean_loss = self.train_policy_steps(loader, steps)
         print(f"  mean_step_loss={mean_loss:.6f}")
+        return mean_loss
 
     def evaluate_current_policy(self, label: str) -> DaggerEvalMetrics | None:
         assert self.policy is not None
@@ -379,6 +381,42 @@ class DaggerTrainer:
         if metrics is not None:
             print_rollout_metrics(label, "eval", metrics)
         return metrics
+    
+    def save_results(
+        self,
+        train_loss: float,
+        eval_metrics: DaggerEvalMetrics | None,
+        aggregation_metrics: DaggerEvalMetrics | None = None,
+    ) -> None:
+        """
+        saves training and evaluation results to results.csv
+        """
+
+        path_to_results = self.cfg.checkpoint_dir / "results.csv"
+
+        results = {
+            "train_loss": train_loss,
+            "aggregation_success_rate": (
+                aggregation_metrics.success_rate
+                if aggregation_metrics is not None
+                else None
+            ),
+            "eval_success_rate": (
+                eval_metrics.success_rate
+                if eval_metrics is not None
+                else None
+            ),
+            "eval_mean_steps": (
+                eval_metrics.mean_steps
+                if eval_metrics is not None
+                else None
+            ),
+        }
+
+        with path_to_results.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=results.keys())
+            writer.writeheader()
+            writer.writerow(results)
 
     def save_checkpoints(self, training_round: int) -> None:
         assert self.policy is not None
@@ -549,7 +587,7 @@ class DaggerTrainer:
             print(f"aggregation_goal_source: {aggregation_goal_source}")
 
             success_threshold = self.cfg.randomize_goal_with_eval_success
-            self.train_on_aggregate(
+            train_loss = self.train_on_aggregate(
                 f"DAgger round {display}/{self.cfg.dagger_iterations}: retrain"
                 if self.cfg.start_with_aggregation
                 else f"DAgger refinement {display}/{self.cfg.dagger_iterations}: retrain",
@@ -581,6 +619,13 @@ class DaggerTrainer:
                 eval_metrics.success_rate if eval_metrics is not None else None
             )
             self.save_checkpoints(training_round=index)
+            
+        # saves final results:
+        self.save_results(
+            train_loss=train_loss,
+            eval_metrics=eval_metrics,
+            aggregation_metrics=metrics,
+        )
 
 
 def parse_args() -> argparse.Namespace:
