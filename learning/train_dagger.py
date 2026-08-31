@@ -15,7 +15,6 @@ from typing import Any, Mapping
 
 import numpy as np
 import torch
-from torch import nn
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -311,7 +310,6 @@ class DaggerTrainer:
         if self.policy is None or self.optimizer is None or self.device is None:
             raise RuntimeError("Trainer is not set up.")
         self.policy.train()
-        loss_fn = nn.MSELoss()
         running_loss = 0.0
         iterator = iter(dataloader)
         progress = tqdm(
@@ -339,10 +337,7 @@ class DaggerTrainer:
                 observations = observations.to(self.device)
             actions = actions.to(self.device)
             self.optimizer.zero_grad()
-            try:
-                loss = self.policy.compute_loss(observations, actions)
-            except NotImplementedError:
-                loss = loss_fn(self.policy(observations), actions)
+            loss = self.policy.compute_loss(observations, actions)
             loss.backward()
             self.optimizer.step()
 

@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from learning.models.encoder import ObservationEncoder
 from learning.models.policy import ActionPolicy
@@ -53,7 +54,8 @@ class MLPPolicy(ActionPolicy):
 
         self.network = nn.Sequential(*layers)
 
-    def forward(
+    @torch.no_grad()
+    def select_action(
         self,
         observation_dict: Mapping[str, torch.Tensor],
     ) -> torch.Tensor:
@@ -61,12 +63,15 @@ class MLPPolicy(ActionPolicy):
         out = self.network(model_input)
         return out.view(out.shape[0], self.prediction_horizon, self.action_dim)
 
-    @torch.no_grad()
-    def select_action(
+    def compute_loss(
         self,
         observation_dict: Mapping[str, torch.Tensor],
+        actions: torch.Tensor,
     ) -> torch.Tensor:
-        return self.forward(observation_dict)
+        model_input = self.obs_encoder(observation_dict)
+        out = self.network(model_input)
+        out = out.view(out.shape[0], self.prediction_horizon, self.action_dim)
+        return F.mse_loss(out, actions)
 
     def reset(self) -> None:
         """Keeps parity with other policy APIs that expose a reset hook."""
