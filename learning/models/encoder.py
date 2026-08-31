@@ -107,6 +107,7 @@ class EncoderFactory:
                 state_dim=state_dim,
                 neighbor_feature_dim=neighbor_feature_dim,
                 neighbor_slots=neighbor_slots,
+                observation_horizon=observation_horizon,
                 **kwargs,
             )
 
