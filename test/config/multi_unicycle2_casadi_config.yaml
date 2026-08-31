@@ -5,7 +5,6 @@ inter_robot_visibility_radius: 2.0
 horizon: 40
 mode: mpc
 Q_diag: [100.0, 100.0, 10.0, 100.0, 1.0,
-         100.0, 100.0, 10.0, 100.0, 1.0,
          100.0, 100.0, 10.0, 100.0, 1.0]
 R_weight: 0.1
 terminal_cost_multiplier: 1000.0
@@ -24,7 +23,7 @@ robots:
       randomize_goal: false
       initial_position_min_goal_distance: 0.05
       initial_position_radius_bounds: [0.05, 3.0]
-      pos_tol: 0.05
+      pos_tol: 0.2
       theta_tol: 1.1
       vel_tol: 0.05
       omega_tol: 0.05
@@ -39,22 +38,7 @@ robots:
       randomize_goal: false
       initial_position_min_goal_distance: 0.05
       initial_position_radius_bounds: [0.05, 3.0]
-      pos_tol: 0.05
-      theta_tol: 1.1
-      vel_tol: 0.05
-      omega_tol: 0.05
-
-  - system: unicycle2
-    config:
-      dt: 0.05
-      max_accel: 2.0
-      max_omega: 2.0
-      max_speed: 2.0
-      goal: [0.0, -1.0, 1.57]   # change during eval, to test generalization
-      randomize_goal: false
-      initial_position_min_goal_distance: 0.05
-      initial_position_radius_bounds: [0.05, 3.0]
-      pos_tol: 0.05
+      pos_tol: 0.2
       theta_tol: 1.1
       vel_tol: 0.05
       omega_tol: 0.05

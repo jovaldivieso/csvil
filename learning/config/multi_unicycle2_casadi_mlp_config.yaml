@@ -1,8 +1,8 @@
 # MLP architecture config for learning/train_dagger.py
 model:
   policy_type: mlp              # options: mlp, flow
-  observation_horizon: 3        # number of past observation steps to consider
-  prediction_horizon: 15        # number of future action steps to predict, set to 1 for single-step prediction
+  observation_horizon: 2        # number of past observation steps to consider
+  prediction_horizon: 1         # number of future action steps to predict, set to 1 for single-step prediction
   hidden_dims: [256, 256, 256]  # Trajectory prediction network hidden layers
 
   encoder: deepset              # Set to transformer, GNN, etc
@@ -23,13 +23,13 @@ model:
 # Optional DAgger defaults. Explicit command-line arguments override these values.
 training:
   dagger_iterations: 5
-  trajectories_per_iteration: [34]
+  trajectories_per_iteration: [50]
   steps_per_trajectory: 200
-  target_epochs_per_round: [10]
+  target_epochs_per_round: [50, 40, 30, 20, 10]
   action_noise_std: 0.03
   expert_mix_beta_start: 0.5
   expert_mix_beta_decay_rate: 0.25
   expert_mix_decay_after_eval_success: 0.0
   eval_episodes: 100
-  randomize_goal_after_eval_success: 0.0
-  initial_states: [[[-2.0, -1.0, 1.57, 0.0, 0.0], [2.0, -1.0, 1.57, 0.0, 0.0], [0.0, 2.0, 1.57, 0.0, 0.0]]]
+  config_goal_after_eval_success: 80
+  initial_states: [[[-2.0, 0.0, 1.57, 0.0, 0.0], [2.0, 0.0, 1.57, 0.0, 0.0]]]

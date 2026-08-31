@@ -358,7 +358,7 @@ class MultiRobotSimulator(DynamicsSimulator):
             "threshold": self.d_collision,
         }
 
-    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
         split_action = self._split_action(action, validate=validate)
         next_parts = [
@@ -367,7 +367,7 @@ class MultiRobotSimulator(DynamicsSimulator):
         ]
         return np.concatenate(next_parts)
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
         split_action = self._split_action(action, validate=validate)
         next_parts = [
@@ -379,7 +379,7 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.time += 1
         return next_state
 
-    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray:
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
         positions = []
         for robot_idx, robot_state in enumerate(split_state):
@@ -434,7 +434,7 @@ class MultiRobotSimulator(DynamicsSimulator):
         observation = np.concatenate(observations)
         return self.validate_observation(observation) if validate else observation
 
-    def is_done(self, state: np.ndarray, validate: bool = False) -> bool:
+    def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
         split_state = self._split_state(state, validate=validate)
         return all(sim.is_done(robot_state) for sim, robot_state in zip(self.simulators, split_state))
 
@@ -538,11 +538,11 @@ class MultiRobotSimulator(DynamicsSimulator):
                 return np.concatenate(states)
 
         raise RuntimeError(
-            "Unable to sample a multi-robot initial state that satisfies d_safe. "
+            "Unable to sample a multi-robot initial state that satisfies d_collision. "
             f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_collision={self.d_collision}."
         )
 
-    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
         split_obs = self._split_observation(obs, validate=validate)
         states = []
         for robot_id, (sim, robot_obs) in enumerate(zip(self.simulators, split_obs)):

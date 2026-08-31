@@ -73,15 +73,15 @@ class DynamicsProtocol(Protocol):
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray: ...
 
-    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray: ...
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray: ...
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
-    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray: ...
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray: ...
 
-    def is_done(self, state: np.ndarray, validate: bool = False) -> bool: ...
+    def is_done(self, state: np.ndarray, validate: bool = True) -> bool: ...
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any: ...
 
@@ -103,7 +103,7 @@ class DynamicsProtocol(Protocol):
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None: ...
 
-    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray: ...
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
     @property
     def goal_state(self) -> np.ndarray: ...
@@ -276,17 +276,17 @@ class DynamicsSimulator(ABC):
         return as_vector(observation, VectorSpec(name="observation", size=int(self.obs_dim)))
 
     @abstractmethod
-    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         """Return the next state without changing simulator state or time."""
         pass
 
     @abstractmethod
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = False) -> np.ndarray:
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         """Get next state"""
         pass
 
     @abstractmethod
-    def observe(self, state: np.ndarray, validate: bool = False) -> np.ndarray:
+    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
         """Get observation"""
         pass
 
@@ -334,7 +334,7 @@ class DynamicsSimulator(ABC):
         pass
 
     @abstractmethod
-    def invert_obs(self, obs: np.ndarray, validate: bool = False) -> np.ndarray:
+    def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
         """Reconstruct absolute state from observation (inverse of observe())"""
         pass
 

@@ -104,16 +104,15 @@ def format_sample_for_policy(
         earliest = history[0]
         history = [earliest] * (observation_horizon - len(history)) + history
 
-    observation_fields = (
-        "observation.environment_state",
-        "observation.state",
-        "observation.neighbor_state",
-        "observation.neighbor_mask",
-    )
+    history_stacked_fields = ("observation.neighbor_state", "observation.neighbor_mask")
+    latest_frame_fields = ("observation.environment_state", "observation.state")
     observation = {
         name: torch.cat([_tensor_field(frame, name) for frame in history], dim=0)
-        for name in observation_fields
+        for name in history_stacked_fields
     }
+    observation.update(
+        {name: _tensor_field(history[-1], name) for name in latest_frame_fields}
+    )
     
     # Build action sequence with proper horizon handling
     subsequent_samples = list(subsequent_samples or [])

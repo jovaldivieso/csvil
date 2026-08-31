@@ -115,7 +115,7 @@ def resolve_checkpoint_observation_dimensions(
             "and observation horizon must match."
         )
     expected_state_dim = (
-        ego_base_dim * observation_horizon
+        ego_base_dim
         + checkpoint_neighbor_slots * neighbor_feature_dim
         + checkpoint_neighbor_slots * observation_horizon
     )

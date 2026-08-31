@@ -30,7 +30,7 @@ from learning.config_loaders import (
     load_encoder_config, load_flow_config, load_mlp_hidden_dims,
     load_observation_horizon, load_policy_type, load_prediction_horizon,
 )
-from learning.data_utils import collate_batch_for_policy, create_collate_fn_with_dataset
+from learning.data_utils import create_collate_fn_with_dataset
 from learning.dagger import (
     DaggerEvalMetrics, ExpertMixBetaController, build_decentralized_joint_action,
     collect_dagger_rollouts, evaluate_policy_rollouts, print_rollout_metrics,
@@ -99,7 +99,7 @@ class DaggerConfig:
     seed: int
     max_train_steps: int | None
     initial_states: list[np.ndarray] | None = None
-    randomize_goal_after_eval_success: float | None = None
+    config_goal_after_eval_success: float | None = None
 
     def __post_init__(self) -> None:
         if self.dagger_iterations < 0:
@@ -142,8 +142,8 @@ class DaggerConfig:
             raise ValueError("Batch size and learning rate must be positive.")
         if self.max_train_steps is not None and self.max_train_steps <= 0:
             raise ValueError("Max train steps must be positive.")
-        if self.randomize_goal_after_eval_success is not None and not 0.0 <= self.randomize_goal_after_eval_success <= 100.0:
-            raise ValueError("'randomize_goal_after_eval_success' must be between 0 and 100 percent.")
+        if self.config_goal_after_eval_success is not None and not 0.0 <= self.config_goal_after_eval_success <= 100.0:
+            raise ValueError("'config_goal_after_eval_success' must be between 0 and 100 percent.")
         if not self.dataset_root.exists() and not self.start_with_aggregation:
             raise FileNotFoundError(self.dataset_root)
 
@@ -158,7 +158,7 @@ class DaggerTrainer:
         self.optimizer: torch.optim.Optimizer | None = None
         self.action_noise_seed = 0
         self.initial_state_seed = 0
-        self.dynamic_goal_randomization = False
+        self.use_config_goal = False
         self.obs_feature_names: list[str] = []
         self.state_dim = self.action_dim = self.neighbor_slots = 0
         self.neighbor_feature_dim: int | None = None
@@ -229,7 +229,7 @@ class DaggerTrainer:
             stacked_neighbor_mask_dim = 0
 
         self.state_dim = (
-            base_ego_dim * self.observation_horizon
+            base_ego_dim
             + self.neighbor_slots * self.neighbor_feature_dim
             + stacked_neighbor_mask_dim
         )
@@ -392,20 +392,27 @@ class DaggerTrainer:
         mean_loss = self.train_policy_steps(loader, steps)
         print(f"  mean_step_loss={mean_loss:.6f}")
 
+    def goal_curriculum_config(self) -> dict[str, Any]:
+        """Randomize goals until the eval milestone unlocks the harder config goal."""
+        assert self.seeded_config is not None
+        config = copy.deepcopy(dict(self.seeded_config))
+        if self.cfg.config_goal_after_eval_success is None or self.use_config_goal:
+            return config
+        if "robots" in config:
+            for robot_entry in config["robots"]:
+                if isinstance(robot_entry.get("config"), dict):
+                    robot_entry["config"]["randomize_goal"] = True
+        else:
+            config["randomize_goal"] = True
+        return config
+
     def evaluate_current_policy(self, label: str) -> DaggerEvalMetrics | None:
         assert self.policy is not None
         assert self.device is not None
         assert self.seeded_config is not None
         if self.cfg.eval_episodes == 0:
             return None
-        eval_config = copy.deepcopy(dict(self.seeded_config))
-        if self.dynamic_goal_randomization:
-            if "robots" in eval_config:
-                for robot_entry in eval_config["robots"]:
-                    if isinstance(robot_entry.get("config"), dict):
-                        robot_entry["config"]["randomize_goal"] = True
-            else:
-                eval_config["randomize_goal"] = True
+        eval_config = self.goal_curriculum_config()
         simulator = DynamicsFactory.create(
             system_name=self.cfg.system,
             config=eval_config,
@@ -523,14 +530,7 @@ class DaggerTrainer:
                 display = index
                 print(f"\n=== DAgger refinement {display}/{self.cfg.dagger_iterations}: aggregate ===")
 
-            collection_config = copy.deepcopy(dict(self.seeded_config))
-            if self.dynamic_goal_randomization:
-                if "robots" in collection_config:
-                    for robot_entry in collection_config["robots"]:
-                        if isinstance(robot_entry.get("config"), dict):
-                            robot_entry["config"]["randomize_goal"] = True
-                else:
-                    collection_config["randomize_goal"] = True
+            collection_config = self.goal_curriculum_config()
 
             if "robots" in collection_config:
                 aggregation_goals_randomized = any(
@@ -608,7 +608,8 @@ class DaggerTrainer:
                     action_noise_std=self.cfg.action_noise_std,
                     action_noise_seed=self.action_noise_seed,
                     initial_state_seed=self.initial_state_seed,
-                    initial_states=self.cfg.initial_states,
+                    # Explicit hard-case starts are only meaningful paired with the config goal.
+                    initial_states=self.cfg.initial_states if self.use_config_goal else None,
                     expert_mixing_beta=round_beta,
                     policy_action_fn=action_fn,
                     policy_reset_fn=reset_policy_state,
@@ -628,7 +629,7 @@ class DaggerTrainer:
             )
             print(f"aggregation_goal_source: {aggregation_goal_source}")
 
-            success_threshold = self.cfg.randomize_goal_after_eval_success
+            success_threshold = self.cfg.config_goal_after_eval_success
             self.train_on_aggregate(
                 f"DAgger round {display}/{self.cfg.dagger_iterations}: retrain"
                 if self.cfg.start_with_aggregation
@@ -646,15 +647,15 @@ class DaggerTrainer:
                 eval_success_pct = eval_metrics.success_rate * 100.0
                 if (
                     success_threshold is not None
-                    and eval_success_pct > success_threshold
+                    and eval_success_pct >= success_threshold
                 ):
-                    if not self.dynamic_goal_randomization:
+                    if not self.use_config_goal:
                         print(
                             "Curriculum milestone reached during evaluation: "
-                            f"success rate {eval_success_pct:.1f}% > threshold {success_threshold}%. "
-                            "Enabling goal randomization."
+                            f"success rate {eval_success_pct:.1f}% >= threshold {success_threshold}%. "
+                            "Switching from random goals to the config goal."
                         )
-                    self.dynamic_goal_randomization = True
+                    self.use_config_goal = True
 
             beta.update_after_evaluation(
                 eval_metrics.success_rate if eval_metrics is not None else None
@@ -674,10 +675,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps-per-trajectory", type=int)
     p.add_argument("--action-noise-std", type=float)
     p.add_argument(
-        "--randomize-goal-after-eval-success",
+        "--config-goal-after-eval-success",
         type=float,
         default=None,
-        help="enable goal randomization when evaluation reaches this success percentage",
+        help="start with random goals and switch to the config goal when evaluation reaches this success percentage",
     )
     p.add_argument(
         "--initial-states",
@@ -783,7 +784,7 @@ def main() -> None:
         checkpoint_dir=args.checkpoint_dir or default_checkpoint_dir_for_system(args.system),
         seed=int(option("seed", 99)),
         max_train_steps=option("max_train_steps", None),
-        randomize_goal_after_eval_success=option("randomize_goal_after_eval_success", None),
+        config_goal_after_eval_success=option("config_goal_after_eval_success", None),
     )
     DaggerTrainer(cfg).run()
 
