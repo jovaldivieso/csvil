@@ -471,7 +471,7 @@ class DaggerTrainer:
                     and bool(robot_entry["config"].get("randomize_goal", False))
                     for robot_entry in collection_config["robots"]
                 )
-            else:-
+            else:
                 aggregation_goals_randomized = bool(
                     collection_config.get("randomize_goal", False)
                 )
