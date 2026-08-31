@@ -70,10 +70,8 @@ def load_dagger_training_config(policy_config_path: Path | None) -> dict[str, ob
     return config
 
 
-def load_mlp_hidden_dims(policy_config_path: Path | None) -> tuple[int, ...]:
-    if policy_config_path is None:
-        return DEFAULT_MLP_HIDDEN_DIMS
-
+def load_mlp_hidden_dims(policy_config_path: Path) -> tuple[int, ...]:
+   
     policy_type = load_policy_type(policy_config_path)
     if policy_type == "flow":
         raw_config = _cached_yaml_config(policy_config_path)
@@ -176,6 +174,16 @@ def load_encoder_config(policy_config_path: Path | None) -> EncoderConfig:
             "num_heads": int(raw_kwargs.get("num_heads", 4)),
             "num_layers": int(raw_kwargs.get("num_layers", 1)),
             "dropout": float(raw_kwargs.get("dropout", 0.1)),
+        }
+        return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
+
+    if normalized_type == "gnn":
+        raw_kwargs = model_section.get("gnn", {})
+        if not isinstance(raw_kwargs, Mapping):
+            raise ValueError("Policy config 'model.gnn' must be a mapping.")
+        kwargs = {
+            "hidden_dim": int(raw_kwargs.get("hidden_dim", 64)),
+            "num_layers": int(raw_kwargs.get("num_layers", 1)),
         }
         return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
 
