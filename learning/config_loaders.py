@@ -115,6 +115,16 @@ def load_encoder_config(policy_config_path: Path | None) -> EncoderConfig:
         }
         return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
 
+    if normalized_type == "gnn":
+        raw_kwargs = model_section.get("gnn", {})
+        if not isinstance(raw_kwargs, Mapping):
+            raise ValueError("Policy config 'model.gnn' must be a mapping.")
+        kwargs = {
+            "hidden_dim": int(raw_kwargs.get("hidden_dim", 64)),
+            "num_layers": int(raw_kwargs.get("num_layers", 1)),
+        }
+        return EncoderConfig(encoder_type=normalized_type, kwargs=kwargs)
+
     return EncoderConfig(encoder_type=normalized_type, kwargs={})
 
 

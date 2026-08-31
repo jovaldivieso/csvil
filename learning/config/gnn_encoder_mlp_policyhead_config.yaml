@@ -1,0 +1,9 @@
+model:
+  policy_type: mlp
+  hidden_dims: [256, 256, 128]
+
+  encoder: gnn
+
+  gnn:
+    hidden_dim: 64
+    num_layers: 1

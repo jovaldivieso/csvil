@@ -50,7 +50,18 @@ class EncoderFactory:
                 neighbor_slots=neighbor_slots,
                 **kwargs,
             )
+
+        if normalized_type == "gnn":
+            from learning.models.gnn_encoder import GNNEncoder
+
+            return GNNEncoder(
+                state_dim=state_dim,
+                neighbor_feature_dim=neighbor_feature_dim,
+                neighbor_slots=neighbor_slots,
+                **kwargs,
+            )
+
         raise ValueError(
             f"Unknown observation encoder '{encoder_type}'. "
-            f"Supported observation encoders: '{DEFAULT_ENCODER_TYPE}', 'transformer'."
+            f"Supported observation encoders: '{DEFAULT_ENCODER_TYPE}', 'transformer', 'gnn'."
         )
