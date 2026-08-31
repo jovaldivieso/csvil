@@ -5,7 +5,10 @@ import copy
 import gc
 import os
 import sys
+import csv
 import time
+import yaml
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -208,6 +211,7 @@ class DaggerTrainer:
             **flow,
         ).to(self.device).eval()
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.cfg.learning_rate)
+        
         self.cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         # Print rich startup diagnostic logs
@@ -304,7 +308,7 @@ class DaggerTrainer:
         self.policy.eval()
         return running_loss / float(num_steps)
 
-    def train_on_aggregate(self, label: str, training_round: int, target_epochs: float) -> None:
+    def train_on_aggregate(self, label: str, training_round: int, target_epochs: float) -> float:
         assert self.simulator is not None
         assert self.policy is not None
         assert self.optimizer is not None
@@ -339,6 +343,7 @@ class DaggerTrainer:
         )
         mean_loss = self.train_policy_steps(loader, steps)
         print(f"  mean_step_loss={mean_loss:.6f}")
+        return mean_loss
 
     def evaluate_current_policy(self, label: str) -> DaggerEvalMetrics | None:
         assert self.policy is not None
@@ -376,6 +381,42 @@ class DaggerTrainer:
         if metrics is not None:
             print_rollout_metrics(label, "eval", metrics)
         return metrics
+    
+    def save_results(
+        self,
+        train_loss: float,
+        eval_metrics: DaggerEvalMetrics | None,
+        aggregation_metrics: DaggerEvalMetrics | None = None,
+    ) -> None:
+        """
+        saves training and evaluation results to results.csv
+        """
+
+        path_to_results = self.cfg.checkpoint_dir / "results.csv"
+
+        results = {
+            "train_loss": train_loss,
+            "aggregation_success_rate": (
+                aggregation_metrics.success_rate
+                if aggregation_metrics is not None
+                else None
+            ),
+            "eval_success_rate": (
+                eval_metrics.success_rate
+                if eval_metrics is not None
+                else None
+            ),
+            "eval_mean_steps": (
+                eval_metrics.mean_steps
+                if eval_metrics is not None
+                else None
+            ),
+        }
+
+        with path_to_results.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=results.keys())
+            writer.writeheader()
+            writer.writerow(results)
 
     def save_checkpoints(self, training_round: int) -> None:
         assert self.policy is not None
@@ -546,7 +587,7 @@ class DaggerTrainer:
             print(f"aggregation_goal_source: {aggregation_goal_source}")
 
             success_threshold = self.cfg.randomize_goal_with_eval_success
-            self.train_on_aggregate(
+            train_loss = self.train_on_aggregate(
                 f"DAgger round {display}/{self.cfg.dagger_iterations}: retrain"
                 if self.cfg.start_with_aggregation
                 else f"DAgger refinement {display}/{self.cfg.dagger_iterations}: retrain",
@@ -578,10 +619,18 @@ class DaggerTrainer:
                 eval_metrics.success_rate if eval_metrics is not None else None
             )
             self.save_checkpoints(training_round=index)
+            
+        # saves final results:
+        self.save_results(
+            train_loss=train_loss,
+            eval_metrics=eval_metrics,
+            aggregation_metrics=metrics,
+        )
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train a policy with DAgger")
+    p.add_argument("--experiment-name", required=True)
     p.add_argument("--system", type=str.lower, choices=DynamicsFactory.names(), required=True)
     p.add_argument("--expert-config", required=True)
     p.add_argument("--repo-id")
@@ -620,13 +669,37 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval-action-noise-std", type=float, default=0.0)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--learning-rate", type=float, default=1e-3)
-    p.add_argument("--policy-config", type=Path)
+    p.add_argument(
+        "--policy-config",
+        type=Path,
+        default=Path(PROJECT_ROOT) / "learning/config/default_policy_config.yaml",
+    )
     p.add_argument("--checkpoint-dir", type=Path)
     p.add_argument("--seed", type=int, default=99)
     p.add_argument("--max-train-steps", type=int)
     return p.parse_args()
 
+def save_experiment_configs(args: argparse.Namespace, experiment_dir: Path,  repo_id: str, dataset_root: Path) -> None:
+    """
+    saves experiment configs and run arguments to experiment directory
+    """
+    
+    shutil.copy2(args.expert_config, experiment_dir / "expert_config.yaml")
+    shutil.copy2(args.policy_config, experiment_dir / "policy_config.yaml")
 
+    # saves resolved run arguments:
+    run_args = vars(args).copy()
+    run_args["repo_id"] = repo_id
+    run_args["dataset_root"] = dataset_root
+    run_args["checkpoint_dir"] = experiment_dir
+    run_args = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in run_args.items()
+    }
+
+    with (experiment_dir / "run_args.yaml").open("w") as f:
+        yaml.safe_dump(run_args, f, sort_keys=False)
+        
 def main() -> None:
     args = parse_args()
     validated = load_and_validate_system_config(args.system, args.expert_config)
@@ -649,6 +722,23 @@ def main() -> None:
         args.target_epochs_per_round,
         args.dagger_iterations,
     )
+    
+    # path to experiment directory where configs and checkpoints will be saved:
+    experiment_dir = (
+        args.checkpoint_dir or default_checkpoint_dir_for_system(args.system)
+    ) / args.experiment_name  
+    
+    # allows to override existing experiment directory:
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+   
+    # saves configs before training (in case of failure):
+    save_experiment_configs(
+        args=args,
+        experiment_dir=experiment_dir,
+        repo_id=repo_id,
+        dataset_root=dataset_root,
+    )
+    
     cfg = DaggerConfig(
         system=args.system,
         experiment_config=validated,
@@ -678,13 +768,12 @@ def main() -> None:
         encoder_config=load_encoder_config(args.policy_config),
         policy_type=load_policy_type(args.policy_config),
         flow_config=load_flow_config(args.policy_config),
-        checkpoint_dir=args.checkpoint_dir or default_checkpoint_dir_for_system(args.system),
+        checkpoint_dir=experiment_dir,
         seed=args.seed,
         max_train_steps=args.max_train_steps,
         randomize_goal_with_eval_success=args.randomize_goal_with_eval_success,
     )
     DaggerTrainer(cfg).run()
-
-
+    
 if __name__ == "__main__":
     main()
