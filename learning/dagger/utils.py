@@ -43,6 +43,37 @@ def with_seeded_initial_state_config(
     return seeded_config
 
 
+def apply_config_overrides(
+    config: Mapping[str, object],
+    overrides: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge flat key/value overrides into a config dict, per-robot for multi_robot fleets."""
+    merged_config = dict(config)
+    if not overrides:
+        return merged_config
+    if "robots" not in merged_config:
+        merged_config.update(overrides)
+        return merged_config
+    robots_raw = merged_config.get("robots", [])
+    if isinstance(robots_raw, Mapping):
+        shared_config = robots_raw.get("config")
+        if isinstance(shared_config, Mapping):
+            robot_cfg = dict(shared_config)
+            robot_cfg.update(overrides)
+            merged_config["robots"] = {**robots_raw, "config": robot_cfg}
+        return merged_config
+    merged_robots: list[object] = []
+    for robot_entry in robots_raw:
+        if not isinstance(robot_entry, Mapping) or not isinstance(robot_entry.get("config"), Mapping):
+            merged_robots.append(robot_entry)
+            continue
+        robot_cfg = dict(robot_entry["config"])
+        robot_cfg.update(overrides)
+        merged_robots.append({**robot_entry, "config": robot_cfg})
+    merged_config["robots"] = merged_robots
+    return merged_config
+
+
 def resolve_initial_state_seed(config: Mapping[str, object], fallback_seed: int) -> int:
     return int(config.get("initial_state_seed", fallback_seed))
 

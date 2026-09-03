@@ -30,8 +30,12 @@ DEFAULT_DAGGER_TRAINING_CONFIG: dict[str, object] = {
     "learning_rate": 1e-3,
     "seed": 99,
     "max_train_steps": None,
-    "config_goal_after_eval_success": None,
+    "training_curriculum": None,
     "initial_states": None,
+    "goal_states": None,
+    "initial_position_min_goal_distance": None,
+    "initial_position_radius_bounds": None,
+    "tolerance_overrides": None,
 }
 
 

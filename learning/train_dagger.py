@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import gc
 import os
@@ -34,7 +35,7 @@ from learning.config_loaders import (
 )
 from learning.data_utils import create_collate_fn_with_dataset
 from learning.dagger import (
-    DaggerEvalMetrics, ExpertMixBetaController, build_decentralized_joint_action,
+    DaggerEvalMetrics, ExpertMixBetaController, apply_config_overrides, build_decentralized_joint_action,
     collect_dagger_rollouts, evaluate_policy_rollouts, print_rollout_metrics,
     ObservationHistoryBuffer, resolve_initial_state_seed, resolve_round_steps, set_seed,
     with_seeded_initial_state_config,
@@ -42,7 +43,7 @@ from learning.dagger import (
 from learning.models.encoder import EncoderFactory
 from learning.models.policy import ActionPolicy, PolicyFactory
 from systems.dynamics import DynamicsProtocol
-from systems.initial_state_utils import parse_initial_states_argument
+from systems.initial_state_utils import parse_goal_states_argument, parse_initial_states_argument
 from systems.seed_utils import default_action_noise_seed_for_config
 
 
@@ -101,7 +102,11 @@ class DaggerConfig:
     seed: int
     max_train_steps: int | None
     initial_states: list[np.ndarray] | None = None
-    config_goal_after_eval_success: float | None = None
+    goal_states: list[np.ndarray] | None = None
+    training_curriculum: list[str] | None = None
+    initial_position_min_goal_distance: float | None = None
+    initial_position_radius_bounds: list[float] | None = None
+    tolerance_overrides: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         if self.dagger_iterations < 0:
@@ -144,8 +149,29 @@ class DaggerConfig:
             raise ValueError("Batch size and learning rate must be positive.")
         if self.max_train_steps is not None and self.max_train_steps <= 0:
             raise ValueError("Max train steps must be positive.")
-        if self.config_goal_after_eval_success is not None and not 0.0 <= self.config_goal_after_eval_success <= 100.0:
-            raise ValueError("'config_goal_after_eval_success' must be between 0 and 100 percent.")
+        if self.training_curriculum is not None:
+            if len(self.training_curriculum) != self.dagger_iterations:
+                raise ValueError(
+                    "'training_curriculum' must contain exactly one entry per DAgger round "
+                    f"({self.dagger_iterations}), got {len(self.training_curriculum)}."
+                )
+            if any(mode not in {"random", "config"} for mode in self.training_curriculum):
+                raise ValueError("'training_curriculum' entries must be 'random' or 'config'.")
+        if self.initial_position_min_goal_distance is not None and self.initial_position_min_goal_distance < 0:
+            raise ValueError("'initial_position_min_goal_distance' must be non-negative.")
+        if self.initial_position_radius_bounds is not None:
+            if len(self.initial_position_radius_bounds) != 2:
+                raise ValueError("'initial_position_radius_bounds' must contain exactly two values.")
+            if self.initial_position_radius_bounds[0] < 0:
+                raise ValueError("'initial_position_radius_bounds[0]' must be non-negative.")
+            if self.initial_position_radius_bounds[1] <= self.initial_position_radius_bounds[0]:
+                raise ValueError(
+                    "'initial_position_radius_bounds[1]' must exceed 'initial_position_radius_bounds[0]'."
+                )
+        if self.tolerance_overrides is not None and any(
+            value <= 0 for value in self.tolerance_overrides.values()
+        ):
+            raise ValueError("'tolerance_overrides' values must be positive.")
         if not self.dataset_root.exists() and not self.start_with_aggregation:
             raise FileNotFoundError(self.dataset_root)
 
@@ -160,7 +186,6 @@ class DaggerTrainer:
         self.optimizer: torch.optim.Optimizer | None = None
         self.action_noise_seed = 0
         self.initial_state_seed = 0
-        self.use_config_goal = False
         self.obs_feature_names: list[str] = []
         self.state_dim = self.action_dim = self.neighbor_slots = 0
         self.neighbor_feature_dim: int | None = None
@@ -171,7 +196,8 @@ class DaggerTrainer:
         trajectories: list[int],
         epochs: list[float],
         rounds: int,
-    ) -> tuple[list[int], list[float]]:
+        training_curriculum: list[str] | None = None,
+    ) -> tuple[list[int], list[float], list[str] | None]:
         def expand(values: list[Any], name: str) -> list[Any]:
             if len(values) == 1:
                 return values if rounds == 0 else values * rounds
@@ -183,6 +209,7 @@ class DaggerTrainer:
         return (
             expand(trajectories, "trajectories-per-iteration"),
             expand(epochs, "target-epochs-per-round"),
+            expand(training_curriculum, "training-curriculum") if training_curriculum is not None else None,
         )
 
     def setup(self) -> None:
@@ -207,6 +234,9 @@ class DaggerTrainer:
         self.initial_state_seed = resolve_initial_state_seed(self.seeded_config, self.cfg.seed)
         self.observation_horizon = self.cfg.observation_horizon
         features = self.simulator.get_dataset_features()
+        if self.cfg.dataset_root.exists():
+            existing_meta = LeRobotDatasetMetadata(repo_id=self.cfg.repo_id, root=self.cfg.dataset_root)
+            _validate_resumable_dataset_schema(existing_meta.features, features)
         self.obs_feature_names = [n for n in features if n.startswith("observation.")]
         base_ego_dim = sum(
             int(features[name]["shape"][0])
@@ -392,19 +422,16 @@ class DaggerTrainer:
         print(f"  mean_step_loss={mean_loss:.6f}")
         return mean_loss
 
-    def goal_curriculum_config(self) -> dict[str, Any]:
-        """Randomize goals until the eval milestone unlocks the harder config goal."""
-        assert self.seeded_config is not None
-        config = copy.deepcopy(dict(self.seeded_config))
-        if self.cfg.config_goal_after_eval_success is None or self.use_config_goal:
-            return config
-        if "robots" in config:
-            for robot_entry in config["robots"]:
-                if isinstance(robot_entry.get("config"), dict):
-                    robot_entry["config"]["randomize_goal"] = True
-        else:
-            config["randomize_goal"] = True
-        return config
+    def _apply_runtime_config_overrides(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Inject the training config's solver/dynamics tuning knobs (sampling bounds, tolerances), if set."""
+        overrides: dict[str, Any] = {}
+        if self.cfg.initial_position_min_goal_distance is not None:
+            overrides["initial_position_min_goal_distance"] = self.cfg.initial_position_min_goal_distance
+        if self.cfg.initial_position_radius_bounds is not None:
+            overrides["initial_position_radius_bounds"] = list(self.cfg.initial_position_radius_bounds)
+        if self.cfg.tolerance_overrides:
+            overrides.update(self.cfg.tolerance_overrides)
+        return apply_config_overrides(config, overrides)
 
     def evaluate_current_policy(self, label: str) -> DaggerEvalMetrics | None:
         assert self.policy is not None
@@ -412,7 +439,9 @@ class DaggerTrainer:
         assert self.seeded_config is not None
         if self.cfg.eval_episodes == 0:
             return None
-        eval_config = self.goal_curriculum_config()
+        eval_config = self._apply_runtime_config_overrides(
+            copy.deepcopy(dict(self.seeded_config))
+        )
         simulator = DynamicsFactory.create(
             system_name=self.cfg.system,
             config=eval_config,
@@ -445,6 +474,8 @@ class DaggerTrainer:
             reset_fn=reset_policy_state,
             action_noise_std=self.cfg.eval_action_noise_std,
             action_noise_seed=self.action_noise_seed,
+            initial_states=self.cfg.initial_states,
+            goal_states=self.cfg.goal_states,
         )
         if metrics is not None:
             print_rollout_metrics(label, "eval", metrics)
@@ -566,20 +597,21 @@ class DaggerTrainer:
                 display = index
                 print(f"\n=== DAgger refinement {display}/{self.cfg.dagger_iterations}: aggregate ===")
 
-            collection_config = self.goal_curriculum_config()
-
-            if "robots" in collection_config:
-                aggregation_goals_randomized = any(
-                    isinstance(robot_entry.get("config"), dict)
-                    and bool(robot_entry["config"].get("randomize_goal", False))
-                    for robot_entry in collection_config["robots"]
+            mode = (
+                self.cfg.training_curriculum[schedule]
+                if self.cfg.training_curriculum is not None
+                else "random"
+            )
+            round_initial_states = self.cfg.initial_states if mode == "config" else None
+            round_goal_states = self.cfg.goal_states if mode == "config" else None
+            collection_config = self._apply_runtime_config_overrides(
+                copy.deepcopy(dict(self.seeded_config))
+            )
+            if mode == "random":
+                collection_config = apply_config_overrides(
+                    collection_config, {"randomize_goal": True}
                 )
-            else:
-                aggregation_goals_randomized = bool(
-                    collection_config.get("randomize_goal", False)
-                )
-            aggregation_goal_source = "random" if aggregation_goals_randomized else "config"
-            print(f"Aggregation goal source: {aggregation_goal_source}")
+            print(f"Aggregation goal source: {mode}")
 
             simulator = DynamicsFactory.create(
                 system_name=self.cfg.system,
@@ -644,8 +676,8 @@ class DaggerTrainer:
                     action_noise_std=self.cfg.action_noise_std,
                     action_noise_seed=self.action_noise_seed,
                     initial_state_seed=self.initial_state_seed,
-                    # Explicit hard-case starts are only meaningful paired with the config goal.
-                    initial_states=self.cfg.initial_states if self.use_config_goal else None,
+                    initial_states=round_initial_states,
+                    goal_states=round_goal_states,
                     expert_mixing_beta=round_beta,
                     policy_action_fn=action_fn,
                     policy_reset_fn=reset_policy_state,
@@ -663,9 +695,8 @@ class DaggerTrainer:
                 prefix="aggregation",
                 metrics=metrics,
             )
-            print(f"aggregation_goal_source: {aggregation_goal_source}")
+            print(f"aggregation_goal_source: {mode}")
 
-            success_threshold = self.cfg.config_goal_after_eval_success
             train_loss = self.train_on_aggregate(
                 f"DAgger round {display}/{self.cfg.dagger_iterations}: retrain"
                 if self.cfg.start_with_aggregation
@@ -678,20 +709,6 @@ class DaggerTrainer:
                 if self.cfg.start_with_aggregation
                 else f"Refinement {display} evaluation"
             )
-
-            if eval_metrics is not None:
-                eval_success_pct = eval_metrics.success_rate * 100.0
-                if (
-                    success_threshold is not None
-                    and eval_success_pct >= success_threshold
-                ):
-                    if not self.use_config_goal:
-                        print(
-                            "Curriculum milestone reached during evaluation: "
-                            f"success rate {eval_success_pct:.1f}% >= threshold {success_threshold}%. "
-                            "Switching from random goals to the config goal."
-                        )
-                    self.use_config_goal = True
 
             beta.update_after_evaluation(
                 eval_metrics.success_rate if eval_metrics is not None else None
@@ -719,10 +736,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps-per-trajectory", type=int)
     p.add_argument("--action-noise-std", type=float)
     p.add_argument(
-        "--config-goal-after-eval-success",
-        type=float,
+        "--training-curriculum",
+        nargs="+",
+        type=str,
         default=None,
-        help="start with random goals and switch to the config goal when evaluation reaches this success percentage",
+        help=(
+            "one 'random' or 'config' entry per DAgger round, selecting whether that round's "
+            "rollouts use random goals/states or the explicit --initial-states/--goal-states lists."
+        ),
     )
     p.add_argument(
         "--initial-states",
@@ -733,6 +754,41 @@ def parse_args() -> argparse.Namespace:
             "'[[...], [...]]' for multiple global states, or "
             "'[[[robot1...], [robot2...]], ...]' for multi-robot rollouts. "
             "When exhausted, collection falls back to simulator RNG sampling."
+        ),
+    )
+    p.add_argument(
+        "--goal-states",
+        type=str,
+        default=None,
+        help=(
+            "explicit goal state specs, paired index-for-index with --initial-states. "
+            "Examples: '[x, y, ...]' for one rollout, '[[...], [...]]' for multiple global goals, or "
+            "'[[[robot1...], [robot2...]], ...]' for multi-robot rollouts. "
+            "When either list is exhausted, remaining rollouts in that round fall back to random."
+        ),
+    )
+    p.add_argument(
+        "--initial-position-min-goal-distance",
+        type=float,
+        default=None,
+        help="minimum distance from the goal when sampling random initial positions (random-curriculum rounds and eval fallback).",
+    )
+    p.add_argument(
+        "--initial-position-radius-bounds",
+        nargs=2,
+        type=float,
+        default=None,
+        help="[min, max] radius from the goal when sampling random initial positions (random-curriculum rounds and eval fallback).",
+    )
+    p.add_argument(
+        "--tolerance-overrides",
+        type=str,
+        default=None,
+        help=(
+            "per-experiment override for the expert config's convergence tolerances, as a Python-literal "
+            "dict matching the target system's tolerance keys, e.g. "
+            "'{\"pos_tol\": 0.2, \"theta_tol\": 1.1, \"vel_tol\": 0.05, \"omega_tol\": 0.05}' for unicycle2, "
+            "or '{\"error_tolerance\": 0.05}' for single_integrator/double_integrator/unicycle1."
         ),
     )
     p.add_argument("--expert-mix-beta-start", type=float)
@@ -747,7 +803,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval-action-noise-std", type=float)
     p.add_argument("--batch-size", type=int)
     p.add_argument("--learning-rate", type=float)
-    p.add_argument("--policy-config", type=Path)
+    p.add_argument(
+        "--policy-config",
+        type=Path,
+        default=Path(PROJECT_ROOT) / "learning/config/default_policy_config.yaml",
+    )
     p.add_argument("--checkpoint-dir", type=Path)
     p.add_argument("--seed", type=int)
     p.add_argument("--max-train-steps", type=int)
@@ -796,6 +856,26 @@ def main() -> None:
         if isinstance(initial_states_config, str)
         else initial_states_config
     )
+    goal_states_config = option("goal_states", None)
+    goal_states = (
+        parse_goal_states_argument(goal_states_config)
+        if isinstance(goal_states_config, str)
+        else goal_states_config
+    )
+    training_curriculum_config = option("training_curriculum", None)
+    tolerance_overrides_config = option("tolerance_overrides", None)
+    if isinstance(tolerance_overrides_config, str):
+        try:
+            tolerance_overrides = ast.literal_eval(tolerance_overrides_config)
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(
+                "Unable to parse --tolerance-overrides. Use Python-literal dict syntax like "
+                "'{\"pos_tol\": 0.2, \"theta_tol\": 1.1}'."
+            ) from exc
+        if not isinstance(tolerance_overrides, dict):
+            raise ValueError("--tolerance-overrides must evaluate to a dict.")
+    else:
+        tolerance_overrides = tolerance_overrides_config
     if (args.repo_id is None) != (args.dataset_root is None):
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both.")
     fresh = args.repo_id is None
@@ -810,10 +890,11 @@ def main() -> None:
         if fresh
         else Path(args.dataset_root)
     )
-    trajectories, epochs = DaggerTrainer.schedules(
+    trajectories, epochs, training_curriculum = DaggerTrainer.schedules(
         trajectories_per_iteration,
         target_epochs_per_round,
         dagger_iterations,
+        training_curriculum_config,
     )
     
     # path to experiment directory where configs and checkpoints will be saved:
@@ -844,6 +925,11 @@ def main() -> None:
         steps_per_trajectory=int(option("steps_per_trajectory", 150)),
         action_noise_std=float(option("action_noise_std", 0.0)),
         initial_states=initial_states,
+        goal_states=goal_states,
+        training_curriculum=training_curriculum,
+        initial_position_min_goal_distance=option("initial_position_min_goal_distance", None),
+        initial_position_radius_bounds=option("initial_position_radius_bounds", None),
+        tolerance_overrides=tolerance_overrides,
         expert_mix_beta_start=float(option("expert_mix_beta_start", 0.8)),
         expert_mix_beta_end=float(option("expert_mix_beta_end", 0.0)),
         expert_mix_beta_decay_rate=option("expert_mix_beta_decay_rate", None),
@@ -865,7 +951,6 @@ def main() -> None:
         checkpoint_dir=experiment_dir,
         seed=int(option("seed", 99)),
         max_train_steps=option("max_train_steps", None),
-        config_goal_after_eval_success=option("config_goal_after_eval_success", None),
     )
     DaggerTrainer(cfg).run()
     

@@ -26,14 +26,33 @@ model:
 
 # Optional DAgger defaults. Explicit command-line arguments override these values.
 training:
-  dagger_iterations: 5
-  trajectories_per_iteration: [50]
+  dagger_iterations: 4
+  trajectories_per_iteration: [200, 150, 100, 50]
   steps_per_trajectory: 200
-  target_epochs_per_round: [50, 40, 30, 20, 10]
+  target_epochs_per_round: [50, 40, 30, 20]
   action_noise_std: 0.03
   expert_mix_beta_start: 0.5
   expert_mix_beta_decay_rate: 0.25
   expert_mix_decay_after_eval_success: 0.5
+  # adaptive_beta_recovery: true
   eval_episodes: 100
-  config_goal_after_eval_success: 80
-  initial_states: [[[-2.0, 0.0, 1.57, 0.0, 0.0], [2.0, 0.0, 1.57, 0.0, 0.0]]]
+  initial_position_min_goal_distance: 0.05
+  initial_position_radius_bounds: [0.05, 3.0]
+  tolerance_overrides:
+    pos_tol: 0.2
+    theta_tol: 1.1
+    vel_tol: 0.1
+    omega_tol: 0.1
+  training_curriculum: [random, config, random, config]
+  initial_states:
+    - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
+    - [[0.0, -2.0, 1.57, 0.0, 0.0], [0.0, 2.0, -1.57, 0.0, 0.0]]
+    - [[-1.5, -1.5, 0.79, 0.0, 0.0], [1.5, 1.5, -2.36, 0.0, 0.0]]
+    - [[-1.5, 1.5, -0.79, 0.0, 0.0], [1.5, -1.5, 2.36, 0.0, 0.0]]
+    - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
+  goal_states:
+    - [[2.0, 0.0, 0.0], [-2.0, 0.0, 3.14]]
+    - [[0.0, 2.0, 1.57], [0.0, -2.0, -1.57]]
+    - [[1.5, 1.5, 0.79], [-1.5, -1.5, -2.36]]
+    - [[1.5, -1.5, -0.79], [-1.5, 1.5, 2.36]]
+    - [[0.5, 1.5, 1.57], [-0.5, -1.5, -1.57]]

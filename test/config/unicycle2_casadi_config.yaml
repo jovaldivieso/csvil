@@ -6,11 +6,3 @@ Q_diag: [100.0, 100.0, 10.0, 100.0, 1.0]
 R_weight: 0.1
 terminal_cost_multiplier: 10000.0
 collision_slack_penalty_weight: 10000.0
-goal: [0.0, 0.0, 0.0]
-randomize_goal: false
-initial_position_min_goal_distance: 0.05
-initial_position_radius_bounds: [0.05, 1.0]
-pos_tol: 0.05
-theta_tol: 0.05
-vel_tol: 0.05
-omega_tol: 0.05

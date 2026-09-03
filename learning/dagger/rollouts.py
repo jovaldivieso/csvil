@@ -18,7 +18,7 @@ from systems.seed_utils import (
 
 from .metrics import DaggerEvalMetrics
 from .utils import evaluation_seed_specs, sample_initial_state
-from systems.initial_state_utils import normalize_initial_state_specs
+from systems.initial_state_utils import normalize_goal_state_specs, normalize_initial_state_specs
 
 
 class ObservationHistoryBuffer:
@@ -157,6 +157,7 @@ def collect_dagger_rollouts(
     policy_reset_fn: Callable[[], None] | None = None,
     frame_builder: Callable[[np.ndarray, np.ndarray], Mapping[str, object] | list[Mapping[str, object]] | tuple[Mapping[str, object], ...]] | None = None,
     initial_states: list[np.ndarray] | None = None,
+    goal_states: list[np.ndarray] | None = None,
 ) -> DaggerEvalMetrics:
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
     if policy_action_fn is None and expert_mixing_beta < 1.0:
@@ -191,8 +192,17 @@ def collect_dagger_rollouts(
                 f"Collected {successful_episodes}/{trajectories_per_iteration} episodes."
             )
         provided_initial_states = normalize_initial_state_specs(simulator, initial_states)
-        if attempted_episodes <= len(provided_initial_states):
+        provided_goal_states = normalize_goal_state_specs(simulator, goal_states)
+        have_goal_states = bool(goal_states)
+        usable_count = (
+            min(len(provided_initial_states), len(provided_goal_states))
+            if have_goal_states
+            else len(provided_initial_states)
+        )
+        if attempted_episodes <= usable_count:
             sampled_initial_state = provided_initial_states[attempted_episodes - 1]
+            if have_goal_states:
+                simulator.set_goal(provided_goal_states[attempted_episodes - 1])
         else:
             episode_initial_state_seed = initial_state_seed_for_rollout(
                 initial_state_seed,
@@ -345,13 +355,10 @@ def collect_dagger_rollouts(
                     return True, recovered_state, candidate_index + completion_steps
                 last_candidate_index = candidate_index
                 last_recovery_summary = recovery_summary
-                # Earlier states only add distance to the goal, so this failure never recovers.
-                if recovery_summary == STEP_LIMIT_RECOVERY_FAILURE:
-                    print(
-                        "Expert closed-loop completion failed from "
-                        f"s_{candidate_index} ({recovery_summary}); stopping backtracking."
-                    )
-                    break
+                # A step-limit failure only means this candidate ran out of budget, not that
+                # the episode is unrecoverable: an earlier state trades distance-to-goal for
+                # more remaining steps, which can be what a tight multi-robot encounter needs.
+                # So keep backtracking down to s_0 regardless of failure reason.
                 print(
                     "Expert closed-loop completion failed from "
                     f"s_{candidate_index} ({recovery_summary}); trying an earlier state."
@@ -511,16 +518,31 @@ def evaluate_policy_rollouts(
     reset_fn: Callable[[], None] | None = None,
     action_noise_std: float = 0.0,
     action_noise_seed: int = 0,
+    initial_states: list[np.ndarray] | None = None,
+    goal_states: list[np.ndarray] | None = None,
 ) -> DaggerEvalMetrics | None:
     if num_episodes == 0:
         return None
     if num_steps <= 0:
         raise ValueError("'num_steps' must be positive.")
     seed_specs = evaluation_seed_specs(simulator, num_episodes, seed_start)
+    provided_initial_states = normalize_initial_state_specs(simulator, initial_states)
+    provided_goal_states = normalize_goal_state_specs(simulator, goal_states)
+    have_goal_states = bool(goal_states)
+    usable_count = (
+        min(len(provided_initial_states), len(provided_goal_states))
+        if have_goal_states
+        else len(provided_initial_states)
+    )
     successes = 0
     steps_taken: list[int] = []
-    for seed_spec in seed_specs:
-        initial_state = sample_initial_state(simulator, seed_spec)
+    for episode_idx, seed_spec in enumerate(seed_specs):
+        if episode_idx < usable_count:
+            initial_state = provided_initial_states[episode_idx]
+            if have_goal_states:
+                simulator.set_goal(provided_goal_states[episode_idx])
+        else:
+            initial_state = sample_initial_state(simulator, seed_spec)
         reached_goal, rollout_steps = rollout_policy_with_action_fn(
             simulator=simulator,
             initial_state=initial_state,

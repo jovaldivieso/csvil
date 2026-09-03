@@ -510,6 +510,23 @@ class MultiRobotSimulator(DynamicsSimulator):
             f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_collision={self.d_collision}."
         )
 
+    def set_goal(self, goal: np.ndarray) -> None:
+        goal_array = np.asarray(goal, dtype=float)
+        goal_dims = [int(sim.goal_dim) for sim in self.simulators]
+        expected_shape = (sum(goal_dims),)
+        if goal_array.shape != expected_shape:
+            raise ValueError(
+                f"Goal shape mismatch: expected {expected_shape}, got {goal_array.shape}."
+            )
+        offset = 0
+        for sim, goal_dim in zip(self.simulators, goal_dims):
+            sim.set_goal(goal_array[offset:offset + goal_dim])
+            offset += goal_dim
+
+    @property
+    def goal_dim(self) -> int:
+        return sum(int(sim.goal_dim) for sim in self.simulators)
+
     def reset_random(self) -> np.ndarray:
         return self.reset(
             self._sample_safe_initial_state(rng=self._sampling_rng, randomize_goals=True)

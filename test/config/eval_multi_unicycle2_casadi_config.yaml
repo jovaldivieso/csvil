@@ -15,62 +15,10 @@ initial_state_seed: 0
 action_noise_seed: 10
 
 robots:
-  - system: unicycle2
-    config:
-      dt: 0.05
-      max_accel: 2.0
-      max_omega: 2.0
-      max_speed: 2.0
-      goal: [0.0, -2.0, 1.57]   # change during eval, to test generalization
-      randomize_goal: false
-      initial_position_min_goal_distance: 0.05
-      initial_position_radius_bounds: [0.05, 3.0]
-      pos_tol: 0.2
-      theta_tol: 1.1
-      vel_tol: 0.05
-      omega_tol: 0.05
-
-  - system: unicycle2
-    config:
-      dt: 0.05
-      max_accel: 2.0
-      max_omega: 2.0
-      max_speed: 2.0
-      goal: [0.0, 2.0, -1.57]   # change during eval, to test generalization
-      randomize_goal: false
-      initial_position_min_goal_distance: 0.05
-      initial_position_radius_bounds: [0.05, 3.0]
-      pos_tol: 0.2
-      theta_tol: 1.1
-      vel_tol: 0.05
-      omega_tol: 0.05
-
-  - system: unicycle2
-    config:
-      dt: 0.05
-      max_accel: 2.0
-      max_omega: 2.0
-      max_speed: 2.0
-      goal: [2.0, 0.0, 3.14]   # change during eval, to test generalization
-      randomize_goal: false
-      initial_position_min_goal_distance: 0.05
-      initial_position_radius_bounds: [0.05, 3.0]
-      pos_tol: 0.2
-      theta_tol: 1.1
-      vel_tol: 0.05
-      omega_tol: 0.05
-
-  - system: unicycle2
-    config:
-      dt: 0.05
-      max_accel: 2.0
-      max_omega: 2.0
-      max_speed: 2.0
-      goal: [-2.0, 0.0, 0.0]   # change during eval, to test generalization
-      randomize_goal: false
-      initial_position_min_goal_distance: 0.05
-      initial_position_radius_bounds: [0.05, 3.0]
-      pos_tol: 0.2
-      theta_tol: 1.1
-      vel_tol: 0.05
-      omega_tol: 0.05
+  num_robots: 4
+  system: unicycle2
+  config:
+    dt: 0.05
+    max_accel: 2.0
+    max_omega: 2.0
+    max_speed: 2.0

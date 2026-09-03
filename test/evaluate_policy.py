@@ -14,7 +14,9 @@ sys.path.insert(0, PROJECT_ROOT)
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
 from systems.initial_state_utils import (
+    normalize_goal_state_specs,
     normalize_initial_state_specs,
+    parse_goal_states_argument,
     parse_initial_states_argument,
 )
 from systems.seed_utils import (
@@ -23,7 +25,7 @@ from systems.seed_utils import (
     default_seed_argument_for_simulator,
 )
 from planning.casadi_planner import PlannerSolveError
-from learning.dagger import ObservationHistoryBuffer, build_decentralized_joint_action
+from learning.dagger import ObservationHistoryBuffer, apply_config_overrides, build_decentralized_joint_action
 from learning.models.encoder import (
     DEFAULT_ENCODER_TYPE,
     EncoderFactory,
@@ -99,10 +101,14 @@ def resolve_checkpoint_observation_dimensions(
         int(features[name]["shape"][0])
         for name in ("observation.environment_state", "observation.state")
     )
-    expected_neighbor_feature_dim = runtime_neighbor_feature_dim * observation_horizon
     checkpoint_neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots))
     neighbor_feature_dim = int(
-        checkpoint.get("neighbor_feature_dim", expected_neighbor_feature_dim)
+        checkpoint.get("neighbor_feature_dim", runtime_neighbor_feature_dim * observation_horizon)
+    )
+    expected_neighbor_feature_dim = (
+        runtime_neighbor_feature_dim * observation_horizon
+        if neighbor_slots > 0
+        else neighbor_feature_dim
     )
     if checkpoint_neighbor_slots < 0:
         raise ValueError("Checkpoint 'neighbor_slots' must be non-negative.")
@@ -213,14 +219,12 @@ def normalize_seed_specs(
     return [int(seed) for seed in seeds]  # type: ignore[arg-type]
 
 
-def sample_initial_state(
+def _rng_for_seed_spec(
     simulator: DynamicsProtocol,
     seed_spec: int | list[int],
-) -> np.ndarray:
+) -> np.random.Generator:
     if isinstance(seed_spec, int):
-        rng = np.random.default_rng(seed_spec)
-        simulator.randomize_goal_for_reset(rng)
-        return simulator.random_initial_state(rng)
+        return np.random.default_rng(seed_spec)
 
     sub_simulators = simulator.simulators
     if len(seed_spec) != len(sub_simulators):
@@ -230,9 +234,15 @@ def sample_initial_state(
         )
 
     joint_seed_seq = np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec])
-    rng = np.random.default_rng(joint_seed_seq)
-    simulator.randomize_goal_for_reset(rng)
+    return np.random.default_rng(joint_seed_seq)
 
+
+def sample_initial_state(
+    simulator: DynamicsProtocol,
+    seed_spec: int | list[int],
+) -> np.ndarray:
+    rng = _rng_for_seed_spec(simulator, seed_spec)
+    simulator.randomize_goal_for_reset(rng)
     return simulator.random_initial_state(rng)
 
 
@@ -484,9 +494,13 @@ def run_evaluation(
     num_steps: int = 150,
     seeds: list[int] | list[list[int]] | None = None,
     initial_states: Any | None = None,
+    goal_states: Any | None = None,
+    tolerance_overrides: Mapping[str, float] | None = None,
     action_noise_std: float = 0.0,
     output_path: str | None = None,
 ):
+    if tolerance_overrides:
+        config = apply_config_overrides(config, tolerance_overrides)
     validated_config = validate_system_config(system_name=system, raw_config=config)
     action_noise_seed = default_action_noise_seed_for_config(validated_config)
 
@@ -495,6 +509,10 @@ def run_evaluation(
     initial_state_specs = normalize_initial_state_specs(
         simulator=simulator,
         initial_states=initial_states,
+    )
+    goal_state_specs = normalize_goal_state_specs(
+        simulator=simulator,
+        goal_states=goal_states,
     )
 
     if not os.path.exists(model_dir):
@@ -534,7 +552,7 @@ def run_evaluation(
     per_seed_metrics: list[dict[str, Any]] = []
 
     if len(initial_state_specs) > 0:
-        total_rollouts = max(len(seed_specs), len(initial_state_specs))
+        total_rollouts = max(len(seed_specs), len(initial_state_specs), len(goal_state_specs))
         print(
             "evaluating "
             f"{total_rollouts} trajectories "
@@ -569,30 +587,39 @@ def run_evaluation(
 
             rollout_plan.append((initial_state_spec, initial_state_source, torch_seed, seed_value, noise_seed_spec))
     else:
-        print(f"evaluating {len(seed_specs)} seeded trajectories")
+        total_rollouts = max(len(seed_specs), len(goal_state_specs))
+        print(f"evaluating {total_rollouts} trajectories ({len(seed_specs)} seeded + goal/RNG fallback)")
         rollout_plan = []
-        for seed_spec in seed_specs:
-            torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
-            rollout_plan.append(
-                (
-                    seed_spec,
-                    "seeded",
-                    torch_seed,
-                    seed_spec,
-                    seed_spec,
-                )
-            )
+        for rollout_idx in range(total_rollouts):
+            if rollout_idx < len(seed_specs):
+                seed_spec = seed_specs[rollout_idx]
+                torch_seed = int(seed_spec) if isinstance(seed_spec, int) else int(seed_spec[0])
+                rollout_plan.append((seed_spec, "seeded", torch_seed, seed_spec, seed_spec))
+            else:
+                rollout_plan.append((None, "rng_fallback", rollout_idx + 1, None, None))
 
     for rollout_idx, (rollout_spec, initial_state_source, torch_seed, seed_value, noise_seed_spec) in enumerate(rollout_plan, start=1):
         torch.manual_seed(torch_seed)
 
+        explicit_goal = rollout_idx - 1 < len(goal_state_specs)
+        if explicit_goal:
+            simulator.set_goal(goal_state_specs[rollout_idx - 1])
+
         if initial_state_source == "seeded":
             seed_spec = rollout_spec
-            initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
+            if explicit_goal:
+                initial_state = simulator.random_initial_state(_rng_for_seed_spec(simulator, seed_spec))
+            else:
+                initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
         elif initial_state_source == "provided":
+            if not explicit_goal:
+                simulator.randomize_goal_for_reset(np.random.default_rng(torch_seed))
             initial_state = simulator.validate_state(rollout_spec).copy()
         else:
-            initial_state = simulator.reset_random().copy()
+            if explicit_goal:
+                initial_state = simulator.reset_random_state_only().copy()
+            else:
+                initial_state = simulator.reset_random().copy()
 
         if noise_seed_spec is not None:
             rollout_noise_seed = action_noise_seed_for_rollout(
@@ -845,6 +872,28 @@ def main():
         ),
     )
     parser.add_argument(
+        "--goal-states",
+        type=str,
+        default=None,
+        help=(
+            "explicit goal state specs, independently indexed from --initial-states. "
+            "Examples: '[x, y, ...]' for one rollout, '[[...], [...]]' for multiple global goals, or "
+            "'[[[robot1...], [robot2...]], ...]' for multi-robot rollouts. "
+            "When exhausted, evaluation falls back to simulator RNG sampling."
+        ),
+    )
+    parser.add_argument(
+        "--tolerance-overrides",
+        type=str,
+        default=None,
+        help=(
+            "per-run override for the expert config's convergence tolerances, as a Python-literal "
+            "dict matching the target system's tolerance keys, e.g. "
+            "'{\"pos_tol\": 0.2, \"theta_tol\": 1.1, \"vel_tol\": 0.05, \"omega_tol\": 0.05}' for unicycle2, "
+            "or '{\"error_tolerance\": 0.05}' for single_integrator/double_integrator/unicycle1."
+        ),
+    )
+    parser.add_argument(
         "--action-noise-std",
         type=float,
         default=0.0,
@@ -863,6 +912,15 @@ def main():
     args = parser.parse_args()
     config = load_and_validate_system_config(system_name=args.system, config_path=args.config)
 
+    tolerance_overrides = None
+    if args.tolerance_overrides:
+        try:
+            tolerance_overrides = ast.literal_eval(args.tolerance_overrides)
+        except (SyntaxError, ValueError) as exc:
+            parser.error(f"Unable to parse --tolerance-overrides: {exc}")
+        if not isinstance(tolerance_overrides, dict):
+            parser.error("--tolerance-overrides must evaluate to a dict.")
+
     run_evaluation(
         system=args.system,
         policy_type=args.policy_type,
@@ -871,6 +929,8 @@ def main():
         num_steps=args.num_steps,
         seeds=parse_seed_argument(args.seeds),
         initial_states=parse_initial_states_argument(args.initial_states),
+        goal_states=parse_goal_states_argument(args.goal_states),
+        tolerance_overrides=tolerance_overrides,
         action_noise_std=args.action_noise_std,
         output_path=args.output_path,
     )

@@ -103,10 +103,15 @@ class DynamicsProtocol(Protocol):
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None: ...
 
+    def set_goal(self, goal: np.ndarray) -> None: ...
+
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
     @property
     def goal_state(self) -> np.ndarray: ...
+
+    @property
+    def goal_dim(self) -> int: ...
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray: ...
 
@@ -174,6 +179,19 @@ class DynamicsSimulator(ABC):
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         del rng
+
+    def set_goal(self, goal: np.ndarray) -> None:
+        goal_array = np.asarray(goal, dtype=float)
+        if goal_array.shape != self.goal.shape:
+            raise ValueError(
+                f"Goal shape mismatch: expected {self.goal.shape}, got {goal_array.shape}."
+            )
+        self.goal = goal_array
+
+    @property
+    def goal_dim(self) -> int:
+        """Dimensionality of the goal vector accepted by ``set_goal`` (may differ from ``goal_state``)."""
+        return int(self.goal.shape[0])
 
     def reset_rollout_termination(self) -> None:
         self._rollout_done_counter = 0
@@ -307,6 +325,10 @@ class DynamicsSimulator(ABC):
     def reset_random(self) -> np.ndarray:
         """Return a random, dynamically valid initial state"""
         self.randomize_goal_for_reset(self._sampling_rng)
+        return self.reset(self.random_initial_state(self._sampling_rng))
+
+    def reset_random_state_only(self) -> np.ndarray:
+        """Like reset_random(), but keeps the current goal unchanged."""
         return self.reset(self.random_initial_state(self._sampling_rng))
 
     @abstractmethod

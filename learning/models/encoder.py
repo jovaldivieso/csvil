@@ -52,6 +52,11 @@ class ObservationEncoder(nn.Module, ABC):
         so encoders stay agnostic to the exact runtime fleet size.
         """
         batch_size = raw_neighbors.shape[0]
+        if raw_neighbors.shape[1] == 0 and raw_mask.shape[1] == 0:
+            return (
+                raw_neighbors.new_empty((batch_size, 0, neighbor_feature_dim)),
+                raw_mask.new_empty((batch_size, 0, observation_horizon)),
+            )
         per_frame_dim = neighbor_feature_dim // observation_horizon
         try:
             neighbor_obs = raw_neighbors.view(batch_size, observation_horizon, -1, per_frame_dim)

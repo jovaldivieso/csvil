@@ -429,6 +429,38 @@ def _allowed_multi_robot_entry_keys() -> set[str]:
     return {"system", "start", "config"}
 
 
+def _allowed_homogeneous_fleet_shorthand_keys() -> set[str]:
+    return {"num_robots", "system", "config"}
+
+
+def _expand_homogeneous_fleet_shorthand(robots_raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Expand the {num_robots, system, config} homogeneous-fleet shorthand into a full robots list.
+
+    Lets a config express N identical robots once instead of repeating the same
+    {system, config} entry N times; heterogeneous fleets (mixed systems, per-robot
+    'start') still use the long list-of-entries form.
+    """
+    _require_only_known_keys(
+        robots_raw,
+        _allowed_homogeneous_fleet_shorthand_keys(),
+        context="'robots' homogeneous-fleet shorthand",
+    )
+    if "num_robots" not in robots_raw:
+        raise ConfigurationError("'robots' homogeneous-fleet shorthand requires 'num_robots'.")
+    num_robots = robots_raw["num_robots"]
+    if not isinstance(num_robots, int) or isinstance(num_robots, bool) or num_robots <= 0:
+        raise ConfigurationError("'robots.num_robots' must be a positive integer.")
+    if "system" not in robots_raw or not isinstance(robots_raw["system"], str):
+        raise ConfigurationError("'robots.system' must be a string in the homogeneous-fleet shorthand.")
+    shared_config = robots_raw.get("config", {})
+    if not isinstance(shared_config, Mapping):
+        raise ConfigurationError("'robots.config' must be a mapping in the homogeneous-fleet shorthand.")
+    return [
+        {"system": robots_raw["system"], "config": dict(shared_config)}
+        for _ in range(num_robots)
+    ]
+
+
 def _validate_environment_config(raw_environment: Any, *, key_name: str) -> dict[str, Any]:
     if not isinstance(raw_environment, Mapping):
         raise ConfigurationError(f"'{key_name}' must be a mapping.")
@@ -734,6 +766,8 @@ def validate_system_config(
             raise ConfigurationError("'error_tolerance' must be positive.")
 
         robots_raw = raw_config.get("robots")
+        if isinstance(robots_raw, Mapping):
+            robots_raw = _expand_homogeneous_fleet_shorthand(robots_raw)
         if not isinstance(robots_raw, list) or len(robots_raw) == 0:
             raise ConfigurationError("'robots' must be a non-empty list of robot configurations.")
 
