@@ -43,6 +43,14 @@ class ObservationHistoryBuffer:
         robot_id: int,
         observation: Mapping[str, np.ndarray],
     ) -> dict[str, np.ndarray]:
+        """Stack neighbor history time-major, zero-padding any not-yet-collected frames.
+
+        Zero-filling both the feature and mask for a padded slot (rather than
+        repeating the earliest real frame) matches how an out-of-visibility
+        neighbor is already represented elsewhere: a masked-out (feature=0,
+        mask=0) pair, not a plausible-looking duplicate the model could mistake
+        for real motion history.
+        """
         if robot_id < 0 or robot_id >= len(self._buffers):
             raise IndexError(f"robot_id {robot_id} is out of bounds for {len(self._buffers)} robots.")
         frame = {
@@ -52,17 +60,16 @@ class ObservationHistoryBuffer:
         buffer = self._buffers[robot_id]
         buffer.append(frame)
         frames = list(buffer)
-        if len(frames) < self.observation_horizon:
-            frames = [frames[0]] * (self.observation_horizon - len(frames)) + frames
+        pad_count = self.observation_horizon - len(frames)
         history_stacked_fields = ("observation.neighbor_state", "observation.neighbor_mask")
-        return {
-            name: (
-                np.concatenate([f[name] for f in frames]).astype(np.float32, copy=False)
-                if name in history_stacked_fields
-                else frames[-1][name]
-            )
-            for name in frame
-        }
+        stacked: dict[str, np.ndarray] = {}
+        for name in frame:
+            if name in history_stacked_fields:
+                padding = [np.zeros_like(frames[0][name]) for _ in range(pad_count)]
+                stacked[name] = np.concatenate(padding + [f[name] for f in frames]).astype(np.float32, copy=False)
+            else:
+                stacked[name] = frames[-1][name]
+        return stacked
 
 
 def build_decentralized_joint_action(
@@ -150,7 +157,7 @@ def _geometric_backtrack_indices(history_len: int, max_candidates: int = MAX_BAC
     while current >= 0 and len(indices) < max_candidates:
         indices.append(current)
         current -= step_back
-        step_back = min(step_back * 2, 10)
+        step_back *= 2
     if indices[-1] != 0:
         indices.append(0)
     return indices
@@ -213,6 +220,7 @@ def collect_dagger_rollouts(
             frame["task"] = "reach target"
         return frame
 
+    baseline_goal = simulator.goal.copy()
     while successful_episodes < trajectories_per_iteration:
         attempted_episodes += 1
         if attempted_episodes > max_attempts:
@@ -233,6 +241,12 @@ def collect_dagger_rollouts(
             if have_goal_states:
                 simulator.set_goal(provided_goal_states[attempted_episodes - 1])
         else:
+            # A prior episode's explicit goal mutates the simulator; restore the
+            # config's baseline goal before any fallback sampling, since
+            # randomize_goal_for_reset() is a no-op under `randomize_goal: false`
+            # and would otherwise silently leak that leftover explicit goal into
+            # this episode instead of the configured/default one.
+            simulator.set_goal(baseline_goal)
             episode_initial_state_seed = initial_state_seed_for_rollout(
                 initial_state_seed,
                 rollout_index=attempted_episodes,
@@ -581,12 +595,14 @@ def evaluate_policy_rollouts(
     )
     successes = 0
     steps_taken: list[int] = []
+    baseline_goal = simulator.goal.copy()
     for episode_idx, seed_spec in enumerate(seed_specs):
         if episode_idx < usable_count:
             initial_state = provided_initial_states[episode_idx]
             if have_goal_states:
                 simulator.set_goal(provided_goal_states[episode_idx])
         else:
+            simulator.set_goal(baseline_goal)
             initial_state = sample_initial_state(simulator, seed_spec)
         reached_goal, rollout_steps = rollout_policy_with_action_fn(
             simulator=simulator,

@@ -24,7 +24,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetad
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from core.config import load_and_validate_system_config
+from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.config_loaders import (
     EncoderConfig, FlowConfig, default_checkpoint_dir_for_system,
@@ -440,7 +440,8 @@ class DaggerTrainer:
             overrides["initial_position_radius_bounds"] = list(self.cfg.initial_position_radius_bounds)
         if self.cfg.tolerance_overrides:
             overrides.update(self.cfg.tolerance_overrides)
-        return apply_config_overrides(config, overrides)
+        merged_config = apply_config_overrides(config, overrides)
+        return validate_system_config(self.cfg.system, merged_config)
 
     def evaluate_current_policy(self, label: str) -> DaggerEvalMetrics | None:
         assert self.policy is not None
@@ -609,7 +610,7 @@ class DaggerTrainer:
             mode = (
                 self.cfg.training_curriculum[schedule]
                 if self.cfg.training_curriculum is not None
-                else "random"
+                else ("config" if self.cfg.initial_states or self.cfg.goal_states else "random")
             )
             round_initial_states = self.cfg.initial_states if mode == "config" else None
             round_goal_states = self.cfg.goal_states if mode == "config" else None

@@ -66,9 +66,12 @@ class GNNEncoder(ObservationEncoder):
 
         # message encoding
         # currently only edge feature e_ij (will extend maybe later for x_j if we add neighbour node features)
+        augmented_neighbor_feature_dim = self._augmented_neighbor_feature_dim(
+            self.neighbor_feature_dim, self.observation_horizon
+        )
         self.msg_mlps = nn.ModuleList(
             nn.Sequential(
-                nn.Linear(hidden_dim + self.neighbor_feature_dim, hidden_dim),
+                nn.Linear(hidden_dim + augmented_neighbor_feature_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
             )
@@ -101,6 +104,7 @@ class GNNEncoder(ObservationEncoder):
             raw_neighbors, raw_mask, self.neighbor_feature_dim, self.observation_horizon
         )  # neighbor_obs: [B, K, neighbor_feature_dim] (one e_ij per slot, own history flattened in);
            # neighbor_mask: [B, K, observation_horizon]
+        neighbor_features = self._augment_with_temporal_mask(neighbor_obs, neighbor_mask)
 
         # The mask selects the visible neighbours, gated on the most recent frame only
         # (matching the deepset/transformer contract). Listing every visible (robot, slot)
@@ -109,7 +113,7 @@ class GNNEncoder(ObservationEncoder):
         visible_neighbors = neighbor_mask[:, :, -1].bool()  # [B, K]
         batch_index, slot_index = visible_neighbors.nonzero(as_tuple=True)  # [E], [E] indexing into the batch and slot dimensions of neighbor_obs
         # each (batch_index, slot_index) pair is one visible neighbour
-        neighbor_j = neighbor_obs[batch_index, slot_index]  # [E, neighbor_feature_dim] - vector of e_ij
+        neighbor_j = neighbor_features[batch_index, slot_index]  # [E, neighbor_feature_dim + observation_horizon]
 
         h = self.encoder(ego_obs)  # [B, hidden_dim]
         # loop is if we add communication hops (num_layers > 1), right now only num_layers = 1

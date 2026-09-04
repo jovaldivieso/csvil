@@ -549,6 +549,7 @@ def run_evaluation(
     expert_planner = PlannerFactory.create(planner_name="casadi", simulator=simulator, config=validated_config)
     expert_trajectories: list[np.ndarray] = []
     policy_trajectories: list[np.ndarray] = []
+    rollout_goal_states: list[np.ndarray] = []
     per_seed_metrics: list[dict[str, Any]] = []
 
     if len(initial_state_specs) > 0:
@@ -621,7 +622,11 @@ def run_evaluation(
                 initial_state = sample_initial_state(simulator=simulator, seed_spec=seed_spec)
         elif initial_state_source == "provided":
             if not explicit_goal:
-                simulator.randomize_goal_for_reset(np.random.default_rng(torch_seed))
+                simulator.randomize_goal_for_reset(
+                    _rng_for_seed_spec(simulator, noise_seed_spec)
+                    if noise_seed_spec is not None
+                    else np.random.default_rng(torch_seed)
+                )
             initial_state = simulator.validate_state(rollout_spec).copy()
         else:
             if explicit_goal:
@@ -676,6 +681,7 @@ def run_evaluation(
 
         expert_trajectories.append(expert_trajectory)
         policy_trajectories.append(policy_trajectory)
+        rollout_goal_states.append(goal_state)
         per_seed_metrics.append(
             {
                 "seed": seed_value,
@@ -765,6 +771,10 @@ def run_evaluation(
         path_labels[num_expert] = f"{policy_display_name} Policy"
     trajectory_colors = ["tab:blue"] * num_expert + ["tab:orange"] * num_policy
     trajectory_line_styles = ["--"] * num_expert + ["-"] * num_policy
+    # rollout_goal_states holds one goal per rollout; expert and policy trajectories
+    # from the same rollout share it, and all_trajectories concatenates expert then
+    # policy in rollout order, so the goal list must be duplicated the same way.
+    all_goal_states = rollout_goal_states + rollout_goal_states
 
     show_heading = not simulator.is_euclidean
 
@@ -778,6 +788,7 @@ def run_evaluation(
         marker="o",
         trajectory_colors=trajectory_colors,
         trajectory_line_styles=trajectory_line_styles,
+        goal_states=all_goal_states,
     )
     print(f"Plot saved to {output_path}")
 
@@ -792,6 +803,7 @@ def run_evaluation(
         trajectory_colors=trajectory_colors,
         trajectory_line_styles=trajectory_line_styles,
         phase_lengths=[num_expert, num_policy],
+        goal_states=all_goal_states,
     )
     if video_path is not None:
         print(f"Video saved to {video_path}")

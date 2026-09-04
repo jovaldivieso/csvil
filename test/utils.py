@@ -5,6 +5,7 @@ from typing import Any, Mapping
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
+from matplotlib.collections import PatchCollection
 from matplotlib.patches import Circle, FancyArrowPatch
 
 
@@ -35,17 +36,24 @@ def plot_xy_trajectories(
     marker=None,
     trajectory_colors: Sequence[str] | None = None,
     trajectory_line_styles: Sequence[str] | None = None,
+    goal_states: Sequence[np.ndarray] | None = None,
 ):
     """
     plots and saves simulated trajectories
 
     Args:
-        simulator: system instance containing goal state in ``simulator.goal``.
+        simulator: system instance; only used for fleet geometry (``robot_state_slices``,
+            ``simulators``) unless ``goal_states`` is omitted, in which case its current
+            (single, shared) goal is used as a fallback.
         trajectories: iterable of state trajectories (each trajectories must have
             shape ``(num_steps, state_dim)`` and use x and y as its first two state entries)
         path_labels: a string or list of strings to label the trajectories in the legend
-        show_heading: whether to draw heading arrows for initial and goal states 
+        show_heading: whether to draw heading arrows for initial and goal states
         (requires orientation as third state entry)
+        goal_states: one full ``nx``-dim goal-state vector per trajectory (e.g. each
+            rollout's ``simulator.goal_state`` at the time it ran), so trajectories run
+            against different goals are each plotted against their own goal instead of
+            whatever goal the shared ``simulator`` happens to hold when this is called.
     """
     output_dir = os.path.dirname(path_to_output)
     if output_dir:
@@ -60,37 +68,53 @@ def plot_xy_trajectories(
     robot_count = len(robot_state_slices)
     robot_color_map = plt.get_cmap("tab10", max(robot_count, 1))
 
+    if goal_states is not None:
+        if len(goal_states) != len(trajectories):
+            raise ValueError(
+                f"'goal_states' length ({len(goal_states)}) must match 'trajectories' length ({len(trajectories)})."
+            )
+        goal_state_array = np.asarray(goal_states, dtype=float)
+    else:
+        goal_state_array = None
+
     def has_non_euclidean_state(sub_simulator: Any) -> bool:
         return not bool(getattr(sub_simulator, "is_euclidean", True))
 
     for robot_idx, sub_sim in enumerate(robot_simulators):
         robot_color = robot_color_map(robot_idx)
-        goal_x, goal_y = sub_sim.goal_state[:2]
-        goal_label = "goal" if robot_count == 1 else f"goal r{robot_idx}"
-        ax.scatter(
-            goal_x,
-            goal_y,
-            marker="*",
-            s=220 if robot_count > 1 else 300,
-            color=robot_color,
-            label=goal_label,
-            zorder=5,
-        )
+        state_slice = robot_state_slices[robot_idx]
+        if goal_state_array is not None:
+            robot_goal_states = np.unique(goal_state_array[:, state_slice], axis=0)
+        else:
+            robot_goal_states = np.asarray(sub_sim.goal_state, dtype=float)[None, :]
 
-        if show_heading and has_non_euclidean_state(sub_sim):
-            goal_theta = np.asarray(sub_sim.goal, dtype=float)[2]
-            ax.quiver(
+        goal_label = "goal" if robot_count == 1 else f"goal r{robot_idx}"
+        for goal_idx, robot_goal_state in enumerate(robot_goal_states):
+            goal_x, goal_y = robot_goal_state[:2]
+            ax.scatter(
                 goal_x,
                 goal_y,
-                0.25 * np.cos(goal_theta),
-                0.25 * np.sin(goal_theta),
+                marker="*",
+                s=220 if robot_count > 1 else 300,
                 color=robot_color,
-                angles="xy",
-                scale_units="xy",
-                scale=1,
-                width=0.005,
+                label=goal_label if goal_idx == 0 else None,
                 zorder=5,
             )
+
+            if show_heading and has_non_euclidean_state(sub_sim):
+                goal_theta = float(robot_goal_state[2])
+                ax.quiver(
+                    goal_x,
+                    goal_y,
+                    0.25 * np.cos(goal_theta),
+                    0.25 * np.sin(goal_theta),
+                    color=robot_color,
+                    angles="xy",
+                    scale_units="xy",
+                    scale=1,
+                    width=0.005,
+                    zorder=5,
+                )
 
     # Ensure path_labels is a list to handle multiple trajectory labels
     if path_labels is None:
@@ -155,18 +179,24 @@ def plot_xy_trajectories(
                 getattr(simulator, "d_collision", None),
             )
             if footprint_radius is not None:
-                for x, y in zip(robot_traj[:, 0], robot_traj[:, 1]):
-                    ax.add_patch(
-                        Circle(
-                            (x, y),
-                            footprint_radius,
-                            facecolor=line.get_color(),
-                            edgecolor=line.get_color(),
-                            alpha=0.06,
-                            linewidth=0.5,
-                            zorder=1,
-                        )
+                # Sparsely sample footprints (matching the heading-arrow stride)
+                # and batch them into a single PatchCollection -- a Circle per
+                # timestep of every trajectory would add tens of thousands of
+                # individual artists to one figure on a long evaluation run.
+                stride = _heading_sample_stride(len(robot_traj))
+                footprint_idx = np.arange(0, len(robot_traj), stride, dtype=int)
+                if footprint_idx[-1] != len(robot_traj) - 1:
+                    footprint_idx = np.append(footprint_idx, len(robot_traj) - 1)
+                ax.add_collection(
+                    PatchCollection(
+                        [Circle((x, y), footprint_radius) for x, y in robot_traj[footprint_idx, :2]],
+                        facecolor=line.get_color(),
+                        edgecolor=line.get_color(),
+                        alpha=0.06,
+                        linewidth=0.5,
+                        zorder=1,
                     )
+                )
 
             ax.scatter(
                 robot_traj[0, 0],
@@ -236,6 +266,7 @@ def save_xy_rollout_video(
     trajectory_colors: Sequence[str] | None = None,
     trajectory_line_styles: Sequence[str] | None = None,
     phase_lengths: Sequence[int] | None = None,
+    goal_states: Sequence[np.ndarray] | None = None,
 ) -> str | None:
     """Save an MP4 rollout animation with the same geometry as the PDF plot.
 
@@ -270,25 +301,41 @@ def save_xy_rollout_video(
 
     series: list[dict[str, Any]] = []
 
+    if goal_states is not None:
+        if len(goal_states) != len(trajectories):
+            raise ValueError(
+                f"'goal_states' length ({len(goal_states)}) must match 'trajectories' length ({len(trajectories)})."
+            )
+        goal_state_array = np.asarray(goal_states, dtype=float)
+    else:
+        goal_state_array = None
+
     for robot_idx, sub_sim in enumerate(robot_simulators):
         robot_color = robot_color_map(robot_idx)
-        goal_x, goal_y = sub_sim.goal_state[:2]
-        ax.scatter(goal_x, goal_y, marker="*", s=180 if robot_count > 1 else 220, color=robot_color, zorder=5)
+        state_slice = robot_state_slices[robot_idx]
+        if goal_state_array is not None:
+            robot_goal_states = np.unique(goal_state_array[:, state_slice], axis=0)
+        else:
+            robot_goal_states = np.asarray(sub_sim.goal_state, dtype=float)[None, :]
 
-        if show_heading and has_non_euclidean_state(sub_sim):
-            goal_theta = np.asarray(sub_sim.goal, dtype=float)[2]
-            ax.quiver(
-                goal_x,
-                goal_y,
-                0.25 * np.cos(goal_theta),
-                0.25 * np.sin(goal_theta),
-                color=robot_color,
-                angles="xy",
-                scale_units="xy",
-                scale=1,
-                width=0.005,
-                zorder=5,
-            )
+        for robot_goal_state in robot_goal_states:
+            goal_x, goal_y = robot_goal_state[:2]
+            ax.scatter(goal_x, goal_y, marker="*", s=180 if robot_count > 1 else 220, color=robot_color, zorder=5)
+
+            if show_heading and has_non_euclidean_state(sub_sim):
+                goal_theta = float(robot_goal_state[2])
+                ax.quiver(
+                    goal_x,
+                    goal_y,
+                    0.25 * np.cos(goal_theta),
+                    0.25 * np.sin(goal_theta),
+                    color=robot_color,
+                    angles="xy",
+                    scale_units="xy",
+                    scale=1,
+                    width=0.005,
+                    zorder=5,
+                )
 
     for trajectory_index, trajectory in enumerate(trajectories):
         current_label = None

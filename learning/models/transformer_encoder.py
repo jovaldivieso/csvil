@@ -36,7 +36,10 @@ class TransformerEncoder(ObservationEncoder):
 
         # no positional encoding to obtain a permutation invariant embedding
 
-        self.input_projection = nn.Linear(self.neighbor_feature_dim, hidden_dim)
+        augmented_neighbor_feature_dim = self._augmented_neighbor_feature_dim(
+            self.neighbor_feature_dim, self.observation_horizon
+        )
+        self.input_projection = nn.Linear(augmented_neighbor_feature_dim, hidden_dim)
 
         self.encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
@@ -70,9 +73,10 @@ class TransformerEncoder(ObservationEncoder):
         neighbor_obs, neighbor_mask = self._split_neighbor_tensors(
             neighbor_state, neighbor_mask, self.neighbor_feature_dim, self.observation_horizon
         )
+        neighbor_features = self._augment_with_temporal_mask(neighbor_obs, neighbor_mask)
         neighbor_mask = neighbor_mask.bool()
 
-        x = self.input_projection(neighbor_obs)
+        x = self.input_projection(neighbor_features)
 
         # adds learnable token to beginning of sequence to create fixed size embedding:
         pool_token = self.pool_token.expand(x.shape[0], -1, -1)

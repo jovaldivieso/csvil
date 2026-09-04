@@ -45,7 +45,7 @@ def _build_multi_robot_simulator():
 
 
 class ObservationHistoryBufferTests(unittest.TestCase):
-    def test_warm_up_padding_repeats_earliest_frame(self) -> None:
+    def test_warm_up_padding_zero_fills_missing_frames(self) -> None:
         buffer = ObservationHistoryBuffer(observation_horizon=3, num_robots=1)
         frame0 = _make_frame(0)
 
@@ -53,11 +53,17 @@ class ObservationHistoryBufferTests(unittest.TestCase):
 
         np.testing.assert_array_equal(
             stacked["observation.neighbor_state"],
-            np.concatenate([frame0["observation.neighbor_state"]] * 3),
+            np.concatenate(
+                [np.zeros_like(frame0["observation.neighbor_state"])] * 2
+                + [frame0["observation.neighbor_state"]]
+            ),
         )
         np.testing.assert_array_equal(
             stacked["observation.neighbor_mask"],
-            np.concatenate([frame0["observation.neighbor_mask"]] * 3),
+            np.concatenate(
+                [np.zeros_like(frame0["observation.neighbor_mask"])] * 2
+                + [frame0["observation.neighbor_mask"]]
+            ),
         )
         np.testing.assert_array_equal(
             stacked["observation.environment_state"], frame0["observation.environment_state"]
@@ -87,7 +93,7 @@ class ObservationHistoryBufferTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(stacked["observation.state"], frames[-1]["observation.state"])
 
-    def test_reset_clears_history_and_warm_up_repeats_again(self) -> None:
+    def test_reset_clears_history_and_warm_up_zero_fills_again(self) -> None:
         horizon = 3
         buffer = ObservationHistoryBuffer(observation_horizon=horizon, num_robots=1)
         for i in range(horizon + 2):
@@ -99,11 +105,17 @@ class ObservationHistoryBufferTests(unittest.TestCase):
 
         np.testing.assert_array_equal(
             stacked["observation.neighbor_state"],
-            np.concatenate([new_frame["observation.neighbor_state"]] * horizon),
+            np.concatenate(
+                [np.zeros_like(new_frame["observation.neighbor_state"])] * (horizon - 1)
+                + [new_frame["observation.neighbor_state"]]
+            ),
         )
         np.testing.assert_array_equal(
             stacked["observation.neighbor_mask"],
-            np.concatenate([new_frame["observation.neighbor_mask"]] * horizon),
+            np.concatenate(
+                [np.zeros_like(new_frame["observation.neighbor_mask"])] * (horizon - 1)
+                + [new_frame["observation.neighbor_mask"]]
+            ),
         )
 
     def test_online_stack_matches_offline_format_sample_for_policy(self) -> None:

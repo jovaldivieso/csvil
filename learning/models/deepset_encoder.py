@@ -58,7 +58,10 @@ class DeepSetEncoder(ObservationEncoder):
             self.state_dim, self.neighbor_slots, self.neighbor_feature_dim, self.observation_horizon
         )
 
-        phi_dims_list = [self.neighbor_feature_dim, *[int(width) for width in phi_dims]]
+        augmented_neighbor_feature_dim = self._augmented_neighbor_feature_dim(
+            self.neighbor_feature_dim, self.observation_horizon
+        )
+        phi_dims_list = [augmented_neighbor_feature_dim, *[int(width) for width in phi_dims]]
         rho_dims_list = [phi_dims_list[-1], *[int(width) for width in rho_dims]]
 
         if len(phi_dims_list) < 2:
@@ -113,7 +116,8 @@ class DeepSetEncoder(ObservationEncoder):
         mask_bool = neighbor_mask[:, :, -1:].bool()
         row_has_visible = mask_bool.any(dim=(1, 2))
 
-        phi_out = self.phi(neighbor_obs)
+        neighbor_features = self._augment_with_temporal_mask(neighbor_obs, neighbor_mask)
+        phi_out = self.phi(neighbor_features)
 
         if self.pool_type == "max":
             phi_out = phi_out.masked_fill(~mask_bool, float("-inf"))

@@ -321,6 +321,7 @@ def run_plotting(
     goals_reached = 0
     failed_trajectories = 0
     trajectories: list[np.ndarray] = []
+    trajectory_goal_states: list[np.ndarray] = []
     per_robot_goals_reached: np.ndarray | None = None
 
     if num_traj is not None and num_traj <= 0:
@@ -439,6 +440,7 @@ def run_plotting(
             continue
 
         trajectories.append(trajectory)
+        trajectory_goal_states.append(simulator.goal_state.copy())
 
         if reached_goal:
             goals_reached += 1
@@ -473,6 +475,7 @@ def run_plotting(
         title=f"{planner_name.replace('_', ' ').title()} optimal control paths ({system_title})",
         show_heading=show_heading,
         marker="o",
+        goal_states=trajectory_goal_states,
     )
 
     video_path = None
@@ -484,6 +487,7 @@ def run_plotting(
             title=f"{planner_name.replace('_', ' ').title()} rollout ({system_title})",
             show_heading=show_heading,
             fps=video_fps,
+            goal_states=trajectory_goal_states,
         )
 
     d_collision = float(validated_config.get("d_collision", validated_config.get("d_safe", 0.0)))

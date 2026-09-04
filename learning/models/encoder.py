@@ -72,6 +72,28 @@ class ObservationEncoder(nn.Module, ABC):
         neighbor_mask = neighbor_mask.permute(0, 2, 1)
         return neighbor_obs, neighbor_mask
 
+    @staticmethod
+    def _augment_with_temporal_mask(
+        neighbor_obs: torch.Tensor,
+        neighbor_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Append each neighbor's full per-timestep mask onto its packed feature vector.
+
+        Padding at episode start (not enough real history yet) and true
+        temporal invisibility gaps are both represented as zeroed
+        (feature, mask) pairs -- consistent with how out-of-visibility-radius
+        neighbors are already zeroed in the un-stacked case. Without this, a
+        genuine reading of exactly zero is indistinguishable from a masked-out
+        slot; concatenating the mask gives the encoder the explicit per-timestep
+        signal it needs to tell the two apart, instead of relying only on the
+        current-timestep gate (``neighbor_mask[:, :, -1]``) used for pooling.
+        """
+        return torch.cat([neighbor_obs, neighbor_mask], dim=-1)
+
+    @staticmethod
+    def _augmented_neighbor_feature_dim(neighbor_feature_dim: int, observation_horizon: int) -> int:
+        return neighbor_feature_dim + observation_horizon
+
 
 class EncoderFactory:
     @staticmethod

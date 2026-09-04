@@ -100,20 +100,23 @@ def format_sample_for_policy(
     history = list(past_samples or []) + [sample]
     if len(history) > observation_horizon:
         history = history[-observation_horizon:]
-    if len(history) < observation_horizon:
-        earliest = history[0]
-        history = [earliest] * (observation_horizon - len(history)) + history
+    pad_count = observation_horizon - len(history)
 
+    # Zero-fill any not-yet-collected frames rather than repeating the earliest
+    # real one, so a padded (feature=0, mask=0) slot reads the same as a
+    # genuine out-of-visibility-radius neighbor instead of a plausible-looking
+    # duplicate of real motion history (see ObservationHistoryBuffer.append_and_stack).
     history_stacked_fields = ("observation.neighbor_state", "observation.neighbor_mask")
     latest_frame_fields = ("observation.environment_state", "observation.state")
-    observation = {
-        name: torch.cat([_tensor_field(frame, name) for frame in history], dim=0)
-        for name in history_stacked_fields
-    }
+    observation: StructuredObservation = {}
+    for name in history_stacked_fields:
+        real_tensors = [_tensor_field(frame, name) for frame in history]
+        padding = [torch.zeros_like(real_tensors[0]) for _ in range(pad_count)]
+        observation[name] = torch.cat(padding + real_tensors, dim=0)
     observation.update(
         {name: _tensor_field(history[-1], name) for name in latest_frame_fields}
     )
-    
+
     # Build action sequence with proper horizon handling
     subsequent_samples = list(subsequent_samples or [])
     actions = _build_action_sequence(sample, subsequent_samples, prediction_horizon)

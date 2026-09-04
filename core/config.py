@@ -760,6 +760,13 @@ def validate_system_config(
         d_collision = _float(raw_config, "d_collision", d_safe)
         if d_collision < 0:
             raise ConfigurationError("'d_collision' must be non-negative.")
+        if d_collision > d_safe:
+            raise ConfigurationError(
+                "'d_collision' must not exceed 'd_safe': d_safe is the planner's soft buffer "
+                "distance and d_collision is the physical collision threshold, so d_collision "
+                "> d_safe would let the expert plan states the simulator immediately flags as "
+                "collisions."
+            )
 
         error_tolerance = _float(raw_config, "error_tolerance", 0.05)
         if error_tolerance <= 0:
