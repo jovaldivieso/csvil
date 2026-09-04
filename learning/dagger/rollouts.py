@@ -127,6 +127,34 @@ def apply_execution_noise(
 
 STEP_LIMIT_RECOVERY_FAILURE = "expert did not reach the goal within the step limit"
 
+MAX_BACKTRACK_CANDIDATES = 12
+
+
+def _geometric_backtrack_indices(history_len: int, max_candidates: int = MAX_BACKTRACK_CANDIDATES) -> list[int]:
+    """Select a bounded, geometrically-spaced set of backtrack candidate indices.
+
+    Each candidate re-runs the expert closed-loop for up to O(T) steps, so an
+    unbounded backward scan over every visited state is O(T^2) planner solves
+    in the worst case. Sampling with exponentially growing stride keeps
+    coverage dense near the failure point (where a 1-2 step correction is most
+    likely to work) while capping the total number of full re-solves at
+    ``max_candidates``, regardless of how long the episode ran. Index 0 (the
+    episode's true initial state) is always included as the final fallback,
+    preserving the existing "always try s_0 as a last resort" guarantee.
+    """
+    if history_len <= 0:
+        return []
+    indices: list[int] = []
+    step_back = 1
+    current = history_len - 1
+    while current >= 0 and len(indices) < max_candidates:
+        indices.append(current)
+        current -= step_back
+        step_back = min(step_back * 2, 10)
+    if indices[-1] != 0:
+        indices.append(0)
+    return indices
+
 
 def _detect_collision(simulator: DynamicsProtocol, state: np.ndarray) -> tuple[bool, str]:
     """Single collision-distance pass; returns (collided, human-readable summary)."""
@@ -158,6 +186,7 @@ def collect_dagger_rollouts(
     frame_builder: Callable[[np.ndarray, np.ndarray], Mapping[str, object] | list[Mapping[str, object]] | tuple[Mapping[str, object], ...]] | None = None,
     initial_states: list[np.ndarray] | None = None,
     goal_states: list[np.ndarray] | None = None,
+    round_index: int = 0,
 ) -> DaggerEvalMetrics:
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
     if policy_action_fn is None and expert_mixing_beta < 1.0:
@@ -207,6 +236,7 @@ def collect_dagger_rollouts(
             episode_initial_state_seed = initial_state_seed_for_rollout(
                 initial_state_seed,
                 rollout_index=attempted_episodes,
+                round_index=round_index,
             )
             sampled_initial_state = sample_initial_state(simulator, episode_initial_state_seed)
         state = simulator.reset(sampled_initial_state)
@@ -221,11 +251,13 @@ def collect_dagger_rollouts(
         episode_noise_seed = action_noise_seed_for_rollout(
             action_noise_seed,
             rollout_index=attempted_episodes,
+            round_index=round_index,
         )
         episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
         episode_expert_mixing_seed = expert_mixing_seed_for_rollout(
             action_noise_seed,
             rollout_index=attempted_episodes,
+            round_index=round_index,
         )
         episode_expert_mixing_rng = np.random.default_rng(episode_expert_mixing_seed)
         planner_failed = False
@@ -280,6 +312,12 @@ def collect_dagger_rollouts(
                 candidate_action = expert_planner(observation)
             except PlannerSolveError as exc:
                 return False, state_after_action, completion_steps, f"planner failure: {exc}"
+            label_next_state = simulator.predict_next_state(
+                state_after_action, candidate_action
+            )
+            collided, collision_summary = _detect_collision(simulator, label_next_state)
+            if collided:
+                return False, state_after_action, completion_steps, f"unsafe expert label: {collision_summary}"
             executed_action = apply_execution_noise(
                 simulator,
                 candidate_action,
@@ -316,6 +354,13 @@ def collect_dagger_rollouts(
                 except PlannerSolveError as exc:
                     return False, state_after_action, completion_steps, f"planner failure: {exc}"
 
+                label_next_state = simulator.predict_next_state(
+                    state_after_action, expert_action
+                )
+                collided, collision_summary = _detect_collision(simulator, label_next_state)
+                if collided:
+                    return False, state_after_action, completion_steps, f"unsafe expert label: {collision_summary}"
+
                 executed_action = apply_execution_noise(
                     simulator,
                     expert_action,
@@ -343,7 +388,7 @@ def collect_dagger_rollouts(
         def backtrack_and_complete() -> tuple[bool, np.ndarray, int]:
             last_candidate_index: int | None = None
             last_recovery_summary: str | None = None
-            for candidate_index in range(len(visited_states) - 1, -1, -1):
+            for candidate_index in _geometric_backtrack_indices(len(visited_states)):
                 candidate_ok, recovered_state, completion_steps, recovery_summary = complete_from_candidate(
                     candidate_index
                 )

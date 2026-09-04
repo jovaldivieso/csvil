@@ -112,7 +112,7 @@ csvil/
     ├── config/
     │   ├── multi_unicycle2_casadi_config.yaml       # Canonical example (used throughout this README)
     │   ├── multi_double_integrator_casadi_config.yaml
-    │   └── multi_robot_dblacam_config.yaml          # Long-form robots: list example (mixed systems)
+    │   └── multi_robot_dblacam_config.yaml          # Long-form robots: list example (distinct per-robot `start` states)
     ├── evaluate_policy.py        # CLI for rollout/evaluation across policy families
     ├── plot_expert_trajectories.py  # Canonical single/multi-robot expert analysis CLI (plots + optional MP4)
     └── test_simulator_contracts.py  # Schema consistency tests
@@ -162,10 +162,10 @@ robots:
 
 This expands into `num_robots` identical entries before validation, so nothing
 downstream needs to know which form was used. Use the long list form —
-`robots: [{system: ..., config: {...}}, ...]`, one entry per robot — when robots
-need different systems or distinct per-robot `start` states (see
-`multi_robot_dblacam_config.yaml`); only strictly homogeneous fleets (same
-simulator type and dimensions) construct through `MultiRobotSimulator` today.
+`robots: [{system: ..., config: {...}}, ...]`, one entry per robot — when
+otherwise homogeneous robots need distinct per-robot configurations or `start`
+states. Mixed simulator types are not currently supported because
+`MultiRobotSimulator` requires strictly homogeneous fleets.
 
 System configs are validated through `core/config.py` before simulation/evaluation
 to catch malformed keys and shape mismatches early. Planner-specific keys include:
@@ -304,6 +304,31 @@ benchmarking remains comparable. For robust model selection, prefer evaluating
 many seeds (`--seeds "[0, 1, ..., 29]"`) and comparing success rate plus
 terminal error, not only visual trajectory quality.
 
+### Generalizing to a Different Fleet Size
+
+Because the decentralized policy only ever sees an ego observation plus
+masked neighbor slots, a checkpoint trained on a 2-robot fleet can be
+evaluated directly on a larger fleet by pointing `--config` at a config with
+a different `robots.num_robots` — no retraining required:
+
+```bash
+python test/evaluate_policy.py \
+  --system multi_robot \
+  --policy-type flow \
+  --config test/config/eval_multi_unicycle2_casadi_config.yaml \
+  --model-dir outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_flow/flow_dagger_checkpoint.pt \
+  --num-steps 200 \
+  --action-noise-std 0.03 \
+  --initial-states '[[[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0], [0.0, -2.0, 1.57, 0.0, 0.0], [0.0, 2.0, -1.57, 0.0, 0.0]]]' \
+  --goal-states '[[[2.0, 0.0, 0.0], [-2.0, 0.0, 3.14], [0.0, 2.0, 1.57], [0.0, -2.0, -1.57]]]' \
+  --tolerance-overrides '{"pos_tol": 0.2, "theta_tol": 1.1, "vel_tol": 0.5, "omega_tol": 0.5}'
+```
+
+Here `eval_multi_unicycle2_casadi_config.yaml` sets `robots.num_robots: 4` (a
+4-way rotational swap), while the checkpoint was trained on 2 robots — the
+encoder's per-neighbor schema and observation horizon must still match, but
+`neighbor_slots` adapts automatically to the runtime fleet size.
+
 For Docker, prefix either command with `docker compose run --rm csvil`.
 
 A few flags worth knowing about beyond what's in the policy config:
@@ -329,7 +354,7 @@ Optional multi-robot visibility gating can be set in the simulator config:
   per-robot list of radii (broadcast-style API)
 
 When another robot is outside the observing robot's visibility radius, its
-relative x/y term is zeroed in the observation.
+relative-pose features (position and periodic heading terms) are zeroed in the observation.
 
 Seed format quick reference:
 

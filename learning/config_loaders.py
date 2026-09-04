@@ -70,6 +70,12 @@ def load_dagger_training_config(policy_config_path: Path | None) -> dict[str, ob
     training_section = raw_config.get("training", model_section.get("training", {}))
     if not isinstance(training_section, Mapping):
         raise ValueError("Policy config 'training' section must be a mapping.")
+    unknown_keys = sorted(set(training_section) - set(DEFAULT_DAGGER_TRAINING_CONFIG))
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown key(s) in policy config 'training' section: {unknown_keys}. "
+            f"Supported keys are: {sorted(DEFAULT_DAGGER_TRAINING_CONFIG)}."
+        )
     config.update(training_section)
     return config
 

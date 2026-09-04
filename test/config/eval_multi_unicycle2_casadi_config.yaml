@@ -1,7 +1,7 @@
 dt: 0.05
 d_safe: 1.2
 d_collision: 1.0
-inter_robot_visibility_radius: 2.0
+inter_robot_visibility_radius: 4.0
 horizon: 40
 mode: mpc
 Q_diag: [100.0, 100.0, 10.0, 100.0, 1.0, 

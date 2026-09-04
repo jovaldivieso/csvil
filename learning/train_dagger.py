@@ -54,17 +54,26 @@ def _validate_resumable_dataset_schema(
     """Fail fast when a dataset being resumed doesn't match the current observation schema."""
     for name, expected_info in expected_features.items():
         expected_shape = tuple(int(value) for value in expected_info.get("shape", ()))
+        expected_dtype = expected_info.get("dtype")
+        expected_names = list(expected_info.get("names") or [])
         existing_info = existing_features.get(name)
-        existing_shape = (
-            tuple(int(value) for value in existing_info["shape"]) if existing_info else None
-        )
-        if existing_shape != expected_shape:
+        if existing_info is None:
+            existing_shape = None
+            existing_dtype = None
+            existing_names = None
+        else:
+            existing_shape = tuple(int(value) for value in existing_info.get("shape", ()))
+            existing_dtype = existing_info.get("dtype")
+            existing_names = list(existing_info.get("names") or [])
+        if (existing_shape, existing_dtype, existing_names) != (expected_shape, expected_dtype, expected_names):
             raise ValueError(
                 "Cannot resume DAgger collection: the on-disk dataset's "
-                f"'{name}' feature has shape {existing_shape}, but the current run's observation "
-                f"schema expects shape {expected_shape}. The dataset was likely recorded with a "
-                "different neighbor/observation feature layout. Start a fresh dataset "
-                "(omit --repo-id/--dataset-root) or resume a dataset recorded with the current schema."
+                f"'{name}' feature is (shape={existing_shape}, dtype={existing_dtype}, names={existing_names}), "
+                f"but the current run's observation schema expects "
+                f"(shape={expected_shape}, dtype={expected_dtype}, names={expected_names}). "
+                "The dataset was likely recorded with a different neighbor/observation feature layout. "
+                "Start a fresh dataset (omit --repo-id/--dataset-root) or resume a dataset recorded "
+                "with the current schema."
             )
 
 
@@ -607,10 +616,9 @@ class DaggerTrainer:
             collection_config = self._apply_runtime_config_overrides(
                 copy.deepcopy(dict(self.seeded_config))
             )
-            if mode == "random":
-                collection_config = apply_config_overrides(
-                    collection_config, {"randomize_goal": True}
-                )
+            collection_config = apply_config_overrides(
+                collection_config, {"randomize_goal": True}
+            )
             print(f"Aggregation goal source: {mode}")
 
             simulator = DynamicsFactory.create(
@@ -679,6 +687,7 @@ class DaggerTrainer:
                     initial_states=round_initial_states,
                     goal_states=round_goal_states,
                     expert_mixing_beta=round_beta,
+                    round_index=schedule,
                     policy_action_fn=action_fn,
                     policy_reset_fn=reset_policy_state,
                     frame_builder=frames,

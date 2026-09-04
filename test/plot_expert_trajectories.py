@@ -380,10 +380,18 @@ def run_plotting(
             else:
                 initial_state_plan.append((None, "rng_fallback", None))
 
+    baseline_goal = simulator.goal.copy()
     for rollout_idx, (initial_state_spec, initial_state_source, noise_seed_spec) in enumerate(initial_state_plan, start=1):
         explicit_goal = rollout_idx - 1 < len(goal_state_specs)
         if explicit_goal:
             simulator.set_goal(goal_state_specs[rollout_idx - 1])
+        else:
+            # A prior rollout's explicit goal mutates the simulator; restore the
+            # config's baseline goal before any fallback sampling, since
+            # randomize_goal_for_reset() is a no-op under `randomize_goal: false`
+            # and would otherwise silently leak that leftover explicit goal into
+            # this rollout instead of the configured/default one.
+            simulator.set_goal(baseline_goal)
 
         if initial_state_source == "seeded":
             if explicit_goal:

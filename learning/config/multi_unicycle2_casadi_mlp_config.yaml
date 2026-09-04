@@ -22,10 +22,10 @@ model:
 
 # Optional DAgger defaults. Explicit command-line arguments override these values.
 training:
-  dagger_iterations: 4
-  trajectories_per_iteration: [200, 150, 100, 50]
+  dagger_iterations: 3
+  trajectories_per_iteration: [200, 150, 100]
   steps_per_trajectory: 200
-  target_epochs_per_round: [50, 40, 30, 20]
+  target_epochs_per_round: [50, 40, 30]
   action_noise_std: 0.03
   expert_mix_beta_start: 0.5
   expert_mix_beta_decay_rate: 0.25
@@ -38,7 +38,7 @@ training:
     theta_tol: 1.1
     vel_tol: 0.1
     omega_tol: 0.1
-  training_curriculum: [random, config, random, config]
+  training_curriculum: [random, config, random]
   initial_states:
     - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
     - [[0.0, -2.0, 1.57, 0.0, 0.0], [0.0, 2.0, -1.57, 0.0, 0.0]]

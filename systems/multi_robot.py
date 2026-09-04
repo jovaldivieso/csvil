@@ -527,6 +527,10 @@ class MultiRobotSimulator(DynamicsSimulator):
     def goal_dim(self) -> int:
         return sum(int(sim.goal_dim) for sim in self.simulators)
 
+    @property
+    def goal(self) -> np.ndarray:
+        return np.concatenate([np.asarray(sim.goal, dtype=float) for sim in self.simulators])
+
     def reset_random(self) -> np.ndarray:
         return self.reset(
             self._sample_safe_initial_state(rng=self._sampling_rng, randomize_goals=True)

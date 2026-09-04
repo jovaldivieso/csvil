@@ -598,12 +598,20 @@ def run_evaluation(
             else:
                 rollout_plan.append((None, "rng_fallback", rollout_idx + 1, None, None))
 
+    baseline_goal = simulator.goal.copy()
     for rollout_idx, (rollout_spec, initial_state_source, torch_seed, seed_value, noise_seed_spec) in enumerate(rollout_plan, start=1):
         torch.manual_seed(torch_seed)
 
         explicit_goal = rollout_idx - 1 < len(goal_state_specs)
         if explicit_goal:
             simulator.set_goal(goal_state_specs[rollout_idx - 1])
+        else:
+            # A prior rollout's explicit goal mutates the simulator; restore the
+            # config's baseline goal before any fallback sampling, since
+            # randomize_goal_for_reset() is a no-op under `randomize_goal: false`
+            # and would otherwise silently leak that leftover explicit goal into
+            # this rollout instead of the configured/default one.
+            simulator.set_goal(baseline_goal)
 
         if initial_state_source == "seeded":
             seed_spec = rollout_spec
