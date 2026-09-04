@@ -301,8 +301,8 @@ bakes in a fixed value. The evaluator also applies the same execution-time
 Gaussian action noise (`--action-noise-std`, default `0.0`) to both the expert
 and policy rollouts, so clean evaluation stays the default while disturbance
 benchmarking remains comparable. For robust model selection, prefer evaluating
-many seeds (`--seeds "[0, 1, ..., 29]"`) and comparing success rate plus
-terminal error, not only visual trajectory quality.
+many seeds (`--seeds "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"`) and comparing success
+rate plus terminal error, not only visual trajectory quality.
 
 ### Generalizing to a Different Fleet Size
 

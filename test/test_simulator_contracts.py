@@ -324,6 +324,37 @@ class SimulatorContractTests(unittest.TestCase):
         self.assertFalse(bool(simulator.is_euclidean))
         self.assertEqual(tuple(simulator.angular_state_indices), (2, 7))
 
+    def test_is_collision_gates_on_d_collision_not_d_safe(self) -> None:
+        """d_safe is the planner's soft avoidance buffer; d_collision is the physical
+        threshold is_collision() must use. A distance strictly between the two must
+        not be reported as a collision, even though the planner would avoid it."""
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": 0.05,
+                "d_safe": 0.3,
+                "d_collision": 0.1,
+                "robots": [
+                    {"system": "double_integrator", "config": {"dt": 0.05, "goal": [0.0, 0.0], "randomize_goal": False}},
+                    {"system": "double_integrator", "config": {"dt": 0.05, "goal": [2.0, -1.0], "randomize_goal": False}},
+                ],
+            },
+        )
+
+        # 0.2 apart: inside the soft buffer (d_safe=0.3) but outside the physical
+        # collision radius (d_collision=0.1) -- not a real collision.
+        near_state = np.array([0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0])
+        self.assertFalse(simulator.is_collision(near_state))
+        self.assertIsNone(simulator.collision_details(near_state))
+
+        # 0.05 apart: inside the physical collision radius.
+        colliding_state = np.array([0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0])
+        self.assertTrue(simulator.is_collision(colliding_state))
+        details = simulator.collision_details(colliding_state)
+        self.assertIsNotNone(details)
+        self.assertAlmostEqual(details["distance"], 0.05, places=6)
+        self.assertEqual(details["threshold"], 0.1)
+
     def test_multi_robot_neighbor_observation_includes_relative_heading(self) -> None:
         simulator = DynamicsFactory.create(
             system_name="multi_robot",

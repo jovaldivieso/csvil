@@ -122,17 +122,20 @@ def evaluation_seed_specs(
     ]
 
 
-def sample_initial_state(simulator: DynamicsProtocol, seed_spec: int | list[int]) -> np.ndarray:
+def rng_for_seed_spec(simulator: DynamicsProtocol, seed_spec: int | list[int]) -> np.random.Generator:
+    """Build the RNG for a seed spec, honoring per-robot seed lists like sample_initial_state does."""
     if isinstance(seed_spec, int):
-        rng = np.random.default_rng(int(seed_spec))
-        simulator.randomize_goal_for_reset(rng)
-        return simulator.random_initial_state(rng)
+        return np.random.default_rng(int(seed_spec))
     sub_simulators = simulator.simulators
     if len(seed_spec) != len(sub_simulators):
         raise ValueError(
             "Per-robot seed specification length must match robot count. "
             f"Got {len(seed_spec)} seeds for {len(sub_simulators)} robots."
         )
-    rng = np.random.default_rng(np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec]))
+    return np.random.default_rng(np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec]))
+
+
+def sample_initial_state(simulator: DynamicsProtocol, seed_spec: int | list[int]) -> np.ndarray:
+    rng = rng_for_seed_spec(simulator, seed_spec)
     simulator.randomize_goal_for_reset(rng)
     return simulator.random_initial_state(rng)

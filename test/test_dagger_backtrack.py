@@ -26,7 +26,7 @@ class _FakeSimulator:
     collision path distinctly from the raw-expert-label collision path.
     """
 
-    def __init__(self, collision_threshold: float, goal_threshold: float) -> None:
+    def __init__(self, collision_threshold: float, goal_threshold: float, done_hold_steps: int = 1) -> None:
         self.goal = np.array([0.0], dtype=float)
         self.simulators = [self]
         self.num_robots = 1
@@ -34,9 +34,11 @@ class _FakeSimulator:
         self.nx = 1
         self.collision_threshold = collision_threshold
         self.goal_threshold = goal_threshold
+        self.done_hold_steps = done_hold_steps
         self.state: np.ndarray | None = None
         self.step_call_count = 0
         self.first_step_disturbance = 0.0
+        self._rollout_done_counter = 0
 
     @property
     def goal_dim(self) -> int:
@@ -45,8 +47,12 @@ class _FakeSimulator:
     def set_goal(self, goal: np.ndarray) -> None:
         self.goal = np.asarray(goal, dtype=float).copy()
 
+    def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
+        self.goal = np.array([rng.uniform(-1.0, 1.0)], dtype=float)
+
     def reset(self, state: np.ndarray) -> np.ndarray:
         self.state = np.asarray(state, dtype=float).copy()
+        self._rollout_done_counter = 0
         return self.state.copy()
 
     def observe(self, state: np.ndarray) -> np.ndarray:
@@ -65,8 +71,16 @@ class _FakeSimulator:
     def is_collision(self, state: np.ndarray) -> bool:
         return bool(np.asarray(state, dtype=float)[0] >= self.collision_threshold)
 
-    def should_terminate_rollout(self, state: np.ndarray) -> bool:
+    def is_done(self, state: np.ndarray) -> bool:
         return bool(np.asarray(state, dtype=float)[0] >= self.goal_threshold)
+
+    def should_terminate_rollout(self, state: np.ndarray) -> bool:
+        """Mirrors DynamicsSimulator.should_terminate_rollout's consecutive-hold-steps contract."""
+        if self.is_done(state):
+            self._rollout_done_counter += 1
+        else:
+            self._rollout_done_counter = 0
+        return self._rollout_done_counter >= self.done_hold_steps
 
 
 class _ScriptedPlanner:
@@ -84,6 +98,23 @@ class _ScriptedPlanner:
     def __call__(self, observation: np.ndarray) -> np.ndarray:
         self.call_count += 1
         return (self.unsafe_action if self.call_count == 1 else self.safe_action).copy()
+
+
+class _SequencedPlanner:
+    """Returns actions from an explicit per-call sequence, repeating the last once exhausted."""
+
+    def __init__(self, actions: list[list[float]]) -> None:
+        self.actions = [np.asarray(action, dtype=float) for action in actions]
+        self.call_count = 0
+        self.reset_count = 0
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+    def __call__(self, observation: np.ndarray) -> np.ndarray:
+        self.call_count += 1
+        index = min(self.call_count, len(self.actions)) - 1
+        return self.actions[index].copy()
 
 
 class _ConstantPlanner:
@@ -234,6 +265,156 @@ class CollectDaggerRolloutsBacktrackTests(unittest.TestCase):
         self.assertEqual(len(writer.frames), 1)
         self.assertEqual(writer.frames[0]["action"], [1.0])
         self.assertEqual(writer.episode_boundaries, [1])
+
+    def test_backtrack_replaces_the_stale_pre_reset_action_label(self) -> None:
+        """Regression guard: the frame retained at the candidate index must carry the
+        RECOMPUTED action, not the one computed before the planner was reset.
+
+        The post-execution collision path appends a normal frame for a step before
+        discovering the executed action collided, so a frame already exists at
+        candidate_index when recovery re-queries the (now-reset) planner. Using a
+        planner that returns a different action on its second call -- regardless of
+        the observation, which is identical either way -- makes a stale, unreplaced
+        frame distinguishable from a correctly recomputed one.
+        """
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=0.3)
+        simulator.first_step_disturbance = 20.0  # only the very first .step() call collides
+        planner = _ScriptedPlanner(unsafe_action=[1.0], safe_action=[0.5])
+        writer = _FakeDatasetWriter()
+
+        metrics = collect_dagger_rollouts(
+            simulator=simulator,
+            expert_planner=planner,
+            dataset_writer=writer,
+            trajectories_per_iteration=1,
+            steps_per_trajectory=2,
+            action_noise_std=0.0,
+            action_noise_seed=0,
+            initial_state_seed=0,
+            expert_mixing_beta=1.0,
+            policy_action_fn=None,
+            frame_builder=_frame_builder,
+            initial_states=[[0.0]],
+            goal_states=None,
+        )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        # The recovered trajectory was built by executing [0.5] (the planner's
+        # second-call action); the dataset must reflect that, not the first
+        # call's [1.0], which never actually led anywhere in this episode.
+        self.assertEqual(len(writer.frames), 1)
+        self.assertEqual(writer.frames[0]["action"], [0.5])
+        self.assertEqual(writer.episode_boundaries, [1])
+
+    def test_backtrack_preserves_already_accumulated_done_hold_progress(self) -> None:
+        """Regression guard: reset() zeroes the consecutive-done-steps hold counter,
+        but the retained prefix up to the candidate already made real in-tolerance
+        progress that must not be forgotten.
+
+        Steps 1-2 reach and hold the goal region (accumulating a hold-count of 2
+        out of done_hold_steps=3) before step 3's label is flagged unsafe and
+        triggers backtracking to s_2 -- the same in-tolerance state. Recovery
+        should need only one more in-tolerance step (2 + 1 = 3) to terminate, not
+        a fresh three, so the total step count distinguishes a rebuilt counter
+        from a silently reset one.
+        """
+        simulator = _FakeSimulator(collision_threshold=100.0, goal_threshold=1.0, done_hold_steps=3)
+        planner = _SequencedPlanner(actions=[[1.0], [0.0], [200.0], [0.0]])
+        writer = _FakeDatasetWriter()
+
+        metrics = collect_dagger_rollouts(
+            simulator=simulator,
+            expert_planner=planner,
+            dataset_writer=writer,
+            trajectories_per_iteration=1,
+            steps_per_trajectory=6,
+            action_noise_std=0.0,
+            action_noise_seed=0,
+            initial_state_seed=0,
+            expert_mixing_beta=1.0,
+            policy_action_fn=None,
+            frame_builder=_frame_builder,
+            initial_states=[[0.0]],
+            goal_states=None,
+        )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        # With the hold-count correctly carried forward (2 already banked), only
+        # one more in-tolerance step is needed to reach done_hold_steps=3, for a
+        # total of candidate_index(2) + completion_steps(1) = 3 steps. Without the
+        # fix, the counter silently resets to 0 and needs a fresh three more
+        # steps (candidate_index(2) + completion_steps(3) = 5) instead.
+        self.assertEqual(metrics.min_steps, 3)
+        self.assertEqual(metrics.max_steps, 3)
+
+    def test_backtrack_to_s0_does_not_count_the_uncounted_initial_state(self) -> None:
+        """Regression guard: s_0 (the initial reset state) is never itself passed to
+        should_terminate_rollout in the forward loop -- only s_1 onward, after the
+        first transition. Replaying it during recovery would bank a hold-count
+        that never happened, letting recovery report success one step early
+        whenever the initial/candidate state already happens to be in tolerance.
+        """
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=0.0, done_hold_steps=2)
+        planner = _ScriptedPlanner(unsafe_action=[100.0], safe_action=[0.0])
+        writer = _FakeDatasetWriter()
+
+        metrics = collect_dagger_rollouts(
+            simulator=simulator,
+            expert_planner=planner,
+            dataset_writer=writer,
+            trajectories_per_iteration=1,
+            steps_per_trajectory=3,
+            action_noise_std=0.0,
+            action_noise_seed=0,
+            initial_state_seed=0,
+            expert_mixing_beta=1.0,
+            policy_action_fn=None,
+            frame_builder=_frame_builder,
+            initial_states=[[0.0]],
+            goal_states=None,
+        )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        # s_0=[0.0] already satisfies is_done() (goal_threshold=0.0), and the
+        # unsafe first label backtracks straight to candidate_index=0 (the only
+        # candidate when visited_states has length 1). A correct cold restart
+        # from s_0 needs two genuine consecutive in-tolerance steps to reach
+        # done_hold_steps=2. If s_0 were wrongly counted, one recovered step
+        # would look sufficient instead.
+        self.assertEqual(metrics.min_steps, 2)
+        self.assertEqual(metrics.max_steps, 2)
+
+    def test_initial_only_episode_still_randomizes_goal(self) -> None:
+        """Regression guard: an explicit initial state without a paired goal must
+        still honor randomize_goal_for_reset, matching what a fallback-sampled
+        episode gets, instead of silently freezing at whatever goal the
+        simulator started with for as many initial states as were provided.
+        """
+        simulator = _FakeSimulator(collision_threshold=100.0, goal_threshold=100.0)
+        planner = _ConstantPlanner(action=[0.0])
+        writer = _FakeDatasetWriter()
+        self.assertEqual(simulator.goal.tolist(), [0.0])
+
+        collect_dagger_rollouts(
+            simulator=simulator,
+            expert_planner=planner,
+            dataset_writer=writer,
+            trajectories_per_iteration=1,
+            steps_per_trajectory=1,
+            action_noise_std=0.0,
+            action_noise_seed=0,
+            initial_state_seed=0,
+            expert_mixing_beta=1.0,
+            policy_action_fn=None,
+            frame_builder=_frame_builder,
+            initial_states=[[0.0]],
+            goal_states=None,
+        )
+
+        self.assertNotEqual(simulator.goal.tolist(), [0.0])
 
 
 if __name__ == "__main__":

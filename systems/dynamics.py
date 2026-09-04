@@ -189,7 +189,7 @@ class DynamicsSimulator(ABC):
             raise ValueError(
                 f"Goal shape mismatch: expected {self.goal.shape}, got {goal_array.shape}."
             )
-        self.goal = goal_array
+        self.goal = goal_array.copy()
 
     @property
     def goal_dim(self) -> int:

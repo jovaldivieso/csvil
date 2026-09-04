@@ -74,6 +74,11 @@ def pairwise_distance_report(
     if len(state_slices) < 2 or len(trajectories) == 0:
         return None
 
+    # check_homogeneous_fleet_collisions/is_collision() apply one shared
+    # position_indices (from the first sub-simulator) across the whole fleet,
+    # so mirror that here rather than assuming a 2D position.
+    position_indices = list(simulator.simulators[0].position_indices)
+
     min_distance = float("inf")
     worst_violation = 0.0
     violation_steps = 0
@@ -84,9 +89,9 @@ def pairwise_distance_report(
     for trajectory in trajectories:
         for k in range(len(trajectory)):
             for i in range(len(state_slices)):
-                p_i = trajectory[k, state_slices[i]][:2]
+                p_i = trajectory[k, state_slices[i]][position_indices]
                 for j in range(i + 1, len(state_slices)):
-                    p_j = trajectory[k, state_slices[j]][:2]
+                    p_j = trajectory[k, state_slices[j]][position_indices]
                     dist = float(np.linalg.norm(p_i - p_j))
                     min_distance = min(min_distance, dist)
                     total_checked += 1

@@ -17,12 +17,12 @@ from systems.seed_utils import (
 )
 
 from .metrics import DaggerEvalMetrics
-from .utils import evaluation_seed_specs, sample_initial_state
+from .utils import evaluation_seed_specs, rng_for_seed_spec, sample_initial_state
 from systems.initial_state_utils import normalize_goal_state_specs, normalize_initial_state_specs
 
 
 class ObservationHistoryBuffer:
-    """Per-robot rolling buffer with earliest-frame padding during warm-up."""
+    """Per-robot rolling buffer that zero-fills missing frames during warm-up."""
 
     def __init__(self, observation_horizon: int, num_robots: int) -> None:
         if observation_horizon <= 0:
@@ -240,6 +240,17 @@ def collect_dagger_rollouts(
             sampled_initial_state = provided_initial_states[attempted_episodes - 1]
             if have_goal_states:
                 simulator.set_goal(provided_goal_states[attempted_episodes - 1])
+            else:
+                # An explicit initial state was provided without a paired goal:
+                # still honor randomize_goal_for_reset so these episodes vary
+                # per the collection config, instead of silently freezing at
+                # the baseline goal for as many initial states as were given.
+                episode_goal_seed = initial_state_seed_for_rollout(
+                    initial_state_seed,
+                    rollout_index=attempted_episodes,
+                    round_index=round_index,
+                )
+                simulator.randomize_goal_for_reset(rng_for_seed_spec(simulator, episode_goal_seed))
         else:
             # A prior episode's explicit goal mutates the simulator; restore the
             # config's baseline goal before any fallback sampling, since
@@ -313,10 +324,22 @@ def collect_dagger_rollouts(
 
             if episode_frame_buffers is not None:
                 for frame_buffer in episode_frame_buffers:
-                    del frame_buffer[candidate_index + 1:]
+                    del frame_buffer[candidate_index:]
 
             candidate_state = visited_states[candidate_index].copy()
             state_after_action = simulator.reset(candidate_state)
+            # reset() unconditionally zeroes the consecutive-done-steps hold counter,
+            # forgetting any in-tolerance progress already made up to this candidate.
+            # Replaying should_terminate_rollout over the retained prefix rebuilds it
+            # exactly: since the original forward pass never terminated on any of
+            # these same states (or backtracking would not have been reached at all),
+            # every call below is guaranteed to return False, so only its counter
+            # side effect matters. visited_states[0] is s_0, the initial reset state,
+            # which the forward loop below only ever checks starting from s_1 (after
+            # the first transition) -- replaying it here would count a check that
+            # never happened, so it's excluded.
+            for prefix_state in visited_states[1 : candidate_index + 1]:
+                simulator.should_terminate_rollout(prefix_state)
             if hasattr(expert_planner, "reset"):
                 expert_planner.reset()
 
@@ -601,6 +624,12 @@ def evaluate_policy_rollouts(
             initial_state = provided_initial_states[episode_idx]
             if have_goal_states:
                 simulator.set_goal(provided_goal_states[episode_idx])
+            else:
+                # An explicit initial state was provided without a paired goal:
+                # still honor randomize_goal_for_reset, matching the fallback
+                # branch's own use of sample_initial_state below, instead of
+                # silently freezing at the baseline goal.
+                simulator.randomize_goal_for_reset(rng_for_seed_spec(simulator, seed_spec))
         else:
             simulator.set_goal(baseline_goal)
             initial_state = sample_initial_state(simulator, seed_spec)
