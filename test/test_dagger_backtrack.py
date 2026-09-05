@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -49,6 +51,9 @@ class _FakeSimulator:
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         self.goal = np.array([rng.uniform(-1.0, 1.0)], dtype=float)
+
+    def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
+        return np.array([rng.uniform(-1.0, 1.0)], dtype=float)
 
     def reset(self, state: np.ndarray) -> np.ndarray:
         self.state = np.asarray(state, dtype=float).copy()
@@ -415,6 +420,95 @@ class CollectDaggerRolloutsBacktrackTests(unittest.TestCase):
         )
 
         self.assertNotEqual(simulator.goal.tolist(), [0.0])
+
+    def test_backtrack_recovery_correctly_accounts_recovered_steps_in_execution_mixing_stats(self) -> None:
+        """Regression guard: expert-only recovery steps must be folded into the
+        printed execution-mixing counters, and a discarded colliding step must not
+        be counted at all.
+
+        With expert_mixing_beta=0.0 every forward-loop step is policy-executed.
+        The policy's action collides immediately, discarding that step's frame;
+        backtrack recovery then completes the episode with a single, purely
+        expert-driven step. The one frame actually saved is 100% expert-completed,
+        so realized_expert_fraction must read 1.0. Without the fix, the discarded
+        policy step's inline-incremented (expert=0, total=1) counts survive
+        untouched -- since recovery never updates them -- reporting 0.0 instead.
+        """
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=0.3)
+        planner = _ConstantPlanner(action=[0.5])
+        writer = _FakeDatasetWriter()
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            metrics = collect_dagger_rollouts(
+                simulator=simulator,
+                expert_planner=planner,
+                dataset_writer=writer,
+                trajectories_per_iteration=1,
+                steps_per_trajectory=2,
+                action_noise_std=0.0,
+                action_noise_seed=0,
+                initial_state_seed=0,
+                expert_mixing_beta=0.0,
+                policy_action_fn=lambda observation: np.array([100.0]),
+                frame_builder=_frame_builder,
+                initial_states=[[0.0]],
+                goal_states=None,
+            )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        # Only the recovered, expert-only frame is saved -- the colliding
+        # policy-executed step never reaches the dataset.
+        self.assertEqual(len(writer.frames), 1)
+        self.assertEqual(writer.frames[0]["action"], [0.5])
+
+        output = stdout.getvalue()
+        self.assertIn("realized_expert_fraction=1.000", output)
+        self.assertIn("executed_steps=1", output)
+
+
+class RestartInitialStateRoundTests(unittest.TestCase):
+    """Coverage for restart_initial_state_round: it must make initial-state/goal
+    sampling reproducible across rounds that key off the same seed, without
+    changing anything when left at its default.
+    """
+
+    @staticmethod
+    def _sample_via_collect(*, round_index: int, restart_initial_state_round: bool) -> tuple[list[float], list[float]]:
+        simulator = _FakeSimulator(collision_threshold=1e9, goal_threshold=1e9)
+        planner = _ConstantPlanner(action=[0.0])
+        writer = _FakeDatasetWriter()
+        collect_dagger_rollouts(
+            simulator=simulator,
+            expert_planner=planner,
+            dataset_writer=writer,
+            trajectories_per_iteration=1,
+            steps_per_trajectory=1,
+            action_noise_std=0.0,
+            action_noise_seed=0,
+            initial_state_seed=7,
+            expert_mixing_beta=1.0,
+            policy_action_fn=None,
+            frame_builder=_frame_builder,
+            initial_states=None,
+            goal_states=None,
+            round_index=round_index,
+            restart_initial_state_round=restart_initial_state_round,
+        )
+        # action=[0.0] never moves the state, so simulator.state is still exactly
+        # the sampled initial state after the one recorded step.
+        return simulator.goal.tolist(), simulator.state.tolist()
+
+    def test_restart_true_makes_rounds_sharing_a_seed_sample_identically(self) -> None:
+        round0 = self._sample_via_collect(round_index=0, restart_initial_state_round=True)
+        round1 = self._sample_via_collect(round_index=1, restart_initial_state_round=True)
+        self.assertEqual(round0, round1)
+
+    def test_restart_false_preserves_todays_behavior_of_varying_by_round(self) -> None:
+        round0 = self._sample_via_collect(round_index=0, restart_initial_state_round=False)
+        round1 = self._sample_via_collect(round_index=1, restart_initial_state_round=False)
+        self.assertNotEqual(round0, round1)
 
 
 if __name__ == "__main__":

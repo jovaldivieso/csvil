@@ -338,6 +338,7 @@ A few flags worth knowing about beyond what's in the policy config:
 - `--expert-mix-beta-decay-rate`: optional per-round schedule `beta_t = max(0, beta_start - rate * t)`; overrides `--expert-mix-beta-end` when set.
 - `--expert-mix-decay-after-eval-success`: optional gate that delays beta decay until evaluation success exceeds a threshold.
 - `--adaptive-beta-recovery` (default `false`): beta increases one schedule step after an eval-success regression; enable for adaptive recovery, or leave disabled for monotonic decay.
+- `--round-seeds` (CLI) / `round_seeds` (YAML): one base seed per DAgger round, in place of the single global `--seed`, for finer curriculum control over random initial-state/goal sampling. `--restart-round-seed` (default `false`): when set, rounds sharing the same `--round-seeds` value resample identically (a true stream restart); when left unset, the round index still varies the draws even if the nominal seed repeats.
 - Aggregation logs progress every 10 episodes and reports `aggregation_success_rate`/`aggregation_mean_steps`; each retrain's in-loop evaluation reports `eval_success_rate`/`eval_mean_steps`. Evaluation defaults to 10 seeded rollouts; tune with `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`.
 
 ### Multi-Robot Workflows
@@ -397,7 +398,7 @@ Use this as a compact quick reference for current entrypoint flags.
 - `learning/train_dagger.py`
   - required args: `--experiment-name`, `--system`, `--expert-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
-  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--initial-states`, `--goal-states`, `--initial-position-min-goal-distance`, `--initial-position-radius-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`
+  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--round-seeds`, `--restart-round-seed`/`--no-restart-round-seed`, `--initial-states`, `--goal-states`, `--initial-position-min-goal-distance`, `--initial-position-radius-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`
   - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--policy-config`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 
 Every flag above also accepts `--help` for its full description, e.g.

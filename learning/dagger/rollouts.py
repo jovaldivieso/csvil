@@ -194,8 +194,12 @@ def collect_dagger_rollouts(
     initial_states: list[np.ndarray] | None = None,
     goal_states: list[np.ndarray] | None = None,
     round_index: int = 0,
+    restart_initial_state_round: bool = False,
 ) -> DaggerEvalMetrics:
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
+    # Scoped to initial-state/goal sampling only: action-noise and expert-mixing
+    # randomness always keep varying by round_index, regardless of this flag.
+    initial_state_round_index = None if restart_initial_state_round else round_index
     if policy_action_fn is None and expert_mixing_beta < 1.0:
         raise ValueError("'policy_action_fn' is required when 'expert_mixing_beta' is less than 1.0.")
     should_query_policy = policy_action_fn is not None and expert_mixing_beta < 1.0
@@ -248,7 +252,7 @@ def collect_dagger_rollouts(
                 episode_goal_seed = initial_state_seed_for_rollout(
                     initial_state_seed,
                     rollout_index=attempted_episodes,
-                    round_index=round_index,
+                    round_index=initial_state_round_index,
                 )
                 simulator.randomize_goal_for_reset(rng_for_seed_spec(simulator, episode_goal_seed))
         else:
@@ -261,7 +265,7 @@ def collect_dagger_rollouts(
             episode_initial_state_seed = initial_state_seed_for_rollout(
                 initial_state_seed,
                 rollout_index=attempted_episodes,
-                round_index=round_index,
+                round_index=initial_state_round_index,
             )
             sampled_initial_state = sample_initial_state(simulator, episode_initial_state_seed)
         state = simulator.reset(sampled_initial_state)
@@ -294,9 +298,10 @@ def collect_dagger_rollouts(
         reached_goal = False
         rollout_steps = steps_per_trajectory
         episode_frame_buffers: list[list[dict[str, object]]] | None = None
+        episode_actor_is_expert: list[bool] = []
         visited_states: list[np.ndarray] = []
 
-        def append_frame(observation: np.ndarray, action: np.ndarray) -> None:
+        def append_frame(observation: np.ndarray, action: np.ndarray, *, is_expert_action: bool) -> None:
             nonlocal episode_frame_buffers
             built_frame = frame_builder(observation, action)
             if isinstance(built_frame, (list, tuple)):
@@ -316,6 +321,7 @@ def collect_dagger_rollouts(
                 episode_frame_buffers[0].append(ensure_task_field(dict(built_frame)))
             else:
                 raise TypeError("'frame_builder' must return a mapping or a list/tuple of mappings, got " f"{type(built_frame).__name__}.")
+            episode_actor_is_expert.append(is_expert_action)
 
         def complete_from_candidate(candidate_index: int) -> tuple[bool, np.ndarray, int, str]:
             nonlocal episode_frame_buffers
@@ -325,6 +331,7 @@ def collect_dagger_rollouts(
             if episode_frame_buffers is not None:
                 for frame_buffer in episode_frame_buffers:
                     del frame_buffer[candidate_index:]
+            del episode_actor_is_expert[candidate_index:]
 
             candidate_state = visited_states[candidate_index].copy()
             state_after_action = simulator.reset(candidate_state)
@@ -374,7 +381,7 @@ def collect_dagger_rollouts(
                 else 0
             )
             if frame_count <= candidate_index:
-                append_frame(observation, candidate_action)
+                append_frame(observation, candidate_action, is_expert_action=True)
 
             state_after_action = simulator.step(state_after_action, executed_action)
             completion_steps += 1
@@ -411,7 +418,7 @@ def collect_dagger_rollouts(
                 if collided:
                     return False, state_after_action, completion_steps, collision_summary
 
-                append_frame(observation, expert_action)
+                append_frame(observation, expert_action, is_expert_action=True)
                 state_after_action = simulator.step(state_after_action, executed_action)
                 completion_steps += 1
                 collided, collision_summary = _detect_collision(simulator, state_after_action)
@@ -503,10 +510,8 @@ def collect_dagger_rollouts(
 
             use_expert_action = bool(episode_expert_mixing_rng.random() < expert_mixing_beta)
             policy_action = policy_action_fn(observation) if should_query_policy else None
-            append_frame(observation, expert_action)
+            append_frame(observation, expert_action, is_expert_action=use_expert_action)
             base_action = expert_action if use_expert_action or policy_action is None else policy_action
-            expert_executed_steps += int(use_expert_action)
-            total_executed_steps += 1
             state = simulator.step(
                 state,
                 apply_execution_noise(simulator, base_action, action_noise_std, episode_action_noise_rng),
@@ -537,6 +542,8 @@ def collect_dagger_rollouts(
 
         if planner_failed or episode_discarded:
             continue
+        total_executed_steps += len(episode_actor_is_expert)
+        expert_executed_steps += sum(episode_actor_is_expert)
         if episode_frame_buffers is None:
             raise RuntimeError("'frame_builder' produced no frames for the rollout.")
         for frame_buffer in episode_frame_buffers:

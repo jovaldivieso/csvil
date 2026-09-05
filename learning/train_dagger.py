@@ -113,6 +113,8 @@ class DaggerConfig:
     initial_states: list[np.ndarray] | None = None
     goal_states: list[np.ndarray] | None = None
     training_curriculum: list[str] | None = None
+    round_seeds: list[int] | None = None
+    restart_round_seed: bool = False
     initial_position_min_goal_distance: float | None = None
     initial_position_radius_bounds: list[float] | None = None
     tolerance_overrides: dict[str, float] | None = None
@@ -166,6 +168,11 @@ class DaggerConfig:
                 )
             if any(mode not in {"random", "config"} for mode in self.training_curriculum):
                 raise ValueError("'training_curriculum' entries must be 'random' or 'config'.")
+        if self.round_seeds is not None and len(self.round_seeds) != self.dagger_iterations:
+            raise ValueError(
+                "'round_seeds' must contain exactly one entry per DAgger round "
+                f"({self.dagger_iterations}), got {len(self.round_seeds)}."
+            )
         if self.initial_position_min_goal_distance is not None and self.initial_position_min_goal_distance < 0:
             raise ValueError("'initial_position_min_goal_distance' must be non-negative.")
         if self.initial_position_radius_bounds is not None:
@@ -206,7 +213,8 @@ class DaggerTrainer:
         epochs: list[float],
         rounds: int,
         training_curriculum: list[str] | None = None,
-    ) -> tuple[list[int], list[float], list[str] | None]:
+        round_seeds: list[int] | None = None,
+    ) -> tuple[list[int], list[float], list[str] | None, list[int] | None]:
         def expand(values: list[Any], name: str) -> list[Any]:
             if len(values) == 1:
                 return values if rounds == 0 else values * rounds
@@ -219,6 +227,7 @@ class DaggerTrainer:
             expand(trajectories, "trajectories-per-iteration"),
             expand(epochs, "target-epochs-per-round"),
             expand(training_curriculum, "training-curriculum") if training_curriculum is not None else None,
+            expand(round_seeds, "round-seeds") if round_seeds is not None else None,
         )
 
     def setup(self) -> None:
@@ -614,6 +623,11 @@ class DaggerTrainer:
             )
             round_initial_states = self.cfg.initial_states if mode == "config" else None
             round_goal_states = self.cfg.goal_states if mode == "config" else None
+            round_initial_state_seed = (
+                self.cfg.round_seeds[schedule]
+                if self.cfg.round_seeds is not None
+                else self.initial_state_seed
+            )
             collection_config = self._apply_runtime_config_overrides(
                 copy.deepcopy(dict(self.seeded_config))
             )
@@ -684,11 +698,12 @@ class DaggerTrainer:
                     steps_per_trajectory=self.cfg.steps_per_trajectory,
                     action_noise_std=self.cfg.action_noise_std,
                     action_noise_seed=self.action_noise_seed,
-                    initial_state_seed=self.initial_state_seed,
+                    initial_state_seed=round_initial_state_seed,
                     initial_states=round_initial_states,
                     goal_states=round_goal_states,
                     expert_mixing_beta=round_beta,
                     round_index=schedule,
+                    restart_initial_state_round=self.cfg.restart_round_seed,
                     policy_action_fn=action_fn,
                     policy_reset_fn=reset_policy_state,
                     frame_builder=frames,
@@ -753,6 +768,25 @@ def parse_args() -> argparse.Namespace:
         help=(
             "one 'random' or 'config' entry per DAgger round, selecting whether that round's "
             "rollouts use random goals/states or the explicit --initial-states/--goal-states lists."
+        ),
+    )
+    p.add_argument(
+        "--round-seeds",
+        nargs="+",
+        type=int,
+        default=None,
+        help=(
+            "one base seed per DAgger round, controlling which seed drives that round's "
+            "random initial-state/goal sampling instead of the single global --seed."
+        ),
+    )
+    p.add_argument(
+        "--restart-round-seed",
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "when set, rounds sharing the same --round-seeds value replay identical random "
+            "initial-state/goal draws (a true stream restart); when unset, the round index "
+            "still varies the draws even if the nominal seed repeats (today's behavior)."
         ),
     )
     p.add_argument(
@@ -873,6 +907,8 @@ def main() -> None:
         else goal_states_config
     )
     training_curriculum_config = option("training_curriculum", None)
+    round_seeds_config = option("round_seeds", None)
+    restart_round_seed = bool(option("restart_round_seed", False))
     tolerance_overrides_config = option("tolerance_overrides", None)
     if isinstance(tolerance_overrides_config, str):
         try:
@@ -900,11 +936,12 @@ def main() -> None:
         if fresh
         else Path(args.dataset_root)
     )
-    trajectories, epochs, training_curriculum = DaggerTrainer.schedules(
+    trajectories, epochs, training_curriculum, round_seeds = DaggerTrainer.schedules(
         trajectories_per_iteration,
         target_epochs_per_round,
         dagger_iterations,
         training_curriculum_config,
+        round_seeds_config,
     )
     
     # path to experiment directory where configs and checkpoints will be saved:
@@ -937,6 +974,8 @@ def main() -> None:
         initial_states=initial_states,
         goal_states=goal_states,
         training_curriculum=training_curriculum,
+        round_seeds=round_seeds,
+        restart_round_seed=restart_round_seed,
         initial_position_min_goal_distance=option("initial_position_min_goal_distance", None),
         initial_position_radius_bounds=option("initial_position_radius_bounds", None),
         tolerance_overrides=tolerance_overrides,

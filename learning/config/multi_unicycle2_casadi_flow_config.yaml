@@ -44,6 +44,8 @@ training:
     vel_tol: 0.5
     omega_tol: 0.5
   training_curriculum: [random, config, random]
+  round_seeds: [0, 0, 0]    # base seed per round for random initial-state/goal sampling
+  restart_round_seed: true  # true replays identical draws whenever round_seeds repeats a value
   initial_states:
     - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
     - [[0.0, -2.0, 1.57, 0.0, 0.0], [0.0, 2.0, -1.57, 0.0, 0.0]]
