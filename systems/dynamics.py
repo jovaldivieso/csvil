@@ -73,6 +73,8 @@ class DynamicsProtocol(Protocol):
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray: ...
 
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray: ...
+
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
     def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray: ...
@@ -101,10 +103,18 @@ class DynamicsProtocol(Protocol):
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None: ...
 
+    def set_goal(self, goal: np.ndarray) -> None: ...
+
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
     @property
     def goal_state(self) -> np.ndarray: ...
+
+    @property
+    def goal_dim(self) -> int: ...
+
+    @property
+    def goal(self) -> np.ndarray: ...
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray: ...
 
@@ -173,6 +183,19 @@ class DynamicsSimulator(ABC):
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         del rng
 
+    def set_goal(self, goal: np.ndarray) -> None:
+        goal_array = np.asarray(goal, dtype=float)
+        if goal_array.shape != self.goal.shape:
+            raise ValueError(
+                f"Goal shape mismatch: expected {self.goal.shape}, got {goal_array.shape}."
+            )
+        self.goal = goal_array.copy()
+
+    @property
+    def goal_dim(self) -> int:
+        """Dimensionality of the goal vector accepted by ``set_goal`` (may differ from ``goal_state``)."""
+        return int(self.goal.shape[0])
+
     def reset_rollout_termination(self) -> None:
         self._rollout_done_counter = 0
 
@@ -190,7 +213,7 @@ class DynamicsSimulator(ABC):
         if hold_steps <= 0:
             raise ValueError("'done_hold_steps' must be a positive integer.")
 
-        if self.is_done(state, validate=False):
+        if self.is_done(state):
             self._rollout_done_counter += 1
         else:
             self._rollout_done_counter = 0
@@ -274,6 +297,11 @@ class DynamicsSimulator(ABC):
         return as_vector(observation, VectorSpec(name="observation", size=int(self.obs_dim)))
 
     @abstractmethod
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        """Return the next state without changing simulator state or time."""
+        pass
+
+    @abstractmethod
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         """Get next state"""
         pass
@@ -300,6 +328,10 @@ class DynamicsSimulator(ABC):
     def reset_random(self) -> np.ndarray:
         """Return a random, dynamically valid initial state"""
         self.randomize_goal_for_reset(self._sampling_rng)
+        return self.reset(self.random_initial_state(self._sampling_rng))
+
+    def reset_random_state_only(self) -> np.ndarray:
+        """Like reset_random(), but keeps the current goal unchanged."""
         return self.reset(self.random_initial_state(self._sampling_rng))
 
     @abstractmethod
@@ -359,9 +391,9 @@ class DynamicsSimulator(ABC):
         state = self.reset(initial_state)
 
         for _ in range(num_steps):
-            obs = self.observe(state, validate=False)
+            obs = self.observe(state)
             action = policy_fn(obs)  # Call your motion planner here
-            state = self.step(state, action, validate=False)
+            state = self.step(state, action)
             states.append(state.copy())
             observations.append(obs)
             actions.append(action)

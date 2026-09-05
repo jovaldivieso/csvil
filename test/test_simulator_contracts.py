@@ -13,6 +13,7 @@ from core.factory import DynamicsFactory
 from core.config import ConfigurationError, validate_system_config
 from planning.casadi_planner import CasadiPlanner
 from systems.dynamics import DynamicsProtocol
+from systems.multi_robot import MultiRobotSimulator
 
 
 def _build_simulators() -> dict[str, DynamicsProtocol]:
@@ -101,6 +102,20 @@ def _assert_partition(slices: list[slice], total_size: int) -> None:
 
 
 class SimulatorContractTests(unittest.TestCase):
+    def test_predict_next_state_is_side_effect_free(self) -> None:
+        simulators = _build_simulators()
+        for name, simulator in simulators.items():
+            state = simulator.reset(simulator.random_initial_state(np.random.default_rng(11)))
+            action = np.zeros(int(simulator.nu), dtype=float)
+            time_before = simulator.time
+            stored_state_before = None if simulator.state is None else simulator.state.copy()
+
+            predicted = simulator.predict_next_state(state, action)
+
+            self.assertEqual(simulator.time, time_before, name)
+            np.testing.assert_array_equal(simulator.state, stored_state_before, err_msg=name)
+            np.testing.assert_allclose(predicted, simulator.step(state, action), err_msg=name)
+
     def test_unicycle1_step_wraps_theta_and_observe_invert_obs_are_so2_consistent(self) -> None:
         simulator = _build_simulators()["unicycle1"]
         state = simulator.reset(np.array([0.0, 0.0, np.pi - 0.01], dtype=float))
@@ -308,6 +323,113 @@ class SimulatorContractTests(unittest.TestCase):
 
         self.assertFalse(bool(simulator.is_euclidean))
         self.assertEqual(tuple(simulator.angular_state_indices), (2, 7))
+
+    def test_is_collision_gates_on_d_collision_not_d_safe(self) -> None:
+        """d_safe is the planner's soft avoidance buffer; d_collision is the physical
+        threshold is_collision() must use. A distance strictly between the two must
+        not be reported as a collision, even though the planner would avoid it."""
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": 0.05,
+                "d_safe": 0.3,
+                "d_collision": 0.1,
+                "robots": [
+                    {"system": "double_integrator", "config": {"dt": 0.05, "goal": [0.0, 0.0], "randomize_goal": False}},
+                    {"system": "double_integrator", "config": {"dt": 0.05, "goal": [2.0, -1.0], "randomize_goal": False}},
+                ],
+            },
+        )
+
+        # 0.2 apart: inside the soft buffer (d_safe=0.3) but outside the physical
+        # collision radius (d_collision=0.1) -- not a real collision.
+        near_state = np.array([0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0])
+        self.assertFalse(simulator.is_collision(near_state))
+        self.assertIsNone(simulator.collision_details(near_state))
+
+        # 0.05 apart: inside the physical collision radius.
+        colliding_state = np.array([0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0])
+        self.assertTrue(simulator.is_collision(colliding_state))
+        details = simulator.collision_details(colliding_state)
+        self.assertIsNotNone(details)
+        self.assertAlmostEqual(details["distance"], 0.05, places=6)
+        self.assertEqual(details["threshold"], 0.1)
+
+    def test_multi_robot_neighbor_observation_includes_relative_heading(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": 0.05,
+                "robots": [
+                    {
+                        "system": "unicycle2",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [0.0, 0.0, 0.0],
+                            "randomize_goal": False,
+                            "randomize_initial_velocity": False,
+                        },
+                    },
+                    {
+                        "system": "unicycle2",
+                        "config": {
+                            "dt": 0.05,
+                            "goal": [1.0, 0.0, 0.0],
+                            "randomize_goal": False,
+                            "randomize_initial_velocity": False,
+                        },
+                    },
+                ],
+            },
+        )
+        state = simulator.reset(
+            np.array([0.0, 0.0, np.pi / 2, 0.0, 0.0, 1.0, 0.0, -np.pi / 2, 0.0, 0.0])
+        )
+
+        neighbor_state = simulator.decentralized_policy_observation(simulator.observe(state))["observation.neighbor_state"]
+        np.testing.assert_allclose(neighbor_state, [0.0, -1.0, 0.0, -1.0], atol=1e-9)
+        self.assertEqual(
+            simulator.get_dataset_features()["observation.neighbor_state"]["names"],
+            ["neighbor_0_x", "neighbor_0_y", "neighbor_0_sin_rel_theta", "neighbor_0_cos_rel_theta"],
+        )
+
+    def test_multi_robot_neighbor_observation_supports_three_dimensional_position(self) -> None:
+        class ThreeDimensionalSimulator:
+            dt = 0.05
+            nx = 3
+            nu = 1
+            max_action = 1.0
+            is_euclidean = True
+            angular_state_indices = ()
+            position_indices = (0, 1, 2)
+
+            def get_dataset_features(self) -> dict[str, object]:
+                return {
+                    "observation.environment_state": {"dtype": "float32", "shape": (3,), "names": ["x", "y", "z"]},
+                    "observation.state": {"dtype": "float32", "shape": (0,), "names": []},
+                    "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
+                    "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
+                    "action": {"dtype": "float32", "shape": (1,), "names": ["action"]},
+                }
+
+            def reset(self, state: np.ndarray) -> np.ndarray:
+                return np.asarray(state, dtype=float)
+
+            def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+                return np.asarray(state, dtype=float)
+
+            def global_vector_to_ego(self, vector: np.ndarray, state: np.ndarray) -> np.ndarray:
+                return np.asarray(vector, dtype=float)
+
+        simulator = MultiRobotSimulator([ThreeDimensionalSimulator(), ThreeDimensionalSimulator()])
+        state = simulator.reset(np.array([0.0, 0.0, 0.0, 1.0, 2.0, 3.0]))
+        neighbor_state = simulator.decentralized_policy_observation(simulator.observe(state))["observation.neighbor_state"]
+
+        np.testing.assert_allclose(neighbor_state, [1.0, 2.0, 3.0])
+        self.assertEqual(
+            simulator.get_dataset_features()["observation.neighbor_state"]["names"],
+            ["neighbor_0_x", "neighbor_0_y", "neighbor_0_z"],
+        )
 
     def test_heading_system_boundary_roundtrip_preserves_so2_state(self) -> None:
         simulators = _build_simulators()

@@ -6,7 +6,10 @@ import casadi as ca
 import numpy as np
 
 from core.types import VectorSpec, as_vector
-from systems.collision_checker import check_homogeneous_fleet_collisions
+from systems.collision_checker import (
+    check_homogeneous_fleet_collisions,
+    first_homogeneous_fleet_collision,
+)
 from systems.dynamics import DynamicsProtocol, DynamicsSimulator
 
 
@@ -31,7 +34,13 @@ class MultiRobotSimulator(DynamicsSimulator):
         ------------------------------
         For each robot, augmented observation ordering is:
 
-        ``[base_environment_features, relative_xy_to_other_robots..., visibility_mask..., base_state_features]``
+        ``[base_environment_features, relative_pose_features..., visibility_mask..., base_state_features]``
+
+        Relative pose features currently consist of relative position coordinates
+        followed by periodic ``sin``/``cos`` features for each declared angular
+        state. This supports planar and higher-dimensional position spaces; a full
+        arbitrary ``SE(3)`` orientation representation requires the sub-simulator
+        to expose an explicit 3D orientation feature convention.
 
         The global observation is the concatenation of these per-robot augmented
         observations in simulator list order.
@@ -52,7 +61,7 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         Visibility-gated relative observation invariant
         ----------------------------------------------
-        Relative x/y terms to other robots are included only when the other robot
+        Relative pose terms to other robots are included only when the other robot
         lies within the observing robot's configured visibility radius. When out
         of range, the corresponding relative term is set to zero and the matching
         mask slot is set to zero so collisions at distance 0 remain distinct from
@@ -85,6 +94,8 @@ class MultiRobotSimulator(DynamicsSimulator):
         self.robot_base_observation_dims: list[int] = []
         self.robot_env_dims: list[int] = []
         self.robot_relative_dims: list[int] = []
+        self.robot_position_indices: list[tuple[int, ...]] = []
+        self.robot_relative_orientation_indices: list[tuple[int, ...]] = []
         self.robot_neighbor_mask_dims: list[int] = []
         self.robot_proprio_dims: list[int] = []
 
@@ -95,7 +106,10 @@ class MultiRobotSimulator(DynamicsSimulator):
             state_end = state_start + int(sim.nx)
             action_end = action_start + int(sim.nu)
             env_dim, proprio_dim = self._observation_feature_dims(sim)
-            relative_dim = 2 * (len(self.simulators) - 1)
+            position_indices = self._validated_state_indices(sim, "position_indices", (0, 1))
+            orientation_indices = self._relative_orientation_indices(sim)
+            relative_feature_dim = len(position_indices) + 2 * len(orientation_indices)
+            relative_dim = relative_feature_dim * (len(self.simulators) - 1)
             mask_dim = len(self.simulators) - 1
             base_obs_dim = env_dim + relative_dim + mask_dim + proprio_dim
             obs_end = obs_start + base_obs_dim
@@ -106,6 +120,8 @@ class MultiRobotSimulator(DynamicsSimulator):
             self.robot_base_observation_dims.append(base_obs_dim)
             self.robot_env_dims.append(env_dim)
             self.robot_relative_dims.append(relative_dim)
+            self.robot_position_indices.append(position_indices)
+            self.robot_relative_orientation_indices.append(orientation_indices)
             self.robot_neighbor_mask_dims.append(mask_dim)
             self.robot_proprio_dims.append(proprio_dim)
 
@@ -142,6 +158,9 @@ class MultiRobotSimulator(DynamicsSimulator):
         # Used by some planners as a symmetric control bound fallback.
         self.max_action = float(max(float(sim.max_action) for sim in self.simulators))
         self.d_safe = float(self.config.get("d_safe", 0.0))
+        self.d_collision = float(self.config.get("d_collision", self.d_safe))
+        if self.d_collision < 0:
+            raise ValueError("'d_collision' must be non-negative.")
         self._is_homogeneous = all(
             type(sim) is type(self.simulators[0])
             and int(sim.nx) == int(self.simulators[0].nx)
@@ -221,6 +240,58 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         return env_dim, proprio_dim
 
+    @staticmethod
+    def _validated_state_indices(
+        simulator: DynamicsProtocol,
+        attribute_name: str,
+        default: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        indices = tuple(int(index) for index in getattr(simulator, attribute_name, default))
+        state_dim = int(simulator.nx)
+        if not indices:
+            raise ValueError(f"Simulator {type(simulator).__name__} must expose at least one {attribute_name}.")
+        for index in indices:
+            if index < 0 or index >= state_dim:
+                raise ValueError(
+                    f"Simulator {type(simulator).__name__} declares invalid {attribute_name} entry "
+                    f"{index} for local state dimension {state_dim}."
+                )
+        return indices
+
+    @staticmethod
+    def _relative_orientation_indices(simulator: DynamicsProtocol) -> tuple[int, ...]:
+        """Return angular state coordinates used for neighbor orientation features."""
+        angular_indices = tuple(int(index) for index in getattr(simulator, "angular_state_indices", ()))
+        if not angular_indices and not bool(simulator.is_euclidean):
+            raise ValueError(
+                f"Non-Euclidean simulator {type(simulator).__name__} must expose angular_state_indices "
+                "to construct relative orientation observations."
+            )
+        state_dim = int(simulator.nx)
+        for index in angular_indices:
+            if index < 0 or index >= state_dim:
+                raise ValueError(
+                    f"Simulator {type(simulator).__name__} declares invalid angular_state_indices entry "
+                    f"{index} for local state dimension {state_dim}."
+                )
+        return angular_indices
+
+    @staticmethod
+    def _relative_feature_names(
+        position_indices: tuple[int, ...], orientation_indices: tuple[int, ...]
+    ) -> tuple[str, ...]:
+        position_labels = ("x", "y", "z")
+        names = [
+            position_labels[coordinate]
+            if coordinate < len(position_labels)
+            else f"position_{state_index}"
+            for coordinate, state_index in enumerate(position_indices)
+        ]
+        for orientation_index in orientation_indices:
+            suffix = "theta" if len(orientation_indices) == 1 else f"angle_{orientation_index}"
+            names.extend((f"sin_rel_{suffix}", f"cos_rel_{suffix}"))
+        return tuple(names)
+
     def _split_state(self, state: np.ndarray, validate: bool = True) -> list[np.ndarray]:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         return [state_array[s].copy() for s in self.robot_state_slices]
@@ -255,7 +326,7 @@ class MultiRobotSimulator(DynamicsSimulator):
 
     def reset(self, initial_state: np.ndarray) -> np.ndarray:
         state = self.validate_state(initial_state)
-        split_state = self._split_state(state, validate=False)
+        split_state = self._split_state(state)
         for sim, robot_state in zip(self.simulators, split_state):
             sim.reset(robot_state)
         self.state = state.copy()
@@ -268,14 +339,39 @@ class MultiRobotSimulator(DynamicsSimulator):
         return check_homogeneous_fleet_collisions(
             robot_states,
             self.simulators[0].position_indices,
-            self.d_safe,
+            self.d_collision,
         )
+
+    def collision_details(self, state: np.ndarray) -> dict[str, float | int] | None:
+        collision = first_homogeneous_fleet_collision(
+            self._split_state(state),
+            self.simulators[0].position_indices,
+            self.d_collision,
+        )
+        if collision is None:
+            return None
+        robot_i, robot_j, distance = collision
+        return {
+            "robot_i": robot_i,
+            "robot_j": robot_j,
+            "distance": distance,
+            "threshold": self.d_collision,
+        }
+
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        split_state = self._split_state(state, validate=validate)
+        split_action = self._split_action(action, validate=validate)
+        next_parts = [
+            sim.predict_next_state(robot_state, robot_action)
+            for sim, robot_state, robot_action in zip(self.simulators, split_state, split_action)
+        ]
+        return np.concatenate(next_parts)
 
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
         split_action = self._split_action(action, validate=validate)
         next_parts = [
-            sim.step(robot_state, robot_action, validate=False)
+            sim.step(robot_state, robot_action)
             for sim, robot_state, robot_action in zip(self.simulators, split_state, split_action)
         ]
         next_state = np.concatenate(next_parts)
@@ -287,18 +383,22 @@ class MultiRobotSimulator(DynamicsSimulator):
         split_state = self._split_state(state, validate=validate)
         positions = []
         for robot_idx, robot_state in enumerate(split_state):
-            if robot_state.shape[0] < 2:
+            position_indices = self.robot_position_indices[robot_idx]
+            if robot_state.shape[0] <= max(position_indices):
                 raise ValueError(
-                    f"Robot {robot_idx} state must include x/y in first two entries for relative observations."
+                    f"Robot {robot_idx} state has {robot_state.shape[0]} elements, but its position "
+                    f"indices {position_indices} require at least {max(position_indices) + 1}."
                 )
-            positions.append(robot_state[:2])
+            positions.append(robot_state[list(position_indices)])
 
         observations: list[np.ndarray] = []
         for robot_idx, (sim, robot_state) in enumerate(zip(self.simulators, split_state)):
-            base_obs = sim.observe(robot_state, validate=False)
+            base_obs = sim.observe(robot_state)
             env_dim = self.robot_env_dims[robot_idx]
             base_env = base_obs[:env_dim]
             base_proprio = base_obs[env_dim:]
+            position_dim = len(self.robot_position_indices[robot_idx])
+            orientation_indices = self.robot_relative_orientation_indices[robot_idx]
 
             rel_parts: list[np.ndarray] = []
             mask_parts: list[float] = []
@@ -308,10 +408,20 @@ class MultiRobotSimulator(DynamicsSimulator):
                 delta = other_pos - positions[robot_idx]
                 visibility_radius = float(self.robot_visibility_radii[robot_idx])
                 if np.isfinite(visibility_radius) and np.linalg.norm(delta) > visibility_radius:
-                    rel_parts.append(np.zeros(2, dtype=float))
+                    rel_parts.append(np.zeros(position_dim + 2 * len(orientation_indices), dtype=float))
                     mask_parts.append(0.0)
                 else:
-                    rel_parts.append(sim.global_vector_to_ego(delta, robot_state))
+                    relative_position = np.asarray(sim.global_vector_to_ego(delta, robot_state), dtype=float).reshape(-1)
+                    if relative_position.shape[0] != position_dim:
+                        raise ValueError(
+                            f"Simulator {type(sim).__name__}.global_vector_to_ego() returned "
+                            f"{relative_position.shape[0]} values for {position_dim} position coordinates."
+                        )
+                    relative_features = list(relative_position)
+                    for orientation_index in orientation_indices:
+                        relative_theta = split_state[other_idx][orientation_index] - robot_state[orientation_index]
+                        relative_features.extend((np.sin(relative_theta), np.cos(relative_theta)))
+                    rel_parts.append(np.asarray(relative_features, dtype=float))
                     mask_parts.append(1.0)
 
             if rel_parts:
@@ -326,7 +436,7 @@ class MultiRobotSimulator(DynamicsSimulator):
 
     def is_done(self, state: np.ndarray, validate: bool = True) -> bool:
         split_state = self._split_state(state, validate=validate)
-        return all(sim.is_done(robot_state, validate=False) for sim, robot_state in zip(self.simulators, split_state))
+        return all(sim.is_done(robot_state) for sim, robot_state in zip(self.simulators, split_state))
 
     def casadi_dynamics(self, x: Any, u: Any) -> Any:
         reference_sim = self.simulators[0]
@@ -353,6 +463,9 @@ class MultiRobotSimulator(DynamicsSimulator):
     def get_dataset_features(self) -> dict[str, Any]:
         env_dim, proprio_dim, action_dim = self._validate_homogeneous_decentralized_dimensions()
         neighbor_count = len(self.simulators) - 1
+        orientation_indices = self.robot_relative_orientation_indices[0]
+        position_indices = self.robot_position_indices[0]
+        relative_feature_names = self._relative_feature_names(position_indices, orientation_indices)
         base_features = self.simulators[0].get_dataset_features()
         env_feature = base_features["observation.environment_state"]
         state_feature = base_features["observation.state"]
@@ -362,11 +475,14 @@ class MultiRobotSimulator(DynamicsSimulator):
             "observation.state": dict(state_feature),
             "observation.neighbor_state": {
                 "dtype": "float32",
-                "shape": (2 * neighbor_count,),
+                "shape": (len(relative_feature_names) * neighbor_count,),
                 "names": [
                     name
                     for neighbor_idx in range(neighbor_count)
-                    for name in (f"neighbor_{neighbor_idx}_x", f"neighbor_{neighbor_idx}_y")
+                    for name in (
+                        f"neighbor_{neighbor_idx}_{relative_name}"
+                        for relative_name in relative_feature_names
+                    )
                 ],
             },
             "observation.neighbor_mask": {
@@ -386,24 +502,45 @@ class MultiRobotSimulator(DynamicsSimulator):
                 sim.randomize_goal_for_reset(rng)
 
             goals = [sim.goal_state for sim in self.simulators]
-            if self._positions_respect_d_safe(goals):
+            if self._positions_respect_d_collision(goals):
                 return
 
         raise RuntimeError(
             "Failed to sample safe multi-robot goals. "
-            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
+            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_collision={self.d_collision}."
         )
+
+    def set_goal(self, goal: np.ndarray) -> None:
+        goal_array = np.asarray(goal, dtype=float)
+        goal_dims = [int(sim.goal_dim) for sim in self.simulators]
+        expected_shape = (sum(goal_dims),)
+        if goal_array.shape != expected_shape:
+            raise ValueError(
+                f"Goal shape mismatch: expected {expected_shape}, got {goal_array.shape}."
+            )
+        offset = 0
+        for sim, goal_dim in zip(self.simulators, goal_dims):
+            sim.set_goal(goal_array[offset:offset + goal_dim])
+            offset += goal_dim
+
+    @property
+    def goal_dim(self) -> int:
+        return sum(int(sim.goal_dim) for sim in self.simulators)
+
+    @property
+    def goal(self) -> np.ndarray:
+        return np.concatenate([np.asarray(sim.goal, dtype=float) for sim in self.simulators])
 
     def reset_random(self) -> np.ndarray:
         return self.reset(
             self._sample_safe_initial_state(rng=self._sampling_rng, randomize_goals=True)
         )
 
-    def _positions_respect_d_safe(self, states: list[np.ndarray]) -> bool:
+    def _positions_respect_d_collision(self, states: list[np.ndarray]) -> bool:
         return not check_homogeneous_fleet_collisions(
             states,
             self.simulators[0].position_indices,
-            self.d_safe,
+            self.d_collision,
         )
 
     def _sample_safe_initial_state(
@@ -418,12 +555,12 @@ class MultiRobotSimulator(DynamicsSimulator):
             for sim in self.simulators:
                 states.append(sim.random_initial_state(rng))
 
-            if self._positions_respect_d_safe(states):
+            if self._positions_respect_d_collision(states):
                 return np.concatenate(states)
 
         raise RuntimeError(
-            "Unable to sample a multi-robot initial state that satisfies d_safe. "
-            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
+            "Unable to sample a multi-robot initial state that satisfies d_collision. "
+            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_collision={self.d_collision}."
         )
 
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
@@ -431,7 +568,7 @@ class MultiRobotSimulator(DynamicsSimulator):
         states = []
         for robot_id, (sim, robot_obs) in enumerate(zip(self.simulators, split_obs)):
             base_obs = self._base_observation_from_augmented(robot_id, robot_obs)
-            states.append(sim.invert_obs(base_obs, validate=False))
+            states.append(sim.invert_obs(base_obs))
         state = np.concatenate(states)
         return self.validate_state(state) if validate else state
 

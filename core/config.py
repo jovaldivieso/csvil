@@ -111,6 +111,7 @@ class MultiRobotMemberConfig:
 class MultiRobotSystemConfig:
     dt: float = 0.05
     d_safe: float = 0.0
+    d_collision: float = 0.0
     robots: tuple[MultiRobotMemberConfig, ...] = ()
     inter_robot_visibility_radius: float | tuple[float, ...] = float("inf")
     error_tolerance: float = 0.05
@@ -404,6 +405,7 @@ def _allowed_multi_robot_keys() -> set[str]:
     return {
         "dt",
         "d_safe",
+        "d_collision",
         "robots",
         "inter_robot_visibility_radius",
         "error_tolerance",
@@ -425,6 +427,38 @@ def _allowed_multi_robot_keys() -> set[str]:
 
 def _allowed_multi_robot_entry_keys() -> set[str]:
     return {"system", "start", "config"}
+
+
+def _allowed_homogeneous_fleet_shorthand_keys() -> set[str]:
+    return {"num_robots", "system", "config"}
+
+
+def _expand_homogeneous_fleet_shorthand(robots_raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Expand the {num_robots, system, config} homogeneous-fleet shorthand into a full robots list.
+
+    Lets a config express N identical robots once instead of repeating the same
+    {system, config} entry N times; heterogeneous fleets (mixed systems, per-robot
+    'start') still use the long list-of-entries form.
+    """
+    _require_only_known_keys(
+        robots_raw,
+        _allowed_homogeneous_fleet_shorthand_keys(),
+        context="'robots' homogeneous-fleet shorthand",
+    )
+    if "num_robots" not in robots_raw:
+        raise ConfigurationError("'robots' homogeneous-fleet shorthand requires 'num_robots'.")
+    num_robots = robots_raw["num_robots"]
+    if not isinstance(num_robots, int) or isinstance(num_robots, bool) or num_robots <= 0:
+        raise ConfigurationError("'robots.num_robots' must be a positive integer.")
+    if "system" not in robots_raw or not isinstance(robots_raw["system"], str):
+        raise ConfigurationError("'robots.system' must be a string in the homogeneous-fleet shorthand.")
+    shared_config = robots_raw.get("config", {})
+    if not isinstance(shared_config, Mapping):
+        raise ConfigurationError("'robots.config' must be a mapping in the homogeneous-fleet shorthand.")
+    return [
+        {"system": robots_raw["system"], "config": dict(shared_config)}
+        for _ in range(num_robots)
+    ]
 
 
 def _validate_environment_config(raw_environment: Any, *, key_name: str) -> dict[str, Any]:
@@ -723,12 +757,24 @@ def validate_system_config(
         d_safe = _float(raw_config, "d_safe", 0.0)
         if d_safe < 0:
             raise ConfigurationError("'d_safe' must be non-negative.")
+        d_collision = _float(raw_config, "d_collision", d_safe)
+        if d_collision < 0:
+            raise ConfigurationError("'d_collision' must be non-negative.")
+        if d_collision > d_safe:
+            raise ConfigurationError(
+                "'d_collision' must not exceed 'd_safe': d_safe is the planner's soft buffer "
+                "distance and d_collision is the physical collision threshold, so d_collision "
+                "> d_safe would let the expert plan states the simulator immediately flags as "
+                "collisions."
+            )
 
         error_tolerance = _float(raw_config, "error_tolerance", 0.05)
         if error_tolerance <= 0:
             raise ConfigurationError("'error_tolerance' must be positive.")
 
         robots_raw = raw_config.get("robots")
+        if isinstance(robots_raw, Mapping):
+            robots_raw = _expand_homogeneous_fleet_shorthand(robots_raw)
         if not isinstance(robots_raw, list) or len(robots_raw) == 0:
             raise ConfigurationError("'robots' must be a non-empty list of robot configurations.")
 
@@ -830,6 +876,7 @@ def validate_system_config(
         fleet_cfg = MultiRobotSystemConfig(
             dt=dt,
             d_safe=d_safe,
+            d_collision=d_collision,
             robots=tuple(members),
             inter_robot_visibility_radius=visibility_radius,
             error_tolerance=error_tolerance,
@@ -841,6 +888,7 @@ def validate_system_config(
         config_out: dict[str, Any] = {
             "dt": fleet_cfg.dt,
             "d_safe": fleet_cfg.d_safe,
+            "d_collision": fleet_cfg.d_collision,
             "error_tolerance": fleet_cfg.error_tolerance,
             "action_noise_seed": action_noise_seed,
             "robots": [

@@ -71,7 +71,7 @@ class Unicycle2(DynamicsSimulator):
     def angular_state_indices(self) -> tuple[int, ...]:
         return (2,)
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         """
         applies one simulation step
         """
@@ -90,6 +90,9 @@ class Unicycle2(DynamicsSimulator):
         omega = np.clip(omega + a_omega * self.dt, -self.max_omega, self.max_omega)
 
         return np.array([x, y, theta, v, omega], dtype=float)
+
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        return self.predict_next_state(state, action, validate=validate)
 
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray:
         """

@@ -3,6 +3,7 @@
 
 model:
   policy_type: mlp                # Explicitly added for factory parity
+  observation_horizon: 1
   # Hidden layer widths for MLPPolicy(state_dim -> ... -> action_dim)
   hidden_dims: [512, 256, 128]
   encoder: deepset

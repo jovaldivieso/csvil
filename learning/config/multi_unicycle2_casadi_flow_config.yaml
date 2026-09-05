@@ -5,7 +5,8 @@ model:
   flow:
     num_inference_steps: 10     # Euler integration steps for ODE sampling
 
-  prediction_horizon: 15        # number of future action steps to predict, set to 1 for single-step prediction
+  observation_horizon: 2        # number of past observation steps to consider
+  prediction_horizon: 10        # number of future action steps to predict, set to 1 for single-step prediction
   hidden_dims: [256, 256, 256]  # Velocity prediction network hidden layers
   
   encoder: deepset              # Set to transformer, GNN, etc
@@ -22,3 +23,38 @@ model:
   #  num_heads: 4
   #  num_layers: 1
   #  dropout: 0.1
+
+# Optional DAgger defaults. Explicit command-line arguments override these values.
+training:
+  dagger_iterations: 3
+  trajectories_per_iteration: [200, 150, 100]
+  steps_per_trajectory: 200
+  target_epochs_per_round: [50, 40, 30]
+  action_noise_std: 0.03
+  expert_mix_beta_start: 0.5
+  expert_mix_beta_decay_rate: 0.25
+  expert_mix_decay_after_eval_success: 0.5
+  # adaptive_beta_recovery: true
+  eval_episodes: 100
+  initial_position_min_goal_distance: 0.05
+  initial_position_radius_bounds: [0.05, 3.0]
+  tolerance_overrides:
+    pos_tol: 0.2
+    theta_tol: 1.1
+    vel_tol: 0.5
+    omega_tol: 0.5
+  training_curriculum: [random, config, random]
+  round_seeds: [0, 0, 0]    # base seed per round for random initial-state/goal sampling
+  restart_round_seed: true  # true replays identical draws whenever round_seeds repeats a value
+  initial_states:
+    - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
+    - [[0.0, -2.0, 1.57, 0.0, 0.0], [0.0, 2.0, -1.57, 0.0, 0.0]]
+    - [[-1.5, -1.5, 0.79, 0.0, 0.0], [1.5, 1.5, -2.36, 0.0, 0.0]]
+    - [[-1.5, 1.5, -0.79, 0.0, 0.0], [1.5, -1.5, 2.36, 0.0, 0.0]]
+    - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
+  goal_states:
+    - [[2.0, 0.0, 0.0], [-2.0, 0.0, 3.14]]
+    - [[0.0, 2.0, 1.57], [0.0, -2.0, -1.57]]
+    - [[1.5, 1.5, 0.79], [-1.5, -1.5, -2.36]]
+    - [[1.5, -1.5, -0.79], [-1.5, 1.5, 2.36]]
+    - [[0.5, 1.5, 1.57], [-0.5, -1.5, -1.57]]

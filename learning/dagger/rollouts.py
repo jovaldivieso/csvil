@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping
 
 import numpy as np
@@ -16,8 +17,59 @@ from systems.seed_utils import (
 )
 
 from .metrics import DaggerEvalMetrics
-from .utils import evaluation_seed_specs, sample_initial_state
-from systems.initial_state_utils import normalize_initial_state_specs
+from .utils import evaluation_seed_specs, rng_for_seed_spec, sample_initial_state
+from systems.initial_state_utils import normalize_goal_state_specs, normalize_initial_state_specs
+
+
+class ObservationHistoryBuffer:
+    """Per-robot rolling buffer that zero-fills missing frames during warm-up."""
+
+    def __init__(self, observation_horizon: int, num_robots: int) -> None:
+        if observation_horizon <= 0:
+            raise ValueError("'observation_horizon' must be positive.")
+        if num_robots <= 0:
+            raise ValueError("'num_robots' must be positive.")
+        self.observation_horizon = int(observation_horizon)
+        self._buffers: list[deque[Mapping[str, np.ndarray]]] = [
+            deque(maxlen=self.observation_horizon) for _ in range(num_robots)
+        ]
+
+    def reset(self) -> None:
+        for buffer in self._buffers:
+            buffer.clear()
+
+    def append_and_stack(
+        self,
+        robot_id: int,
+        observation: Mapping[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Stack neighbor history time-major, zero-padding any not-yet-collected frames.
+
+        Zero-filling both the feature and mask for a padded slot (rather than
+        repeating the earliest real frame) matches how an out-of-visibility
+        neighbor is already represented elsewhere: a masked-out (feature=0,
+        mask=0) pair, not a plausible-looking duplicate the model could mistake
+        for real motion history.
+        """
+        if robot_id < 0 or robot_id >= len(self._buffers):
+            raise IndexError(f"robot_id {robot_id} is out of bounds for {len(self._buffers)} robots.")
+        frame = {
+            name: np.asarray(value, dtype=np.float32).reshape(-1)
+            for name, value in observation.items()
+        }
+        buffer = self._buffers[robot_id]
+        buffer.append(frame)
+        frames = list(buffer)
+        pad_count = self.observation_horizon - len(frames)
+        history_stacked_fields = ("observation.neighbor_state", "observation.neighbor_mask")
+        stacked: dict[str, np.ndarray] = {}
+        for name in frame:
+            if name in history_stacked_fields:
+                padding = [np.zeros_like(frames[0][name]) for _ in range(pad_count)]
+                stacked[name] = np.concatenate(padding + [f[name] for f in frames]).astype(np.float32, copy=False)
+            else:
+                stacked[name] = frames[-1][name]
+        return stacked
 
 
 def build_decentralized_joint_action(
@@ -25,15 +77,29 @@ def build_decentralized_joint_action(
     policy,
     observation: np.ndarray,
     device: torch.device,
+    observation_horizon: int = 1,
+    history_buffer: ObservationHistoryBuffer | None = None,
 ) -> np.ndarray:
     """Query the shared decentralized policy once for the entire robot fleet."""
     robot_observations = [
         simulator.decentralized_policy_observation(observation, robot_id)
         for robot_id in range(int(simulator.num_robots))
     ]
+    if observation_horizon <= 0:
+        raise ValueError("'observation_horizon' must be positive.")
+    if observation_horizon > 1 and history_buffer is None:
+        raise ValueError("history_buffer is required when observation_horizon is greater than one.")
+    if history_buffer is not None and history_buffer.observation_horizon != observation_horizon:
+        raise ValueError("history_buffer horizon must match observation_horizon.")
+    stacked_robot_observations = [
+        history_buffer.append_and_stack(robot_id, robot_observation)
+        if history_buffer is not None
+        else robot_observation
+        for robot_id, robot_observation in enumerate(robot_observations)
+    ]
     policy_input = {
         name: torch.as_tensor(
-            np.stack([robot_observation[name] for robot_observation in robot_observations]),
+            np.stack([robot_observation[name] for robot_observation in stacked_robot_observations]),
             dtype=torch.float32,
         ).to(device)
         for name in robot_observations[0]
@@ -66,6 +132,52 @@ def apply_execution_noise(
     return np.clip(action + noise, -simulator.max_action, simulator.max_action)
 
 
+STEP_LIMIT_RECOVERY_FAILURE = "expert did not reach the goal within the step limit"
+
+MAX_BACKTRACK_CANDIDATES = 12
+
+
+def _geometric_backtrack_indices(history_len: int, max_candidates: int = MAX_BACKTRACK_CANDIDATES) -> list[int]:
+    """Select a bounded, geometrically-spaced set of backtrack candidate indices.
+
+    Each candidate re-runs the expert closed-loop for up to O(T) steps, so an
+    unbounded backward scan over every visited state is O(T^2) planner solves
+    in the worst case. Sampling with exponentially growing stride keeps
+    coverage dense near the failure point (where a 1-2 step correction is most
+    likely to work) while capping the total number of full re-solves at
+    ``max_candidates``, regardless of how long the episode ran. Index 0 (the
+    episode's true initial state) is always included as the final fallback,
+    preserving the existing "always try s_0 as a last resort" guarantee.
+    """
+    if history_len <= 0:
+        return []
+    indices: list[int] = []
+    step_back = 1
+    current = history_len - 1
+    while current >= 0 and len(indices) < max_candidates:
+        indices.append(current)
+        current -= step_back
+        step_back *= 2
+    if indices[-1] != 0:
+        indices.append(0)
+    return indices
+
+
+def _detect_collision(simulator: DynamicsProtocol, state: np.ndarray) -> tuple[bool, str]:
+    """Single collision-distance pass; returns (collided, human-readable summary)."""
+    details_fn = getattr(simulator, "collision_details", None)
+    if not callable(details_fn):
+        return bool(simulator.is_collision(state)), "collision details unavailable"
+    details = details_fn(state)
+    if details is None:
+        return False, "collision details unavailable"
+    return True, (
+        f"robots=({details['robot_i']}, {details['robot_j']}), "
+        f"distance={float(details['distance']):.6f}, "
+        f"d_collision={float(details['threshold']):.6f}"
+    )
+
+
 def collect_dagger_rollouts(
     simulator: DynamicsProtocol,
     expert_planner: PlannerProtocol,
@@ -80,8 +192,14 @@ def collect_dagger_rollouts(
     policy_reset_fn: Callable[[], None] | None = None,
     frame_builder: Callable[[np.ndarray, np.ndarray], Mapping[str, object] | list[Mapping[str, object]] | tuple[Mapping[str, object], ...]] | None = None,
     initial_states: list[np.ndarray] | None = None,
+    goal_states: list[np.ndarray] | None = None,
+    round_index: int = 0,
+    restart_initial_state_round: bool = False,
 ) -> DaggerEvalMetrics:
     """Collect DAgger trajectories with expert relabeling and mixed execution."""
+    # Scoped to initial-state/goal sampling only: action-noise and expert-mixing
+    # randomness always keep varying by round_index, regardless of this flag.
+    initial_state_round_index = None if restart_initial_state_round else round_index
     if policy_action_fn is None and expert_mixing_beta < 1.0:
         raise ValueError("'policy_action_fn' is required when 'expert_mixing_beta' is less than 1.0.")
     should_query_policy = policy_action_fn is not None and expert_mixing_beta < 1.0
@@ -106,6 +224,7 @@ def collect_dagger_rollouts(
             frame["task"] = "reach target"
         return frame
 
+    baseline_goal = simulator.goal.copy()
     while successful_episodes < trajectories_per_iteration:
         attempted_episodes += 1
         if attempted_episodes > max_attempts:
@@ -114,33 +233,64 @@ def collect_dagger_rollouts(
                 f"Collected {successful_episodes}/{trajectories_per_iteration} episodes."
             )
         provided_initial_states = normalize_initial_state_specs(simulator, initial_states)
-        if attempted_episodes <= len(provided_initial_states):
+        provided_goal_states = normalize_goal_state_specs(simulator, goal_states)
+        have_goal_states = bool(goal_states)
+        usable_count = (
+            min(len(provided_initial_states), len(provided_goal_states))
+            if have_goal_states
+            else len(provided_initial_states)
+        )
+        if attempted_episodes <= usable_count:
             sampled_initial_state = provided_initial_states[attempted_episodes - 1]
+            if have_goal_states:
+                simulator.set_goal(provided_goal_states[attempted_episodes - 1])
+            else:
+                # An explicit initial state was provided without a paired goal:
+                # still honor randomize_goal_for_reset so these episodes vary
+                # per the collection config, instead of silently freezing at
+                # the baseline goal for as many initial states as were given.
+                episode_goal_seed = initial_state_seed_for_rollout(
+                    initial_state_seed,
+                    rollout_index=attempted_episodes,
+                    round_index=initial_state_round_index,
+                )
+                simulator.randomize_goal_for_reset(rng_for_seed_spec(simulator, episode_goal_seed))
         else:
+            # A prior episode's explicit goal mutates the simulator; restore the
+            # config's baseline goal before any fallback sampling, since
+            # randomize_goal_for_reset() is a no-op under `randomize_goal: false`
+            # and would otherwise silently leak that leftover explicit goal into
+            # this episode instead of the configured/default one.
+            simulator.set_goal(baseline_goal)
             episode_initial_state_seed = initial_state_seed_for_rollout(
                 initial_state_seed,
                 rollout_index=attempted_episodes,
+                round_index=initial_state_round_index,
             )
             sampled_initial_state = sample_initial_state(simulator, episode_initial_state_seed)
         state = simulator.reset(sampled_initial_state)
-        if simulator.is_collision(state):
+        collided, summary = _detect_collision(simulator, state)
+        if collided:
             print(
                 "Skipping DAgger episode due to colliding initial state "
-                f"(attempt={attempted_episodes})."
+                f"(attempt={attempted_episodes}, {summary})."
             )
             continue
         episode_initial_state = state.copy()
         episode_noise_seed = action_noise_seed_for_rollout(
             action_noise_seed,
             rollout_index=attempted_episodes,
+            round_index=round_index,
         )
         episode_action_noise_rng = np.random.default_rng(episode_noise_seed)
         episode_expert_mixing_seed = expert_mixing_seed_for_rollout(
             action_noise_seed,
             rollout_index=attempted_episodes,
+            round_index=round_index,
         )
         episode_expert_mixing_rng = np.random.default_rng(episode_expert_mixing_seed)
         planner_failed = False
+        episode_discarded = False
         if policy_reset_fn is not None:
             policy_reset_fn()
         if hasattr(expert_planner, "reset"):
@@ -148,9 +298,177 @@ def collect_dagger_rollouts(
         reached_goal = False
         rollout_steps = steps_per_trajectory
         episode_frame_buffers: list[list[dict[str, object]]] | None = None
+        episode_actor_is_expert: list[bool] = []
+        visited_states: list[np.ndarray] = []
+
+        def append_frame(observation: np.ndarray, action: np.ndarray, *, is_expert_action: bool) -> None:
+            nonlocal episode_frame_buffers
+            built_frame = frame_builder(observation, action)
+            if isinstance(built_frame, (list, tuple)):
+                if episode_frame_buffers is None:
+                    episode_frame_buffers = [[] for _ in built_frame]
+                elif len(episode_frame_buffers) != len(built_frame):
+                    raise ValueError("'frame_builder' must return the same number of per-robot frames at every rollout step.")
+                for robot_idx, frame in enumerate(built_frame):
+                    if not isinstance(frame, Mapping):
+                        raise TypeError("'frame_builder' list/tuple items must be mappings, got " f"{type(frame).__name__}.")
+                    episode_frame_buffers[robot_idx].append(ensure_task_field(dict(frame)))
+            elif isinstance(built_frame, Mapping):
+                if episode_frame_buffers is None:
+                    episode_frame_buffers = [[]]
+                elif len(episode_frame_buffers) != 1:
+                    raise ValueError("'frame_builder' cannot switch between per-robot and single-frame outputs within one rollout.")
+                episode_frame_buffers[0].append(ensure_task_field(dict(built_frame)))
+            else:
+                raise TypeError("'frame_builder' must return a mapping or a list/tuple of mappings, got " f"{type(built_frame).__name__}.")
+            episode_actor_is_expert.append(is_expert_action)
+
+        def complete_from_candidate(candidate_index: int) -> tuple[bool, np.ndarray, int, str]:
+            nonlocal episode_frame_buffers
+            if candidate_index < 0 or candidate_index >= len(visited_states):
+                return False, state.copy(), 0, "candidate state is unavailable"
+
+            if episode_frame_buffers is not None:
+                for frame_buffer in episode_frame_buffers:
+                    del frame_buffer[candidate_index:]
+            del episode_actor_is_expert[candidate_index:]
+
+            candidate_state = visited_states[candidate_index].copy()
+            state_after_action = simulator.reset(candidate_state)
+            # reset() unconditionally zeroes the consecutive-done-steps hold counter,
+            # forgetting any in-tolerance progress already made up to this candidate.
+            # Replaying should_terminate_rollout over the retained prefix rebuilds it
+            # exactly: since the original forward pass never terminated on any of
+            # these same states (or backtracking would not have been reached at all),
+            # every call below is guaranteed to return False, so only its counter
+            # side effect matters. visited_states[0] is s_0, the initial reset state,
+            # which the forward loop below only ever checks starting from s_1 (after
+            # the first transition) -- replaying it here would count a check that
+            # never happened, so it's excluded.
+            for prefix_state in visited_states[1 : candidate_index + 1]:
+                simulator.should_terminate_rollout(prefix_state)
+            if hasattr(expert_planner, "reset"):
+                expert_planner.reset()
+
+            completion_steps = 0
+            observation = simulator.observe(state_after_action)
+            try:
+                candidate_action = expert_planner(observation)
+            except PlannerSolveError as exc:
+                return False, state_after_action, completion_steps, f"planner failure: {exc}"
+            label_next_state = simulator.predict_next_state(
+                state_after_action, candidate_action
+            )
+            collided, collision_summary = _detect_collision(simulator, label_next_state)
+            if collided:
+                return False, state_after_action, completion_steps, f"unsafe expert label: {collision_summary}"
+            executed_action = apply_execution_noise(
+                simulator,
+                candidate_action,
+                action_noise_std,
+                episode_action_noise_rng,
+            )
+            predicted_state = simulator.predict_next_state(
+                state_after_action, executed_action
+            )
+            collided, collision_summary = _detect_collision(simulator, predicted_state)
+            if collided:
+                return False, state_after_action, completion_steps, collision_summary
+
+            frame_count = (
+                len(episode_frame_buffers[0])
+                if episode_frame_buffers is not None
+                else 0
+            )
+            if frame_count <= candidate_index:
+                append_frame(observation, candidate_action, is_expert_action=True)
+
+            state_after_action = simulator.step(state_after_action, executed_action)
+            completion_steps += 1
+            collided, collision_summary = _detect_collision(simulator, state_after_action)
+            if collided:
+                return False, state_after_action, completion_steps, collision_summary
+            if simulator.should_terminate_rollout(state_after_action):
+                return True, state_after_action, completion_steps, "goal reached"
+
+            for _ in range(completion_steps, steps_per_trajectory - candidate_index):
+                observation = simulator.observe(state_after_action)
+                try:
+                    expert_action = expert_planner(observation)
+                except PlannerSolveError as exc:
+                    return False, state_after_action, completion_steps, f"planner failure: {exc}"
+
+                label_next_state = simulator.predict_next_state(
+                    state_after_action, expert_action
+                )
+                collided, collision_summary = _detect_collision(simulator, label_next_state)
+                if collided:
+                    return False, state_after_action, completion_steps, f"unsafe expert label: {collision_summary}"
+
+                executed_action = apply_execution_noise(
+                    simulator,
+                    expert_action,
+                    action_noise_std,
+                    episode_action_noise_rng,
+                )
+                predicted_state = simulator.predict_next_state(
+                    state_after_action, executed_action
+                )
+                collided, collision_summary = _detect_collision(simulator, predicted_state)
+                if collided:
+                    return False, state_after_action, completion_steps, collision_summary
+
+                append_frame(observation, expert_action, is_expert_action=True)
+                state_after_action = simulator.step(state_after_action, executed_action)
+                completion_steps += 1
+                collided, collision_summary = _detect_collision(simulator, state_after_action)
+                if collided:
+                    return False, state_after_action, completion_steps, collision_summary
+                if simulator.should_terminate_rollout(state_after_action):
+                    return True, state_after_action, completion_steps, "goal reached"
+
+            return False, state_after_action, completion_steps, STEP_LIMIT_RECOVERY_FAILURE
+
+        def backtrack_and_complete() -> tuple[bool, np.ndarray, int]:
+            last_candidate_index: int | None = None
+            last_recovery_summary: str | None = None
+            for candidate_index in _geometric_backtrack_indices(len(visited_states)):
+                candidate_ok, recovered_state, completion_steps, recovery_summary = complete_from_candidate(
+                    candidate_index
+                )
+                if candidate_ok:
+                    print(
+                        "Backtracked to state "
+                        f"s_{candidate_index} and completed the episode with expert-only control."
+                    )
+                    return True, recovered_state, candidate_index + completion_steps
+                last_candidate_index = candidate_index
+                last_recovery_summary = recovery_summary
+                # A step-limit failure only means this candidate ran out of budget, not that
+                # the episode is unrecoverable: an earlier state trades distance-to-goal for
+                # more remaining steps, which can be what a tight multi-robot encounter needs.
+                # So keep backtracking down to s_0 regardless of failure reason.
+                print(
+                    "Expert closed-loop completion failed from "
+                    f"s_{candidate_index} ({recovery_summary}); trying an earlier state."
+                )
+
+            if last_candidate_index is not None:
+                takeover_state = visited_states[last_candidate_index]
+                remaining_steps = steps_per_trajectory - last_candidate_index
+                print(
+                    "Unrecoverable expert takeover query: "
+                    f"takeover_step=s_{last_candidate_index}, remaining_steps={remaining_steps}, "
+                    f"failure_reason={last_recovery_summary!r}, "
+                    f"takeover_state={np.array2string(np.asarray(takeover_state), precision=6)}, "
+                    f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}, "
+                    f"episode_initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}"
+                )
+            return False, state.copy(), 0
 
         for step in range(1, steps_per_trajectory + 1):
-            observation = simulator.observe(state, validate=False)
+            visited_states.append(state.copy())
+            observation = simulator.observe(state)
             try:
                 expert_action = expert_planner(observation)
             except PlannerSolveError as exc:
@@ -169,49 +487,63 @@ def collect_dagger_rollouts(
                 planner_failed = True
                 break
 
-            built_frame = frame_builder(observation, expert_action)
-            if isinstance(built_frame, (list, tuple)):
-                if episode_frame_buffers is None:
-                    episode_frame_buffers = [[] for _ in built_frame]
-                elif len(episode_frame_buffers) != len(built_frame):
-                    raise ValueError("'frame_builder' must return the same number of per-robot frames at every rollout step.")
-                for robot_idx, frame in enumerate(built_frame):
-                    if not isinstance(frame, Mapping):
-                        raise TypeError("'frame_builder' list/tuple items must be mappings, got " f"{type(frame).__name__}.")
-                    episode_frame_buffers[robot_idx].append(ensure_task_field(dict(frame)))
-            elif isinstance(built_frame, Mapping):
-                if episode_frame_buffers is None:
-                    episode_frame_buffers = [[]]
-                elif len(episode_frame_buffers) != 1:
-                    raise ValueError("'frame_builder' cannot switch between per-robot and single-frame outputs within one rollout.")
-                episode_frame_buffers[0].append(ensure_task_field(dict(built_frame)))
-            else:
-                raise TypeError("'frame_builder' must return a mapping or a list/tuple of mappings, got " f"{type(built_frame).__name__}.")
+            expert_next_state = simulator.predict_next_state(state, expert_action)
+            expert_label_collided, expert_label_summary = _detect_collision(
+                simulator, expert_next_state
+            )
+            if expert_label_collided:
+                print(
+                    "Discarding unsafe expert corrective label "
+                    f"(attempt={attempted_episodes}, step={step}, {expert_label_summary})."
+                )
+                completed, state, rollout_steps = backtrack_and_complete()
+                if not completed:
+                    print(
+                        "Discarding DAgger episode: expert could not complete the "
+                        "learner trajectory from any collision-free state; the initial "
+                        "state/goal may be infeasible for the expert."
+                    )
+                    episode_discarded = True
+                else:
+                    reached_goal = True
+                break
 
             use_expert_action = bool(episode_expert_mixing_rng.random() < expert_mixing_beta)
             policy_action = policy_action_fn(observation) if should_query_policy else None
+            append_frame(observation, expert_action, is_expert_action=use_expert_action)
             base_action = expert_action if use_expert_action or policy_action is None else policy_action
-            expert_executed_steps += int(use_expert_action)
-            total_executed_steps += 1
             state = simulator.step(
                 state,
                 apply_execution_noise(simulator, base_action, action_noise_std, episode_action_noise_rng),
-                validate=False,
             )
-            if simulator.is_collision(state):
+            collided, summary = _detect_collision(simulator, state)
+            if collided:
                 print(
-                    "Stopping DAgger episode after collision "
-                    f"(attempt={attempted_episodes})."
+                    "DAgger rollout collision "
+                    f"(attempt={attempted_episodes}, step={step}, "
+                    f"actor={'expert' if use_expert_action else 'policy'}, "
+                    f"{summary})."
                 )
-                rollout_steps = step
+                completed, state, rollout_steps = backtrack_and_complete()
+                if completed:
+                    reached_goal = True
+                    break
+                print(
+                    "Discarding DAgger episode: expert could not complete the "
+                    "learner trajectory from any collision-free state; the initial "
+                    "state/goal may be infeasible for the expert."
+                )
+                episode_discarded = True
                 break
             if simulator.should_terminate_rollout(state):
                 reached_goal = True
                 rollout_steps = step
                 break
 
-        if planner_failed:
+        if planner_failed or episode_discarded:
             continue
+        total_executed_steps += len(episode_actor_is_expert)
+        expert_executed_steps += sum(episode_actor_is_expert)
         if episode_frame_buffers is None:
             raise RuntimeError("'frame_builder' produced no frames for the rollout.")
         for frame_buffer in episode_frame_buffers:
@@ -257,8 +589,8 @@ def rollout_policy_with_action_fn(
     if simulator.should_terminate_rollout(state):
         return True, 0
     for step in range(1, num_steps + 1):
-        action = action_fn(simulator.observe(state, validate=False))
-        state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng), validate=False)
+        action = action_fn(simulator.observe(state))
+        state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng))
         if simulator.is_collision(state):
             return False, step
         if simulator.should_terminate_rollout(state):
@@ -275,16 +607,39 @@ def evaluate_policy_rollouts(
     reset_fn: Callable[[], None] | None = None,
     action_noise_std: float = 0.0,
     action_noise_seed: int = 0,
+    initial_states: list[np.ndarray] | None = None,
+    goal_states: list[np.ndarray] | None = None,
 ) -> DaggerEvalMetrics | None:
     if num_episodes == 0:
         return None
     if num_steps <= 0:
         raise ValueError("'num_steps' must be positive.")
     seed_specs = evaluation_seed_specs(simulator, num_episodes, seed_start)
+    provided_initial_states = normalize_initial_state_specs(simulator, initial_states)
+    provided_goal_states = normalize_goal_state_specs(simulator, goal_states)
+    have_goal_states = bool(goal_states)
+    usable_count = (
+        min(len(provided_initial_states), len(provided_goal_states))
+        if have_goal_states
+        else len(provided_initial_states)
+    )
     successes = 0
     steps_taken: list[int] = []
-    for seed_spec in seed_specs:
-        initial_state = sample_initial_state(simulator, seed_spec)
+    baseline_goal = simulator.goal.copy()
+    for episode_idx, seed_spec in enumerate(seed_specs):
+        if episode_idx < usable_count:
+            initial_state = provided_initial_states[episode_idx]
+            if have_goal_states:
+                simulator.set_goal(provided_goal_states[episode_idx])
+            else:
+                # An explicit initial state was provided without a paired goal:
+                # still honor randomize_goal_for_reset, matching the fallback
+                # branch's own use of sample_initial_state below, instead of
+                # silently freezing at the baseline goal.
+                simulator.randomize_goal_for_reset(rng_for_seed_spec(simulator, seed_spec))
+        else:
+            simulator.set_goal(baseline_goal)
+            initial_state = sample_initial_state(simulator, seed_spec)
         reached_goal, rollout_steps = rollout_policy_with_action_fn(
             simulator=simulator,
             initial_state=initial_state,

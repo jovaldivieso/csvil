@@ -151,6 +151,57 @@ class DeepSetEncoderTests(unittest.TestCase):
         )
         self.assertEqual(tuple(output.shape), (2, 10))
 
+    def test_stacked_neighbor_history_is_not_scrambled_across_time(self) -> None:
+        """Regression guard: DeepSet must reshape via the shared, time-major-aware helper
+        and pool over neighbors using only the current-timestep mask, not a naive
+        view() that would mix different neighbors' per-timestep features together."""
+        neighbor_slots, observation_horizon = 2, 2
+        neighbor_feature_dim = 1 * observation_horizon
+
+        # Time-major flat layout (oldest frame first, neighbor-minor within each frame):
+        # frame0 = [neighbor0=10.0, neighbor1=20.0], frame1 = [neighbor0=11.0, neighbor1=21.0]
+        raw_neighbor_state = torch.tensor([[10.0, 20.0, 11.0, 21.0]])
+        # neighbor0 visible at both frames; neighbor1 visible only at the earlier
+        # frame -- invisible at the current (most recent) frame.
+        raw_neighbor_mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+
+        neighbor_obs, neighbor_mask = ObservationEncoder._split_neighbor_tensors(
+            raw_neighbor_state, raw_neighbor_mask, neighbor_feature_dim, observation_horizon
+        )
+        torch.testing.assert_close(neighbor_obs[0, 0], torch.tensor([10.0, 11.0]))
+        torch.testing.assert_close(neighbor_obs[0, 1], torch.tensor([20.0, 21.0]))
+        torch.testing.assert_close(neighbor_mask[0, 0], torch.tensor([1.0, 1.0]))
+        torch.testing.assert_close(neighbor_mask[0, 1], torch.tensor([1.0, 0.0]))
+
+        state_dim = 2 + neighbor_slots * (neighbor_feature_dim + observation_horizon)
+        encoder = DeepSetEncoder(
+            state_dim=state_dim,
+            neighbor_feature_dim=neighbor_feature_dim,
+            neighbor_slots=neighbor_slots,
+            observation_horizon=observation_horizon,
+            phi_dims=[8, 8],
+            rho_dims=[4],
+            pool_type="max",
+        )
+        observation = {
+            "observation.environment_state": torch.zeros(1, 1),
+            "observation.state": torch.zeros(1, 1),
+            "observation.neighbor_state": raw_neighbor_state,
+            "observation.neighbor_mask": raw_neighbor_mask,
+        }
+        out = encoder(observation)
+        self.assertEqual(tuple(out.shape), (1, encoder.out_dim))
+        self.assertFalse(torch.isnan(out).any())
+
+        # neighbor1 is masked out at the current timestep, so its entire packed
+        # (feature, mask) history must be excluded from max-pooling regardless of
+        # its value -- changing it must not move the output at all.
+        alternate_neighbor_state = raw_neighbor_state.clone()
+        alternate_neighbor_state[0, 1] = 999.0
+        alternate_neighbor_state[0, 3] = 999.0
+        alternate_out = encoder({**observation, "observation.neighbor_state": alternate_neighbor_state})
+        torch.testing.assert_close(out, alternate_out)
+
 
 class MultiRobotMaskSemanticsTests(unittest.TestCase):
     def test_fleet_of_one_uses_empty_neighbor_contract(self) -> None:
@@ -163,7 +214,7 @@ class MultiRobotMaskSemanticsTests(unittest.TestCase):
             },
         )
         state = simulator.random_initial_state(np.random.default_rng(3))
-        observation = simulator.observe(state, validate=False)
+        observation = simulator.observe(state)
         local_observation = simulator.decentralized_policy_observation(observation)
         features = simulator.get_dataset_features()
 
@@ -204,8 +255,8 @@ class MultiRobotMaskSemanticsTests(unittest.TestCase):
         colliding_state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
         invisible_state = np.array([0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0], dtype=float)
 
-        colliding_obs = simulator.observe(colliding_state, validate=False)
-        invisible_obs = simulator.observe(invisible_state, validate=False)
+        colliding_obs = simulator.observe(colliding_state)
+        invisible_obs = simulator.observe(invisible_state)
 
         colliding_robot_obs = simulator.decentralized_policy_observation(colliding_obs, 0)
         invisible_robot_obs = simulator.decentralized_policy_observation(invisible_obs, 0)
