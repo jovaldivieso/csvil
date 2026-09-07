@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      network: host
     platform: linux/amd64
     working_dir: /workspace
     volumes:

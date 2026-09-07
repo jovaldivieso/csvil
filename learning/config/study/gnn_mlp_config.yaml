@@ -1,0 +1,20 @@
+# Encoder-scaling study: GNN baseline.
+# Shared across all fleet sizes; identical to the deepset/transformer study configs
+# except for the neighbour encoder. Context width is 128 in all three.
+#
+# Note: GNNEncoder aggregates messages with a sum (index_add_), so its context
+# magnitude grows with the visible-neighbour count. This is a known asymmetry
+# against the mean-pooled deepset and the attention-normalized transformer when
+# extrapolating to larger fleets.
+model:
+  policy_type: mlp
+  prediction_horizon: 1        # single-step: a deterministic MSE-trained MLP regresses to the
+                               # conditional mean, so multi-step chunks average over distinct
+                               # avoidance manoeuvres. Use the flow policy for horizon > 1.
+  hidden_dims: [256, 256, 256]
+
+  encoder: gnn
+
+  gnn:
+    hidden_dim: 128        # -> context width 128
+    num_layers: 1
