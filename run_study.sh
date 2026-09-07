@@ -54,7 +54,16 @@ train_one() {
     --eval-episodes 50 \
     --seed 99 \
     > "logs/${name}.log" 2>&1
-  echo "[$(date +%H:%M:%S)] train ${name} finished (exit $?)"
+  # Capture before anything else runs: a $(...) inside the echo would execute
+  # first and reset $?, reporting every run as a success.
+  local status=$?
+  local stamp; stamp="$(date +%H:%M:%S)"
+  if (( status == 0 )); then
+    echo "[${stamp}] train ${name} OK"
+  else
+    echo "[${stamp}] train ${name} FAILED (exit ${status}) -- last log lines:"
+    tail -n 5 "logs/${name}.log" | sed "s/^/    ${name}| /"
+  fi
 }
 
 eval_one() {
@@ -78,7 +87,14 @@ eval_one() {
     --seed-start 50000 \
     --output-csv "outputs/study/${name}.csv" \
     > "logs/eval_${name}.log" 2>&1
-  echo "[$(date +%H:%M:%S)] eval ${name} finished (exit $?)"
+  local status=$?
+  local stamp; stamp="$(date +%H:%M:%S)"
+  if (( status == 0 )); then
+    echo "[${stamp}] eval ${name} OK"
+  else
+    echo "[${stamp}] eval ${name} FAILED (exit ${status}) -- last log lines:"
+    tail -n 5 "logs/eval_${name}.log" | sed "s/^/    ${name}| /"
+  fi
 }
 
 mkdir -p logs outputs/study
