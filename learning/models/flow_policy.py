@@ -38,7 +38,7 @@ class FlowPolicy(ActionPolicy):
         self,
         action_dim: int,
         obs_encoder: ObservationEncoder,
-        prediction_horizon: int = 16,
+        prediction_horizon: int = 10,
         hidden_dims: tuple[int, ...] = (256, 256, 256),
         num_inference_steps: int = 10,
         time_embed_dim: int = 64,

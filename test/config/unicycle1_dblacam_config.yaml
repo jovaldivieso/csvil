@@ -1,9 +1,6 @@
 dt: 0.1
 max_v: 0.5
 
-goal: [0.0, 0.0, 0.0]
-randomize_goal: false
-
 db_lacam:
   mode: open_loop
   time_limit_ms: 60000

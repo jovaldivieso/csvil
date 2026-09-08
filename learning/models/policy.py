@@ -13,8 +13,10 @@ class ActionPolicy(nn.Module, ABC):
     """Abstract base class for all continuous-action imitation learning policies."""
 
     def forward(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        """Default PyTorch module forward pass delegates to select_action."""
-        return self.select_action(observation_dict)
+        raise NotImplementedError(
+            "Do not call forward() directly on ActionPolicy. "
+            "Use select_action() for inference or compute_loss() for training."
+        )
 
     @abstractmethod
     def select_action(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
@@ -24,13 +26,13 @@ class ActionPolicy(nn.Module, ABC):
     def reset(self) -> None:
         raise NotImplementedError
 
+    @abstractmethod
     def compute_loss(
         self,
         observation_dict: Mapping[str, torch.Tensor],
         actions: torch.Tensor,
     ) -> torch.Tensor:
-        """Optional loss computation hook used by policies with custom training objectives."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement 'compute_loss'.")
+        raise NotImplementedError
 
 
 class PolicyFactory:

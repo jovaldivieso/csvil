@@ -28,6 +28,7 @@ class GNNEncoder(ObservationEncoder):
         state_dim: int,
         neighbor_feature_dim: int,
         neighbor_slots: int,
+        observation_horizon: int = 1,
         hidden_dim: int = 64,
         num_layers: int = 1,
     ) -> None:
@@ -41,6 +42,8 @@ class GNNEncoder(ObservationEncoder):
             )
         if neighbor_slots < 0:
             raise ValueError(f"'neighbor_slots' must be non-negative, got {neighbor_slots}.")
+        if observation_horizon <= 0:
+            raise ValueError(f"'observation_horizon' must be positive, got {observation_horizon}.")
         if hidden_dim <= 0:
             raise ValueError(f"'hidden_dim' must be positive, got {hidden_dim}.")
         if num_layers <= 0:
@@ -49,9 +52,10 @@ class GNNEncoder(ObservationEncoder):
         self.state_dim = int(state_dim)
         self.neighbor_feature_dim = int(neighbor_feature_dim)
         self.neighbor_slots = int(neighbor_slots)
-        self.ego_dim = self.state_dim - self.neighbor_slots * (self.neighbor_feature_dim + 1)
-        if self.ego_dim <= 0:
-            raise ValueError("'state_dim' is too small for the packed observation layout.")
+        self.observation_horizon = int(observation_horizon)
+        self.ego_dim = self._compute_ego_dim(
+            self.state_dim, self.neighbor_slots, self.neighbor_feature_dim, self.observation_horizon
+        )
 
         # encoder of local ego observation to embedding h_i [H]
         self.encoder = nn.Sequential(
@@ -62,9 +66,12 @@ class GNNEncoder(ObservationEncoder):
 
         # message encoding
         # currently only edge feature e_ij (will extend maybe later for x_j if we add neighbour node features)
+        augmented_neighbor_feature_dim = self._augmented_neighbor_feature_dim(
+            self.neighbor_feature_dim, self.observation_horizon
+        )
         self.msg_mlps = nn.ModuleList(
             nn.Sequential(
-                nn.Linear(hidden_dim + self.neighbor_feature_dim, hidden_dim),
+                nn.Linear(hidden_dim + augmented_neighbor_feature_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
             )
@@ -93,17 +100,20 @@ class GNNEncoder(ObservationEncoder):
         raw_neighbors = observation_dict["observation.neighbor_state"]
         raw_mask = observation_dict["observation.neighbor_mask"]
         ego_obs = torch.cat([environment_state, state], dim=-1)  # [batch_size, ego_dim]
-        batch_size = ego_obs.shape[0]
-        neighbor_obs = raw_neighbors.view(batch_size, -1, self.neighbor_feature_dim)  # [batch_size, K, neighbor_feature_dim] - one e_ij per slot
-        neighbor_mask = raw_mask.view(batch_size, -1)  # [batch_size, K]s
+        neighbor_obs, neighbor_mask = self._split_neighbor_tensors(
+            raw_neighbors, raw_mask, self.neighbor_feature_dim, self.observation_horizon
+        )  # neighbor_obs: [B, K, neighbor_feature_dim] (one e_ij per slot, own history flattened in);
+           # neighbor_mask: [B, K, observation_horizon]
+        neighbor_features = self._augment_with_temporal_mask(neighbor_obs, neighbor_mask)
 
-        # The mask selects the visible neighbours. Listing every visible (robot, slot) pair
-        # gives E rows -- one per observed neighbour across the whole batch -- so padded
-        # slots are never fed to an MLP. Both lists are constant across rounds.
-        visible_neighbors = neighbor_mask.bool()  # [B, K]
+        # The mask selects the visible neighbours, gated on the most recent frame only
+        # (matching the deepset/transformer contract). Listing every visible (robot, slot)
+        # pair gives E rows -- one per observed neighbour across the whole batch -- so
+        # padded slots are never fed to an MLP. Both lists are constant across rounds.
+        visible_neighbors = neighbor_mask[:, :, -1].bool()  # [B, K]
         batch_index, slot_index = visible_neighbors.nonzero(as_tuple=True)  # [E], [E] indexing into the batch and slot dimensions of neighbor_obs
         # each (batch_index, slot_index) pair is one visible neighbour
-        neighbor_j = neighbor_obs[batch_index, slot_index]  # [E, neighbor_feature_dim] - vector of e_ij
+        neighbor_j = neighbor_features[batch_index, slot_index]  # [E, neighbor_feature_dim + observation_horizon]
 
         h = self.encoder(ego_obs)  # [B, hidden_dim]
         # loop is if we add communication hops (num_layers > 1), right now only num_layers = 1
