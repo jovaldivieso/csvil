@@ -55,6 +55,26 @@ class SafeFlowMPCPolicy(ActionPolicy):
         num_robots = len(self.local_sims)
         self.neighbor_slots = max(0, num_robots - 1)
 
+        # _build_neighbor_trajectories can only isolate a neighbor's absolute
+        # velocity by differencing its reconstructed position against the
+        # *previous* observation frame -- a single frame has no history to
+        # difference against at all, regardless of whether this robot itself
+        # has velocity proprioception. observation_horizon == 1 therefore
+        # hits the exact same "every neighbor forecast as stationary for the
+        # whole episode" gap the velocity-state check below closes for
+        # velocity-less systems -- it just does it through the *encoder*
+        # config instead of the *system* type, so that check alone would
+        # miss it entirely for a velocity-having fleet stacking only one
+        # frame.
+        if self.neighbor_slots > 0 and int(getattr(inner_policy.obs_encoder, "observation_horizon", 1)) < 2:
+            raise ValueError(
+                "SafeFlowMPCPolicy requires observation_horizon >= 2 for a multi-robot fleet "
+                "(neighbor_slots > 0): a moving neighbor's velocity can only be estimated by "
+                "differencing two consecutive observation frames, so a single-frame encoder "
+                "would forecast every neighbor as stationary for the entire episode regardless "
+                "of its actual motion."
+            )
+
         # _build_neighbor_trajectories reconstructs this robot's own previous
         # pose from its own observed proprioception (velocity_state_indices)
         # to isolate a neighbor's absolute velocity from the raw relative-
@@ -318,6 +338,17 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 pos_prev = pos_now - 0.5 * dt * (v_prev_vec + v_now_vec)
 
             for j in range(self.neighbor_slots):
+                # Neighbor slot j is fleet index j if it comes before this
+                # robot (b) in fleet order, else j + 1 (skipping over b's own
+                # index) -- e.g. robot 2's slot 0 is fleet robot 0, but its
+                # slot 2 is fleet robot 3, not 2. The fleet contract only
+                # requires equal dimensions/types across robots, not equal
+                # numeric parameters (systems/multi_robot.py's per-robot
+                # config), so a neighbor can have a different max_speed than
+                # this robot -- forward-simulating it below with the wrong
+                # sim object would clip its forecast to *this* robot's
+                # limits instead of its own.
+                neighbor_fleet_idx = j if j < b else j + 1
                 if mask_now[b, j] <= 0.5:
                     # Masked-out neighbor: leave the far-away sentinel, i.e.
                     # treat it as absent rather than as a bounded-speed
@@ -381,7 +412,9 @@ class SafeFlowMPCPolicy(ActionPolicy):
                     traj_x, traj_y = [abs_now[0]], [abs_now[1]]
                     state_k = neighbor_state_est
                     for _ in range(horizon):
-                        state_k = self.local_sims[0].predict_next_state(state_k, zero_action, validate=False)
+                        state_k = self.local_sims[neighbor_fleet_idx].predict_next_state(
+                            state_k, zero_action, validate=False
+                        )
                         traj_x.append(state_k[pos_idx[0]])
                         traj_y.append(state_k[pos_idx[1]])
                     neighbor_trajs[b, j, 0, :] = traj_x

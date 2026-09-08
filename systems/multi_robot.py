@@ -537,7 +537,7 @@ class MultiRobotSimulator(DynamicsSimulator):
             raise RuntimeError(
                 "Fixed (non-randomized) robot goals conflict with each other under "
                 f"d_safe={self.d_safe}; no amount of resampling can resolve this -- adjust the "
-                "configured goals or widen d_safe."
+                "configured goals or decrease d_safe."
             )
 
         for robot_idx, sim in enumerate(self.simulators):

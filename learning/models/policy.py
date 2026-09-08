@@ -64,7 +64,15 @@ class PolicyFactory:
                 )
             inner_policy = FlowPolicy(**flow_kwargs)
             num_robots = int(getattr(simulator, "num_robots", 1))
-            live_sims = list(simulator.simulators) if num_robots > 1 else [simulator]
+            # Whether to unwrap turns on whether `simulator` *is* a
+            # MultiRobotSimulator (it always exposes `.simulators`, holding
+            # 1 robot or many), not on whether it holds more than one robot:
+            # a one-robot multi_robot config is valid, and MultiRobotSimulator
+            # itself doesn't expose the per-robot dynamics metadata
+            # (velocity_state_indices, etc.) this policy and its projector
+            # need -- only its sub-simulators do. A bare, non-multi_robot
+            # simulator (no `.simulators` at all) is used as-is.
+            live_sims = list(getattr(simulator, "simulators", [simulator]))
             neighbor_slots = max(0, num_robots - 1)
             # One independent Opti problem per robot, each bound to *that*
             # robot's own sim object -- not a single one shared across all of

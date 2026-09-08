@@ -143,6 +143,22 @@ class CasadiTrajectoryProjector:
         if self.fallback_terminal_velocity_tol < 0:
             raise ValueError("'fallback_terminal_velocity_tol' must be non-negative.")
 
+        # A fallback accepted within fallback_terminal_velocity_tol isn't
+        # actually at rest -- it's coasting at that small residual velocity,
+        # since it's re-simulated under zero action (see project()'s padding
+        # comment). Re-validation re-checks bounds/d_collision fresh every
+        # tick against the *current* state and neighbor forecast, so any
+        # single reuse is genuinely safe *through its own checked horizon*
+        # -- but an unbroken run of them would let that residual drift keep
+        # accumulating tick after tick, past what any single tick's own
+        # check covers. Capping how many can be used consecutively (reset by
+        # any genuine solve) bounds the worst case to a small, fixed amount
+        # of drift instead of letting it grow for as long as real solves
+        # keep failing.
+        self.max_consecutive_fallbacks = int(config.get("max_consecutive_fallbacks", 5))
+        if self.max_consecutive_fallbacks <= 0:
+            raise ValueError("'max_consecutive_fallbacks' must be positive.")
+
         self.R = np.diag(self._resolve_r_diag(config, robot_index))
 
         self.opti = ca.Opti()
@@ -326,6 +342,7 @@ class CasadiTrajectoryProjector:
         self._prev_X_sol: np.ndarray | None = None
         self._prev_U_sol: np.ndarray | None = None
         self._prev_x0: np.ndarray | None = None
+        self._consecutive_fallback_count = 0
 
     def reset(self) -> None:
         """Signals the start of a new episode.
@@ -340,6 +357,7 @@ class CasadiTrajectoryProjector:
         self._prev_X_sol = None
         self._prev_U_sol = None
         self._prev_x0 = None
+        self._consecutive_fallback_count = 0
         # set_initial(..., lam_g, ...) is sticky on the Opti object -- clearing
         # only the Python-side _prev_lam_g cache above stops project() from
         # re-applying it, but whatever value the last pre-reset call handed
@@ -430,14 +448,23 @@ class CasadiTrajectoryProjector:
         against *this call's* neighbor forecast, and the terminal rest
         condition from the *actual current* state -- never blindly, since
         the cached trajectory was only ever verified against the state/
-        neighbor forecast at the time it was solved. Never falls back to the
-        unprojected ``u_ref`` either way -- returning an unprojected action
-        on a transient solver hiccup would bypass every constraint this
-        projector exists to enforce. On a cold-start failure (first call
-        ever, or right after ``reset()``) or when the cached trajectory no
-        longer re-validates, there is no established safe trajectory to fall
-        back on -- exactly the situation SafeFlowMPC's Assumption 2 assumes
-        away by requiring one to already exist -- so this raises
+        neighbor forecast at the time it was solved. "Terminal rest" here
+        means within ``fallback_terminal_velocity_tol`` of exactly zero, not
+        exactly zero -- the fallback is re-simulated under zero action, so
+        that small residual velocity persists rather than decaying, and each
+        reuse is only checked through its own horizon. ``max_consecutive_
+        fallbacks`` bounds how many times in a row this can be used before a
+        real solve succeeds again, capping the worst-case accumulated drift
+        instead of letting it grow for as long as real solves keep failing.
+        Never falls back to the unprojected ``u_ref`` either way -- returning
+        an unprojected action on a transient solver hiccup would bypass
+        every constraint this projector exists to enforce. On a cold-start
+        failure (first call ever, or right after ``reset()``), when the
+        cached trajectory no longer re-validates, or when
+        ``max_consecutive_fallbacks`` is already reached, there is no
+        established safe trajectory to fall back on -- exactly the situation
+        SafeFlowMPC's Assumption 2 assumes away by requiring one to already
+        exist -- so this raises
         ``planning.casadi_planner.PlannerSolveError`` instead of fabricating
         a fallback with no safety basis. Callers should handle it the same
         way they already handle an expert ``PlannerSolveError`` (discard or
@@ -521,6 +548,34 @@ class CasadiTrajectoryProjector:
             self.opti.set_initial(self.opti.lam_g, self._prev_lam_g)
 
         try:
+            if self.velocity_idx:
+                # __init__'s own feasibility check only catches this for a
+                # system that declares state_upper_bounds/state_lower_bounds
+                # (e.g. unicycle2, via max_speed/max_omega) -- DoubleIntegrator
+                # has a velocity state but no such bound (velocity is
+                # unconstrained there apart from what the trajectory itself
+                # does), so that check silently never fires for it, and a
+                # sufficiently fast *actual* x0 would otherwise only surface
+                # as an opaque IPOPT failure below. Checking the real x0
+                # here (rather than a worst case) is a strictly *necessary*
+                # condition regardless of system: even braking at
+                # max_action every single step from k=0, this state's own
+                # current speed cannot reach exactly zero by step N if it
+                # needs more than N steps to do so, independent of dynamics,
+                # goal, or collision terms -- so there is no point spending
+                # two IPOPT solves (warm and cold) on a problem already
+                # known infeasible; skip straight to fallback recovery.
+                current_speed = float(np.max(np.abs(x0[list(self.velocity_idx)])))
+                dt = float(getattr(self.sim, "dt"))
+                robot_max_action = float(getattr(self.sim, "max_action"))
+                if robot_max_action > 0 and current_speed > robot_max_action * dt * self.N:
+                    raise RuntimeError(
+                        f"Current speed ({current_speed}) cannot be decelerated to the hard "
+                        f"terminal-rest constraint within this projector's {self.N}-step horizon "
+                        f"at max_action={robot_max_action}, dt={dt} (needs >= "
+                        f"{current_speed / (robot_max_action * dt):.1f} steps) -- provably "
+                        "infeasible regardless of warm start."
+                    )
             try:
                 sol = self.opti.solve()
             except RuntimeError:
@@ -546,9 +601,10 @@ class CasadiTrajectoryProjector:
             self._prev_X_sol = sol.value(self.X)
             self._prev_U_sol = sol.value(self.U)
             self._prev_x0 = x0
+            self._consecutive_fallback_count = 0
             return self._prev_U_sol[:, : self.tracked_horizon]
         except RuntimeError as exc:
-            if self._prev_U_sol is not None:
+            if self._prev_U_sol is not None and self._consecutive_fallback_count < self.max_consecutive_fallbacks:
                 # SafeFlowMPC, Oelerich et al. 2026, Theorem 2: on a
                 # projection failure, the safe fallback is to keep executing
                 # the current/last trajectory, not an arbitrary unprojected
@@ -572,14 +628,19 @@ class CasadiTrajectoryProjector:
                     self._prev_X_sol = revalidated_state
                     self._prev_U_sol = u_guess
                     self._prev_x0 = x0
+                    self._consecutive_fallback_count += 1
                     return u_guess[:, : self.tracked_horizon]
-                # The cached plan no longer holds from here -- clear it so a
-                # subsequent call doesn't keep trying to reuse/shift a
-                # trajectory already known to no longer be safe.
+                # The cached plan no longer holds from here (either it failed
+                # revalidation, or max_consecutive_fallbacks was already hit)
+                # -- clear it so a subsequent call doesn't keep trying to
+                # reuse/shift a trajectory already known to no longer be
+                # safe, or one that's already coasted on borrowed time for
+                # as long as this is willing to allow.
                 self._prev_lam_g = None
                 self._prev_X_sol = None
                 self._prev_U_sol = None
                 self._prev_x0 = None
+                self._consecutive_fallback_count = 0
             # SafeFlowMPC's safety guarantee (Theorem 2) rests entirely on
             # Assumption 2 -- "a safe trajectory q^0(t) exists at the start
             # of the robot movement" -- and Algorithm 1 takes that initial
