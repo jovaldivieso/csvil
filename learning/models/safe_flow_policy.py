@@ -31,22 +31,28 @@ class SafeFlowMPCPolicy(ActionPolicy):
         self,
         inner_policy: FlowPolicy,
         projectors: Sequence[CasadiTrajectoryProjector],
-        simulator: DynamicsProtocol,
+        local_sims: Sequence[DynamicsProtocol],
     ) -> None:
         super().__init__()
         self.inner_policy = inner_policy
-        self.simulator = simulator
-        num_robots = int(getattr(simulator, "num_robots", 1))
         # One sim object per robot, not a single one shared across all of
-        # them: each carries its own mutable goal (systems/multi_robot.py's
-        # set_goal), and invert_obs() depends on it -- sharing simulators[0]
-        # for every robot would silently make every robot but the first
-        # invert its observation against robot 0's goal instead of its own.
-        # Dynamics parameters (dt, nx, index tuples, ...) ARE identical
+        # them: invert_obs() reads each one's own goal attribute to
+        # reconstruct absolute state from the ego-relative observation --
+        # sharing simulators[0] for every robot would silently make every
+        # robot but the first invert against robot 0's goal instead of its
+        # own. Dynamics parameters (dt, nx, index tuples, ...) ARE identical
         # across a homogeneous fleet, so local_sims[0] is used deliberately
         # (and safely) wherever only those are needed, e.g. in
         # _build_neighbor_trajectories.
-        self.local_sims = list(simulator.simulators) if num_robots > 1 else [simulator]
+        #
+        # These are PolicyFactory.create's own private, goal-zeroed copies
+        # (see its comment for why a fixed, arbitrary goal anchor is exactly
+        # as correct here as the live episode's actual one) -- never a live
+        # simulator reference, so this policy has nothing that needs to be
+        # kept in sync with whatever simulator instance actually drives a
+        # given rollout/evaluation call.
+        self.local_sims = list(local_sims)
+        num_robots = len(self.local_sims)
         self.neighbor_slots = max(0, num_robots - 1)
 
         self.projectors = list(projectors)
@@ -90,6 +96,12 @@ class SafeFlowMPCPolicy(ActionPolicy):
 
     def reset(self) -> None:
         self.inner_policy.reset()
+        # Each projector carries its own persistent primal/dual warm-start
+        # state across calls (see CasadiTrajectoryProjector.project()) --
+        # without clearing it here, a new episode's first solve would warm
+        # start from the previous episode's unrelated final trajectory.
+        for projector in self.projectors:
+            projector.reset()
 
     def compute_loss(
         self,
@@ -210,14 +222,29 @@ class SafeFlowMPCPolicy(ActionPolicy):
             cos_now, sin_now = np.cos(theta_now), np.sin(theta_now)
             pos_now = x0_batch[b, list(pos_idx)]
 
-            if len(velocity_idx) == 2:
+            if theta_idx is not None and len(velocity_idx) == 2:
+                # Unicycle-style (v, omega) proprioception: back-propagate
+                # this robot's own heading and position under its own
+                # constant-twist assumption.
                 v_now = float(x0_batch[b, velocity_idx[0]])
                 omega_now = float(x0_batch[b, velocity_idx[1]])
+                theta_prev = theta_now - omega_now * dt
+                cos_prev, sin_prev = np.cos(theta_prev), np.sin(theta_prev)
+                pos_prev = pos_now - v_now * dt * np.array([cos_prev, sin_prev])
+            elif len(velocity_idx) == 2:
+                # Cartesian (vx, vy) proprioception with no heading to rotate
+                # by (e.g. double_integrator): back-propagate each axis
+                # independently. Reusing (cos_now, sin_now) rather than
+                # re-deriving them from velocity_idx[1] matters here --
+                # that component is vy, not an angular rate, and treating it
+                # as one (as a single len(velocity_idx)==2 check used to)
+                # fabricates a nonexistent rotation from the ego's own
+                # y-velocity.
+                cos_prev, sin_prev = cos_now, sin_now
+                pos_prev = pos_now - dt * x0_batch[b, list(velocity_idx)]
             else:
-                v_now, omega_now = 0.0, 0.0
-            theta_prev = theta_now - omega_now * dt
-            cos_prev, sin_prev = np.cos(theta_prev), np.sin(theta_prev)
-            pos_prev = pos_now - v_now * dt * np.array([cos_prev, sin_prev])
+                cos_prev, sin_prev = cos_now, sin_now
+                pos_prev = pos_now
 
             for j in range(self.neighbor_slots):
                 if mask_now[b, j] <= 0.5:
@@ -227,7 +254,13 @@ class SafeFlowMPCPolicy(ActionPolicy):
                     [pos_now[0] + cos_now * rx - sin_now * ry, pos_now[1] + sin_now * rx + cos_now * ry]
                 )
 
-                if observation_horizon >= 2:
+                # mask[b, -2, j] guards against the previous frame being
+                # zero-padding (either pre-episode warm-up or this neighbor
+                # simply being invisible then) -- differencing against a
+                # fabricated [0, 0] "previous position" would otherwise
+                # produce a large fictitious velocity the instant a neighbor
+                # first becomes visible.
+                if observation_horizon >= 2 and mask[b, -2, j] > 0.5:
                     prx, pry = feat[b, -2, j, 0:2]
                     abs_prev = np.array(
                         [pos_prev[0] + cos_prev * prx - sin_prev * pry, pos_prev[1] + sin_prev * prx + cos_prev * pry]
@@ -239,7 +272,7 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 if use_dynamics_model:
                     rel_theta_now = np.arctan2(feat[b, -1, j, 2], feat[b, -1, j, 3])
                     theta_n_now = np.arctan2(np.sin(theta_now + rel_theta_now), np.cos(theta_now + rel_theta_now))
-                    if observation_horizon >= 2:
+                    if observation_horizon >= 2 and mask[b, -2, j] > 0.5:
                         rel_theta_prev = np.arctan2(feat[b, -2, j, 2], feat[b, -2, j, 3])
                         theta_n_prev = np.arctan2(
                             np.sin(theta_prev + rel_theta_prev), np.cos(theta_prev + rel_theta_prev)

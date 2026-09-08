@@ -433,14 +433,22 @@ def rollout_policy(
 
         _synchronize_device(device)
         solve_start = time.perf_counter()
-        action = build_decentralized_joint_action(
-            simulator=simulator,
-            policy=policy,
-            observation=observation,
-            device=device,
-            observation_horizon=observation_horizon,
-            history_buffer=history_buffer,
-        )
+        try:
+            action = build_decentralized_joint_action(
+                simulator=simulator,
+                policy=policy,
+                observation=observation,
+                device=device,
+                observation_horizon=observation_horizon,
+                history_buffer=history_buffer,
+            )
+        except PlannerSolveError as exc:
+            # No expert running alongside a policy-only rollout to fall back
+            # to -- treat like any other rollout-ending failure (a
+            # collision) rather than crashing the whole evaluation run over
+            # one solver hiccup with no safe trajectory yet to lean on.
+            print(f"Policy rollout solve failed (step={step}): {exc}")
+            break
         _synchronize_device(device)
         solve_times.append(time.perf_counter() - solve_start)
 

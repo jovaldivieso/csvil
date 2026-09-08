@@ -524,7 +524,22 @@ def collect_dagger_rollouts(
                 break
 
             use_expert_action = bool(episode_expert_mixing_rng.random() < expert_mixing_beta)
-            policy_action = policy_action_fn(observation) if should_query_policy else None
+            policy_action = None
+            if should_query_policy:
+                try:
+                    policy_action = policy_action_fn(observation)
+                except PlannerSolveError as exc:
+                    # Unlike an expert-planner failure above, there is no
+                    # backtracking to do here: expert_action for this exact
+                    # step is already computed and known-safe, so falling
+                    # back to it (below, via policy_action=None) keeps the
+                    # episode going instead of discarding it. Recorded as an
+                    # expert step since that's what actually gets executed.
+                    print(
+                        "Policy action unavailable this step, falling back to the "
+                        f"expert action (attempt={attempted_episodes}, step={step}): {exc}"
+                    )
+                    use_expert_action = True
             append_frame(observation, expert_action, is_expert_action=use_expert_action)
             base_action = expert_action if use_expert_action or policy_action is None else policy_action
             state = simulator.step(
@@ -604,7 +619,15 @@ def rollout_policy_with_action_fn(
     if simulator.should_terminate_rollout(state):
         return True, 0
     for step in range(1, num_steps + 1):
-        action = action_fn(simulator.observe(state))
+        try:
+            action = action_fn(simulator.observe(state))
+        except PlannerSolveError as exc:
+            # No expert running alongside evaluation to fall back to (unlike
+            # collect_dagger_rollouts) -- treat like any other episode
+            # failure (a collision, a timeout) rather than crashing the
+            # whole evaluation/training run over one solver hiccup.
+            print(f"Policy solve failed during evaluation at step={step}: {exc}")
+            return False, step
         state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng))
         if simulator.is_collision(state):
             return False, step

@@ -4,6 +4,7 @@ from typing import Any, Mapping
 import casadi as ca
 import numpy as np
 
+from planning.casadi_planner import PlannerSolveError
 from systems.dynamics import DynamicsProtocol
 
 
@@ -30,18 +31,26 @@ class CasadiTrajectoryProjector:
     proposal, ``u_ref``).
     """
 
-    def _resolve_r_diag(self, config: Mapping[str, Any]) -> np.ndarray:
+    def _resolve_r_diag(self, config: Mapping[str, Any], robot_index: int) -> np.ndarray:
         """Per-robot action weight diagonal, sliced from a fleet-sized 'R_diag' if needed."""
         raw_r_diag = config.get("R_diag")
         if raw_r_diag is not None:
             if not isinstance(raw_r_diag, list):
                 raise ValueError("'R_diag' must be a list.")
-            # A fleet-level config's R_diag is laid out as consecutive per-robot
-            # blocks in robot order; this robot's own block is the leading slice.
-            diag_values = raw_r_diag[: self.sim.nu] if len(raw_r_diag) != self.sim.nu else raw_r_diag
+            if len(raw_r_diag) == self.sim.nu:
+                # Already sized for exactly one robot (e.g. a fleet-of-one) --
+                # nothing to slice.
+                diag_values = raw_r_diag
+            else:
+                # A fleet-level config's R_diag is laid out as consecutive
+                # per-robot blocks in robot order; take this robot's own
+                # block, not always the leading one.
+                start = robot_index * self.sim.nu
+                diag_values = raw_r_diag[start : start + self.sim.nu]
             if len(diag_values) != self.sim.nu:
                 raise ValueError(
-                    f"'R_diag' must supply at least nu={self.sim.nu} values for this robot, got {len(raw_r_diag)}."
+                    f"'R_diag' must supply at least nu={self.sim.nu} values for robot {robot_index} "
+                    f"(fleet-wide R_diag has {len(raw_r_diag)} values total)."
                 )
             values: list[float] = []
             for idx, value in enumerate(diag_values):
@@ -67,6 +76,7 @@ class CasadiTrajectoryProjector:
         neighbor_slots: int = 0,
         *,
         horizon: int,
+        robot_index: int = 0,
     ):
         self.sim = local_sim
         # The *tracked* portion must match the flow policy's own
@@ -80,25 +90,17 @@ class CasadiTrajectoryProjector:
         if self.tracked_horizon <= 0:
             raise ValueError("'horizon' must be a positive integer.")
 
-        # The *internal* planning horizon extends beyond the tracked portion
-        # with a free "coast to a stop" tail, long enough to actually
-        # decelerate from this system's own max speed at its own max
-        # action -- otherwise the terminal "come to rest" condition below
-        # would be geometrically unreachable from any meaningful cruising
-        # speed within just the short tracked_horizon, forcing the optimizer
-        # to keep velocity far below what's actually safe just to stay
-        # feasible (confirmed: this measurably capped speed regardless of
-        # the terminal cost's weight, since it's a kinematic feasibility
-        # limit, not a cost-tuning one). The tail isn't tracked against any
-        # reference and isn't returned by project() -- it only needs to
-        # exist so a genuine stopping maneuver is reachable.
-        max_speed = getattr(self.sim, "max_speed", None)
-        max_action_for_stopping = getattr(self.sim, "max_action", None)
-        if max_speed is not None and max_action_for_stopping and float(max_action_for_stopping) > 0:
-            coast_steps = int(np.ceil(float(max_speed) / float(max_action_for_stopping) / float(self.sim.dt)))
-        else:
-            coast_steps = 0
-        self.N = self.tracked_horizon + coast_steps
+        # The internal planning horizon matches the tracked portion exactly
+        # (SafeFlowMPC, Oelerich et al. 2026, Eq. 12): the terminal "come to
+        # rest" condition is enforced at the end of this same N-step horizon,
+        # not on an appended tail beyond it. This is a soft cost here (not a
+        # hard equality constraint as in the paper), so a short horizon does
+        # not make the solve infeasible -- it just means the achievable
+        # terminal velocity may be far from zero whenever the tracked
+        # horizon is too short to decelerate from cruising speed at this
+        # system's own max action, weakening the safety margin the terminal
+        # condition is meant to provide.
+        self.N = self.tracked_horizon
 
         self.collision_slack_penalty_weight = float(config.get("collision_slack_penalty_weight", 10000.0))
         # Independent of Q_diag/terminal_cost_multiplier: those are tuned for
@@ -115,24 +117,6 @@ class CasadiTrajectoryProjector:
         if self.collision_slack_penalty_weight <= 0:
             raise ValueError("'collision_slack_penalty_weight' must be positive.")
 
-        # RTI-style bounded compute budget (SafeFlowMPC, Oelerich et al. 2026,
-        # Sec. III): the paper never runs its projection to full non-convex
-        # optimality either -- it solves exactly one QP per call via the
-        # real-time-iteration scheme in acados, explicitly because doing so
-        # at every one of the Ns flow steps is "computationally infeasible."
-        # Their own "Ours w/ NL-Opt" ablation (solving to full optimality
-        # instead) is both slower and far less predictable (Table I:
-        # 93+-178 ms vs. 62+-5 ms) -- fatal for a hard real-time loop. IPOPT
-        # has no single-QP mode, so this caps its iteration budget instead;
-        # see project()'s handling of "Maximum_Iterations_Exceeded", which
-        # accepts the truncated iterate rather than treating it as a failure,
-        # relying on warm-starting across successive calls (every flow step,
-        # every control tick) to keep refining it -- never on any single call
-        # converging to completion.
-        self.max_iter = int(config.get("projector_max_iter", 10))
-        if self.max_iter <= 0:
-            raise ValueError("'projector_max_iter' must be a positive integer.")
-
         self.neighbor_slots = int(neighbor_slots)
         if self.neighbor_slots < 0:
             raise ValueError("'neighbor_slots' must be non-negative.")
@@ -141,7 +125,7 @@ class CasadiTrajectoryProjector:
         if self.d_safe < 0:
             raise ValueError("'d_safe' must be non-negative.")
 
-        self.R = np.diag(self._resolve_r_diag(config))
+        self.R = np.diag(self._resolve_r_diag(config, robot_index))
 
         self.opti = ca.Opti()
 
@@ -186,12 +170,8 @@ class CasadiTrajectoryProjector:
                 )
                 self.opti.subject_to(ca.vec(self.X[upper_indices, 1:]) <= ca.vec(upper_values))
 
-        # Running cost: track the flow-proposed action sequence over the
-        # tracked prefix, not a goal state. The coast tail (columns
-        # tracked_horizon:N) has no reference to track -- it's free, subject
-        # only to dynamics/bounds/collision-avoidance and the terminal
-        # condition below, existing purely so a real stopping maneuver is
-        # reachable.
+        # Running cost: track the flow-proposed action sequence against
+        # u_ref over the entire horizon, not a goal state.
         action_diff = self.U[:, : self.tracked_horizon] - self.u_ref_param
         cost += ca.sum2(ca.sum1(ca.mtimes(self.R, action_diff) * action_diff))
 
@@ -249,7 +229,6 @@ class CasadiTrajectoryProjector:
             "ipopt.print_level": 0,
             "print_time": 0,
             "ipopt.sb": "yes",
-            "ipopt.max_iter": self.max_iter,
             "ipopt.warm_start_init_point": "yes",
             "ipopt.warm_start_bound_push": 1e-9,
             "ipopt.warm_start_bound_frac": 1e-9,
@@ -260,41 +239,105 @@ class CasadiTrajectoryProjector:
         }
         self.opti.solver("ipopt", opts)
         self._prev_lam_g: np.ndarray | None = None
+        # Primal warm-start state, mirroring CasadiPlanner's own MPC
+        # recipe (see reset()/project() below for how these are used).
+        self._prev_X_sol: np.ndarray | None = None
+        self._prev_U_sol: np.ndarray | None = None
+        self._prev_x0: np.ndarray | None = None
+
+    def reset(self) -> None:
+        """Signals the start of a new episode.
+
+        Without this, a stale solution from the end of the *previous*
+        episode would otherwise be shifted and reused as this episode's
+        first warm start in project() -- a worse guess than the cold-start
+        fallback (forward-simulating u_ref), since it reflects a completely
+        unrelated trajectory rather than nothing at all.
+        """
+        self._prev_lam_g = None
+        self._prev_X_sol = None
+        self._prev_U_sol = None
+        self._prev_x0 = None
+        # set_initial(..., lam_g, ...) is sticky on the Opti object -- clearing
+        # only the Python-side _prev_lam_g cache above stops project() from
+        # re-applying it, but whatever value the last pre-reset call handed
+        # Opti stays active internally until something overwrites it. Without
+        # this, the new episode's first solve would still warm-start from the
+        # previous (unrelated) episode's final dual multipliers.
+        self.opti.set_initial(self.opti.lam_g, 0.0)
 
     def project(self, obs: np.ndarray, u_ref: np.ndarray, neighbor_trajs: np.ndarray | None = None) -> np.ndarray:
         """Project a reference action sequence ``u_ref`` (nu, tracked_horizon) onto the safety manifold.
 
-        Returns the projected action sequence for just the tracked prefix
-        (shape matching ``u_ref``); the internal coast tail used to make the
-        terminal "come to rest" condition reachable is solved for but never
-        returned or tracked against any reference.
+        Returns the projected action sequence, shape matching ``u_ref``. The
+        internal optimization horizon ``self.N`` equals ``tracked_horizon``
+        exactly (SafeFlowMPC, Oelerich et al. 2026, Eq. 12: the terminal
+        "come to rest" condition is enforced at the end of this same
+        N-step horizon, not on an appended tail beyond it).
 
         ``neighbor_trajs``, if this robot has neighbor slots and ``d_safe`` >
-        0, must be shaped ``(neighbor_slots, 2, N + 1)`` in this robot's own
-        *absolute* frame, where ``N`` is the full internal horizon
-        (``self.N``, including the coast tail) -- not just ``tracked_horizon``.
+        0, must be shaped ``(neighbor_slots, 2, N + 1)``, i.e.
+        ``(neighbor_slots, 2, tracked_horizon + 1)``, in this robot's own
+        *absolute* frame. If the NLP solve fails and a previously-solved safe
+        trajectory exists, falls back to that trajectory (SafeFlowMPC,
+        Oelerich et al. 2026, Theorem 2), never to the unprojected ``u_ref`` --
+        returning an unprojected action on a transient solver hiccup would
+        bypass every constraint this projector exists to enforce. On a
+        cold-start failure (first call ever, or right after ``reset()``),
+        there is no established safe trajectory to fall back on at all --
+        exactly the situation SafeFlowMPC's Assumption 2 assumes away by
+        requiring one to already exist -- so this raises
+        ``planning.casadi_planner.PlannerSolveError`` instead of fabricating
+        a fallback with no safety basis. Callers should handle it the same
+        way they already handle an expert ``PlannerSolveError`` (discard or
+        retry the episode), not attempt to recover an action from it.
 
-        With ``self.max_iter`` capping IPOPT's budget (RTI-style), hitting
-        that cap is the *expected* steady-state outcome, not a failure: the
-        truncated iterate is accepted and returned, warm-starting the next
-        call. Falls back to the unprojected ``u_ref`` with a warning only for
-        a genuine solver failure (e.g. infeasibility), so that degrades
-        gracefully instead of halting the caller's iterative flow-matching
-        loop.
+        IPOPT is always run to full convergence here (SafeFlowMPC, Oelerich
+        et al. 2026, Sec. III uses this exact "Ours w/ NL-Opt" mode when
+        using IPOPT rather than acados/RTI): an early-terminated interior-
+        point iterate is not a QP solved to its own optimum the way one RTI
+        step is, so it carries no guarantee of satisfying dynamics, bounds,
+        or collision constraints -- accepting it would silently break the
+        safety guarantee this projector exists to provide. Do not cap
+        ``ipopt.max_iter``; the only faithful way to trade off compute here
+        is fewer flow steps (``num_inference_steps``), exactly as the paper's
+        own IPOPT ablation reduces ``Ns`` from 7 to 4 rather than truncating
+        any individual solve.
         """
         x0 = self.sim.invert_obs(obs)
-        # Full-length (nu, N) warm-start guess: u_ref for the tracked prefix,
-        # then a zero-action coast for the tail (a simple, adequate initial
-        # guess -- the solver still has to find an actual deceleration
-        # maneuver to satisfy the terminal condition; this just seeds it).
-        u_guess = np.zeros((self.sim.nu, self.N), dtype=float)
-        u_guess[:, : self.tracked_horizon] = u_ref
-        state_guess = np.zeros((self.sim.nx, self.N + 1), dtype=float)
-        state_guess[:, 0] = x0
-        for step in range(self.N):
-            state_guess[:, step + 1] = self.sim.predict_next_state(
-                state_guess[:, step], u_guess[:, step], validate=False
-            )
+        # Primal warm-start guess, mirroring CasadiPlanner's own MPC recipe
+        # but adapted to project()'s two distinct call patterns:
+        #  - Consecutive flow denoising steps within the same control tick
+        #    share the exact same x0 (the environment hasn't stepped yet;
+        #    only u_ref, the flow network's reference, has been refined) --
+        #    detected via exact equality, since obs/invert_obs are
+        #    deterministic and the caller passes the same array every flow
+        #    step. No time has elapsed, so the previous converged solution
+        #    is reused as-is, unshifted -- a *better*-justified warm start
+        #    than CasadiPlanner's shift, precisely because nothing needs
+        #    shifting here.
+        #  - A genuinely new control tick (x0 has actually moved) gets
+        #    CasadiPlanner's shift-by-one-step treatment: the state/action
+        #    previously planned for index 1 is now approximately index 0.
+        # Falls back to forward-simulating u_ref (the only information
+        # available yet) on a true cold start -- first call ever, or right
+        # after reset().
+        if self._prev_X_sol is not None and self._prev_U_sol is not None:
+            if self._prev_x0 is not None and np.array_equal(x0, self._prev_x0):
+                state_guess = self._prev_X_sol
+                u_guess = self._prev_U_sol
+            else:
+                state_guess = np.hstack([self._prev_X_sol[:, 1:], self._prev_X_sol[:, -1:]])
+                u_guess = np.hstack([self._prev_U_sol[:, 1:], self._prev_U_sol[:, -1:]])
+        else:
+            u_guess = np.zeros((self.sim.nu, self.N), dtype=float)
+            u_guess[:, : self.tracked_horizon] = u_ref
+            state_guess = np.zeros((self.sim.nx, self.N + 1), dtype=float)
+            state_guess[:, 0] = x0
+            for step in range(self.N):
+                state_guess[:, step + 1] = self.sim.predict_next_state(
+                    state_guess[:, step], u_guess[:, step], validate=False
+                )
 
         self.opti.set_value(self.x0_param, x0)
         self.opti.set_value(self.u_ref_param, u_ref)
@@ -313,23 +356,45 @@ class CasadiTrajectoryProjector:
         try:
             sol = self.opti.solve()
             self._prev_lam_g = sol.value(self.opti.lam_g)
-            return sol.value(self.U)[:, : self.tracked_horizon]
+            self._prev_X_sol = sol.value(self.X)
+            self._prev_U_sol = sol.value(self.U)
+            self._prev_x0 = x0
+            return self._prev_U_sol[:, : self.tracked_horizon]
         except RuntimeError as exc:
-            # IPOPT raises even when it merely exhausted its (deliberately
-            # small) iteration budget, not just on genuine failures --
-            # opti.stats() still reports which one just happened.
-            if self.opti.stats().get("return_status") == "Maximum_Iterations_Exceeded":
-                u_result = self.opti.debug.value(self.U)[:, : self.tracked_horizon]
-                lam_g_result = np.asarray(self.opti.debug.value(self.opti.lam_g))
-                if np.all(np.isfinite(u_result)) and np.all(np.isfinite(lam_g_result)):
-                    # This is the normal RTI operating mode, not a degraded
-                    # one -- no warning, and warm-start from it like any
-                    # other solve so the next call keeps refining it.
-                    self._prev_lam_g = lam_g_result
-                    return u_result
-            warnings.warn(
-                f"CasadiTrajectoryProjector solve failed, falling back to the unprojected reference "
-                f"action sequence: {exc}",
-                stacklevel=2,
-            )
-            return u_ref
+            if self._prev_U_sol is not None:
+                # SafeFlowMPC, Oelerich et al. 2026, Theorem 2: on a
+                # projection failure, the safe fallback is to keep executing
+                # the current/last trajectory, not an arbitrary unprojected
+                # action -- it stays safe for all t > t0+T by Theorem 1.
+                # u_guess/state_guess above are exactly that trajectory
+                # (reused unshifted for a same-tick retry, or shifted by one
+                # step for a new tick), so accept them as though they had
+                # been solved: this both returns a certified-safe action now
+                # and lets a run of consecutive failures keep coasting
+                # further along the same safe trajectory instead of
+                # re-returning an identical fallback every time.
+                warnings.warn(
+                    "CasadiTrajectoryProjector solve failed, falling back to the last "
+                    f"known-safe projected trajectory instead of the unprojected reference: {exc}",
+                    stacklevel=2,
+                )
+                self._prev_X_sol = state_guess
+                self._prev_U_sol = u_guess
+                self._prev_x0 = x0
+                return u_guess[:, : self.tracked_horizon]
+            # SafeFlowMPC's safety guarantee (Theorem 2) rests entirely on
+            # Assumption 2 -- "a safe trajectory q^0(t) exists at the start
+            # of the robot movement" -- and Algorithm 1 takes that initial
+            # safe trajectory as a hard *precondition*, never something the
+            # algorithm derives from nothing. A cold start with no prior
+            # solve to fall back on is exactly the situation the paper
+            # assumes away; there is no paper-faithful safe action to
+            # return here. Silently returning the unprojected u_ref would
+            # misrepresent an unverified action as a handled failure, so
+            # this fails loudly instead -- callers are expected to treat it
+            # like an expert PlannerSolveError (discard/retry this
+            # episode), not attempt to recover an action from it.
+            raise PlannerSolveError(
+                "CasadiTrajectoryProjector solve failed with no previous safe trajectory to "
+                f"fall back on (cold start -- first call, or right after reset()): {exc}"
+            ) from exc

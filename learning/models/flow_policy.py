@@ -19,12 +19,18 @@ class SinusoidalTimeEmbedding(nn.Module):
         if embed_dim <= 0 or embed_dim % 2 != 0:
             raise ValueError(f"'embed_dim' must be a positive even integer, got {embed_dim}.")
         self.embed_dim = int(embed_dim)
+        half_dim = self.embed_dim // 2
+        exponent = -math.log(10000.0) * torch.arange(half_dim, dtype=torch.float32) / half_dim
+        # A pure function of embed_dim (fixed at construction), so it's computed
+        # once here instead of on every forward call -- this runs once per
+        # training step and once per Euler inference step, every one of which
+        # was rebuilding the same frequency tensor from scratch. Non-persistent:
+        # trivially reconstructible from embed_dim, so it's excluded from
+        # state_dict() and can't create checkpoint key mismatches.
+        self.register_buffer("freqs", torch.exp(exponent), persistent=False)
 
     def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
-        half_dim = self.embed_dim // 2
-        exponent = -math.log(10000.0) * torch.arange(half_dim, device=timesteps.device, dtype=torch.float32) / half_dim
-        freqs = torch.exp(exponent)
-        args = timesteps.float().unsqueeze(-1) * freqs.unsqueeze(0)
+        args = timesteps.float().unsqueeze(-1) * self.freqs.unsqueeze(0)
         return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
 
@@ -82,10 +88,23 @@ class FlowPolicy(ActionPolicy):
             self.net = torch.compile(self.net)
 
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
-        """Load both uncompiled and TorchDynamo-compiled network checkpoints."""
+        """Load an uncompiled or TorchDynamo-compiled checkpoint, from either a bare
+        FlowPolicy or a SafeFlowMPCPolicy-wrapped one.
+
+        'flow' and 'safeflow' are treated as interchangeable checkpoint types
+        (see test/evaluate_policy.py's _POLICY_TYPE_EQUIVALENCE): a
+        SafeFlowMPCPolicy checkpoint's keys are all prefixed with
+        ``inner_policy.`` (ordinary nn.Module submodule nesting), so that
+        prefix is stripped here too -- otherwise evaluating such a checkpoint
+        with ``--policy-type flow`` would fail on missing/unexpected keys.
+        """
         target_is_compiled = hasattr(self.net, "_orig_mod")
         normalized_state_dict = {}
         for key, value in state_dict.items():
+            if key.startswith("inner_policy."):
+                key = key[len("inner_policy.") :]
+            elif key.startswith("projector."):
+                continue
             if target_is_compiled and key.startswith("net.") and not key.startswith("net._orig_mod."):
                 key = key.replace("net.", "net._orig_mod.", 1)
             elif not target_is_compiled and key.startswith("net._orig_mod."):

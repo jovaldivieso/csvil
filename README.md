@@ -75,12 +75,20 @@ csvil/
 │   ├── config_loaders.py     # YAML and policy/encoder configuration helpers
 │   ├── config/
 │   │   ├── default_policy_config.yaml           # Used when --policy-config is omitted (MLP, no DAgger schedule)
+│   │   ├── gnn_encoder_mlp_policyhead_config.yaml
+│   │   ├── transformer_encoder_mlp_policyhead_config.yaml
 │   │   ├── multi_unicycle2_casadi_flow_config.yaml
-│   │   └── multi_unicycle2_casadi_mlp_config.yaml
+│   │   ├── multi_unicycle2_casadi_mlp_config.yaml
+│   │   ├── multi_double_integrator_casadi_flow_config.yaml
+│   │   ├── multi_double_integrator_casadi_mlp_config.yaml
+│   │   └── unicycle2_casadi_mlp_config.yaml
 │   ├── models/
 │   │   ├── deepset_encoder.py  # Permutation-invariant neighbor-set encoder
-│   │   ├── flow_policy.py      # Conditional flow-matching action policy used for BC/DAgger
 │   │   ├── encoder.py          # Shared interface and factory
+│   │   ├── gnn_encoder.py      # Message-passing (GNN) neighbor-set encoder
+│   │   ├── transformer_encoder.py  # Attention-based neighbor-set encoder
+│   │   ├── flow_policy.py      # Conditional flow-matching action policy used for BC/DAgger
+│   │   ├── safe_flow_policy.py # Flow policy + CasADi safety projection at inference (SafeFlowMPC)
 │   │   ├── mlp_policy.py       # MLP action policy
 │   │   └── policy.py           # Shared interface and factory
 │   ├── data_utils.py           # Stateless policy batch formatting and action chunks
@@ -91,29 +99,33 @@ csvil/
 │   │   ├── metrics.py         # DAgger evaluation metrics
 │   │   ├── rollouts.py        # Collection, evaluation, and action execution
 │   │   └── utils.py           # Seeding, step resolution, config overrides, and metric logging
-│   ├── train_dagger.py        # Object-oriented MLP / flow DAgger trainer and CLI
+│   ├── train_dagger.py        # Object-oriented MLP / flow / safeflow DAgger trainer and CLI
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
-│   ├── casadi_planner.py      # CasADi planner implementation
+│   ├── casadi_planner.py      # CasADi planner implementation (expert)
+│   ├── casadi_projector.py    # Per-robot CasADi safety projection for SafeFlowMPC
 │   └── dblacam_planner.py     # db-LaCAM planner implementation
 ├── systems/
 │   ├── dynamics.py            # Base simulator protocol and validation
+│   ├── single_integrator.py   # Example simulator subclass (holonomic, first-order)
 │   ├── double_integrator.py   # Example simulator subclass (holonomic)
+│   ├── unicycle1.py           # Example simulator subclass (non-holonomic, first-order)
+│   ├── unicycle2.py           # Example simulator subclass (non-holonomic)
+│   ├── collision_checker.py   # Pairwise fleet collision detection helper
 │   ├── initial_state_utils.py # Shared initial/goal-state parsing and normalization
 │   ├── multi_robot.py         # Fleet composition wrapper over per-robot simulators
-│   ├── unicycle2.py           # Example simulator subclass (non-holonomic)
 │   └── seed_utils.py          # Seed defaults and deterministic rollout seeding
 ├── outputs/
 │   ├── plots/                 # Evaluation and expert-rollout plots/videos
 │   ├── train/                 # LeRobot training outputs
-│   ├── train_dagger/          # Single-robot DAgger checkpoints (MLP or flow)
-│   └── train_dagger_multi_robot/  # Multi-robot DAgger checkpoints (MLP or flow)
+│   ├── train_dagger/          # Single-robot DAgger checkpoints (MLP, flow, or safeflow)
+│   └── train_dagger_multi_robot/  # Multi-robot DAgger checkpoints (MLP, flow, or safeflow)
 └── test/
     ├── config/
     │   ├── multi_unicycle2_casadi_config.yaml       # Canonical example (used throughout this README)
     │   ├── multi_double_integrator_casadi_config.yaml
     │   └── multi_robot_dblacam_config.yaml          # Long-form robots: list example (distinct per-robot `start` states)
-    ├── evaluate_policy.py        # CLI for rollout/evaluation across policy families
+    ├── evaluate_policy.py           # CLI for rollout/evaluation across policy families
     ├── plot_expert_trajectories.py  # Canonical single/multi-robot expert analysis CLI (plots + optional MP4)
     └── test_simulator_contracts.py  # Schema consistency tests
 ```
@@ -303,7 +315,10 @@ python test/evaluate_policy.py \
   --tolerance-overrides '{"pos_tol": 0.2, "theta_tol": 1.1, "vel_tol": 0.05, "omega_tol": 0.05}'
 ```
 
-`--policy-type` supports `mlp` and `flow`. `--initial-states`/`--goal-states` are
+`--policy-type` supports `mlp`, `flow`, and `safeflow` (flow matching with a
+CasADi safety projection at inference time; SafeFlowMPC, Oelerich et al.,
+2026) -- a `flow`-trained checkpoint can be evaluated as either.
+`--initial-states`/`--goal-states` are
 optional (omit them for randomly seeded rollouts); pass them to check
 performance on a specific scenario, e.g. the same swap/crossing cases used
 during training. `--tolerance-overrides` reproduces whatever convergence
@@ -474,3 +489,11 @@ lerobot-dataset-viz \
 - Brainstorming: Add composable observer/noise models so training and evaluation can sweep partial observability and sensor corruption systematically (beyond current execution-time action-noise injection).
 - Brainstorming: Extend the planner stack to support OMPL as an additional backend. The expected integration path is straightforward: add an OMPL planner implementation that inherits from `planning/planner.py` and register it through `PlannerFactory`.
 - Brainstorming: Add a safety module similar to GLAS-style barrier-function shielding.
+
+## References
+
+- Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, Matt Le. (2023). Flow Matching for Generative Modeling. https://doi.org/10.48550/arXiv.2210.02747
+- Thies Oelerich, Gerald Ebmer, Christian Hartl-Nesic, Andreas Kugi. (2026). SafeFlowMPC: Predictive and Safe Trajectory Planning for Robot Manipulators with Learning-based Policies. https://doi.org/10.48550/arXiv.2602.12794
+- Benjamin Rivière, Wolfgang Hönig, Yisong Yue, Soon-Jo Chung. (2020). GLAS: Global-to-Local Safe Autonomy Synthesis for Multi-Robot Motion Planning with End-to-End Learning. https://doi.org/10.1109/LRA.2020.2994035
+- Stéphane Ross, Geoffrey J. Gordon, J. Andrew Bagnell. (2011). A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning. https://doi.org/10.48550/arXiv.1011.0686
+- Manzil Zaheer, Satwik Kottur, Siamak Ravanbhakhsh, Barnabás Póczos, Ruslan Salakhutdinov, Alexander J. Smola. (2017). Deep Sets. https://doi.org/10.48550/arXiv.1703.06114

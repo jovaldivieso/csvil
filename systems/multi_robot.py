@@ -73,6 +73,7 @@ class MultiRobotSimulator(DynamicsSimulator):
         if len(self.simulators) == 0:
             raise ValueError("MultiRobotSimulator requires at least one sub-simulator.")
         self.num_robots = len(self.simulators)
+        self._decentralized_dims_cache: tuple[int, int, int, int] | None = None
 
         merged_config: dict[str, Any] = dict(config or {})
         merged_config.setdefault("dt", float(self.simulators[0].dt))
@@ -590,6 +591,14 @@ class MultiRobotSimulator(DynamicsSimulator):
         return self.validate_state(np.concatenate(goals))
 
     def _validate_homogeneous_decentralized_dimensions(self) -> tuple[int, int, int, int]:
+        # self.simulators is fixed for the object's lifetime (set once in
+        # __init__, never reassigned), so this schema comparison is invariant
+        # across calls -- cache it rather than rebuilding every sub-simulator's
+        # get_dataset_features() dict on every format_dataset_frame()/
+        # get_dataset_features() call (once per rollout step).
+        if self._decentralized_dims_cache is not None:
+            return self._decentralized_dims_cache
+
         env_dim = int(self.robot_env_dims[0])
         proprio_dim = int(self.robot_proprio_dims[0])
         state_mask_dim = int(self.robot_state_mask_dims[0])
@@ -635,7 +644,8 @@ class MultiRobotSimulator(DynamicsSimulator):
                     "Decentralized multi-robot policies require homogeneous action dimensions."
                 )
 
-        return env_dim, proprio_dim, state_mask_dim, action_dim
+        self._decentralized_dims_cache = (env_dim, proprio_dim, state_mask_dim, action_dim)
+        return self._decentralized_dims_cache
 
     def decentralized_policy_observation(self, obs: np.ndarray, robot_id: int = 0) -> dict[str, np.ndarray]:
         split_obs = self._split_observation(obs)

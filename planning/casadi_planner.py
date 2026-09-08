@@ -417,6 +417,13 @@ class CasadiPlanner(Planner):
         self._prev_lam_g = None
         self.opti.set_initial(self.X, 0.0)
         self.opti.set_initial(self.U, 0.0)
+        # set_initial(..., lam_g, ...) is sticky on the Opti object -- clearing
+        # only the Python-side _prev_lam_g cache above stops *this* code from
+        # re-applying it, but whatever value __call__ last handed Opti stays
+        # active internally until something overwrites it. Without this, the
+        # new episode's first solve would still warm-start from the previous
+        # (unrelated) episode's final dual multipliers.
+        self.opti.set_initial(self.opti.lam_g, 0.0)
         if self.mode == "open_loop":
             self.cached_plan = None
             self.step_idx = 0

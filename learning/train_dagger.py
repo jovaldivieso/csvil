@@ -33,7 +33,11 @@ from learning.config_loaders import (
     load_encoder_config, load_flow_config, load_mlp_hidden_dims,
     load_observation_horizon, load_policy_type, load_prediction_horizon,
 )
-from learning.data_utils import create_collate_fn_with_dataset
+from learning.data_utils import (
+    build_action_window_cache,
+    build_observation_history_cache,
+    create_collate_fn_with_dataset,
+)
 from learning.dagger import (
     DaggerEvalMetrics, ExpertMixBetaController, apply_config_overrides, build_decentralized_joint_action,
     collect_dagger_rollouts, evaluate_policy_rollouts, print_rollout_metrics,
@@ -341,7 +345,7 @@ class DaggerTrainer:
         print(f"MLP hidden dims: {list(self.cfg.mlp_hidden_dims)}")
         print(f"Prediction horizon: {self.cfg.prediction_horizon}")
         print(f"Policy type: {self.cfg.policy_type}")
-        if self.cfg.policy_type == "flow":
+        if self.cfg.policy_type in {"flow", "safeflow"}:
             print(
                 "Flow inference: "
                 f"num_inference_steps={self.cfg.flow_config.num_inference_steps}"
@@ -415,6 +419,15 @@ class DaggerTrainer:
             repo_id=self.cfg.repo_id,
             root=self.cfg.dataset_root,
         )
+        cache_start = time.perf_counter()
+        action_window_cache = build_action_window_cache(dataset, self.cfg.prediction_horizon)
+        observation_history_cache = build_observation_history_cache(dataset, self.cfg.observation_horizon)
+        print(
+            f"  Built action-window + observation-history caches for {len(dataset)} frames in "
+            f"{time.perf_counter() - cache_start:.2f}s (avoids re-fetching "
+            f"{self.cfg.prediction_horizon - 1} future and {self.cfg.observation_horizon - 1} "
+            "past frames per sample on every epoch)"
+        )
         generator = torch.Generator().manual_seed(self.cfg.seed + training_round)
         loader = DataLoader(
             dataset,
@@ -426,6 +439,8 @@ class DaggerTrainer:
                 simulator=self.simulator,
                 prediction_horizon=self.cfg.prediction_horizon,
                 observation_horizon=self.cfg.observation_horizon,
+                action_window_cache=action_window_cache,
+                observation_history_cache=observation_history_cache,
             ),
         )
         steps, approx = resolve_round_steps(
@@ -557,11 +572,11 @@ class DaggerTrainer:
             "encoder_kwargs": self.cfg.encoder_config.kwargs,
             "policy_type": self.cfg.policy_type,
         }
-        if self.cfg.policy_type == "flow":
+        if self.cfg.policy_type in {"flow", "safeflow"}:
             data["flow_config"] = {
                 "num_inference_steps": self.cfg.flow_config.num_inference_steps,
             }
-        prefix = "flow_dagger" if self.cfg.policy_type == "flow" else "mlp_dagger"
+        prefix = "flow_dagger" if self.cfg.policy_type in {"flow", "safeflow"} else "mlp_dagger"
         latest_checkpoint = self.cfg.checkpoint_dir / f"{prefix}_checkpoint.pt"
         iteration_checkpoint = self.cfg.checkpoint_dir / f"{prefix}_iter_{training_round:03d}.pt"
         torch.save(data, latest_checkpoint)

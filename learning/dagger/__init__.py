@@ -1,14 +1,4 @@
 from .beta_controller import ExpertMixBetaController, scheduled_expert_mix_beta
-from .feature_cache import (
-    ObservationFeaturePackCache,
-    action_feature_names,
-    build_observation_feature_pack_cache,
-    is_observation_feature,
-    observation_dim_from_features,
-    observation_feature_names,
-    pack_observation_features,
-    pack_observation_features_from_cache,
-)
 from .metrics import DaggerEvalMetrics
 from .rollouts import (
     apply_execution_noise,
@@ -33,14 +23,6 @@ __all__ = [
     "DaggerEvalMetrics",
     "ExpertMixBetaController",
     "scheduled_expert_mix_beta",
-    "ObservationFeaturePackCache",
-    "action_feature_names",
-    "build_observation_feature_pack_cache",
-    "is_observation_feature",
-    "observation_dim_from_features",
-    "observation_feature_names",
-    "pack_observation_features",
-    "pack_observation_features_from_cache",
     "apply_config_overrides",
     "apply_execution_noise",
     "ObservationHistoryBuffer",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -62,27 +64,57 @@ class PolicyFactory:
                 )
             inner_policy = FlowPolicy(**flow_kwargs)
             num_robots = int(getattr(simulator, "num_robots", 1))
-            local_sims = list(simulator.simulators) if num_robots > 1 else [simulator]
+            live_sims = list(simulator.simulators) if num_robots > 1 else [simulator]
             neighbor_slots = max(0, num_robots - 1)
             # One independent Opti problem per robot, each bound to *that*
             # robot's own sim object -- not a single one shared across all of
             # them. Dynamics parameters (dt, nx, bounds, ...) are identical
             # across a homogeneous fleet so sharing those would be harmless,
-            # but each sim object also carries its own mutable goal (set via
-            # MultiRobotSimulator.set_goal), and the projector's invert_obs()
-            # and goal_state reads both depend on it -- sharing simulators[0]
-            # for every projector would silently make every robot but the
-            # first track robot 0's goal instead of its own. Concurrent
-            # select_action solves also need distinct Opti instances anyway:
-            # a shared Opti's mutable per-call state (set_value/set_initial)
-            # isn't safe to touch from multiple threads at once.
+            # but each sim object also carries a goal attribute, and
+            # invert_obs() reads it to reconstruct absolute state from the
+            # ego-relative observation -- sharing simulators[0] for every
+            # projector would silently make every robot but the first
+            # invert against robot 0's goal instead of its own.
+            #
+            # These are deep-copied with the goal zeroed, once, here, rather
+            # than kept as live references into `simulator`: every
+            # constraint/cost this projector pipeline touches (dynamics,
+            # action/velocity bounds, pairwise neighbor distances, terminal
+            # velocity) is equivariant under a per-robot rigid transform of
+            # invert_obs's reconstructed frame, and neighbor trajectories are
+            # built from that same reconstructed x0 rather than any absolute
+            # world position -- so the goal used here is never anything more
+            # than a fixed, self-consistent local anchor, not the live
+            # episode's actual goal. That means this policy never needs to
+            # track -- or be resynced to -- whatever simulator instance
+            # actually drives the live rollout (DAgger collection and
+            # evaluation each construct their own, separate from this one,
+            # every round/call). Deep-copying also protects a caller that
+            # passes the same simulator object for both policy construction
+            # and its own rollout from having that simulator's goal
+            # overwritten to zero out from under it.
+            #
+            # This equivalence would break if this projector ever gained a
+            # genuinely world-frame-referencing term (finite absolute
+            # position bounds, static obstacles, a goal-tracking cost) --
+            # anything added like that must take the real goal as an
+            # explicit input rather than reading it off these local_sims.
+            local_sims = []
+            for sim in live_sims:
+                local_sim = copy.deepcopy(sim)
+                local_sim.set_goal(np.zeros_like(local_sim.goal))
+                local_sims.append(local_sim)
             projectors = [
                 CasadiTrajectoryProjector(
-                    local_sims[i], planner_config, neighbor_slots, horizon=inner_policy.prediction_horizon
+                    local_sims[i],
+                    planner_config,
+                    neighbor_slots,
+                    horizon=inner_policy.prediction_horizon,
+                    robot_index=i,
                 )
                 for i in range(num_robots)
             ]
-            return SafeFlowMPCPolicy(inner_policy, projectors, simulator)
+            return SafeFlowMPCPolicy(inner_policy, projectors, local_sims)
         raise ValueError(
             f"Unknown policy type '{policy_type}'. "
             f"Supported policies: 'mlp', 'flow', 'safeflow'."
