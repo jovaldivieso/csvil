@@ -48,13 +48,24 @@ def _build_two_robot_simulator(goal0: list[float], goal1: list[float]):
 
 
 def _build_safe_flow_policy(simulator) -> SafeFlowMPCPolicy:
+    # For 2 unicycle2 robots at observation_horizon=2: ego packs
+    # environment_state(4, single-frame) + state(2*2=4, stacked) +
+    # state_mask(1*2=2, stacked) = 10. DeepSetEncoder derives ego_dim as
+    # state_dim - neighbor_slots*(neighbor_feature_dim + observation_horizon)
+    # = state_dim - 1*(8+2), so state_dim must be 20 for ego_dim to equal
+    # the actual 10 -- a mismatch here would only surface once something
+    # actually calls select_action with this policy, not at construction.
     encoder = EncoderFactory.create(
-        "deepset", state_dim=22, neighbor_feature_dim=8, neighbor_slots=1,
+        "deepset", state_dim=20, neighbor_feature_dim=8, neighbor_slots=1,
         observation_horizon=2, phi_dims=[8], rho_dims=[4],
     )
     policy = PolicyFactory.create(
         "safeflow",
-        action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=3, num_inference_steps=2,
+        # horizon must be long enough for the projector's hard
+        # terminal-velocity==0 constraint to be feasible from this
+        # simulator's own worst-case velocity (max_speed/max_omega=2.0) at
+        # max_accel=2.0, dt=DT=0.05: >= 2.0 / (2.0 * 0.05) = 20 steps.
+        action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=22, num_inference_steps=2,
         simulator=simulator, planner_config={},
     )
     assert isinstance(policy, SafeFlowMPCPolicy)
@@ -117,12 +128,13 @@ class GoalAnchorIndependenceTests(unittest.TestCase):
                     "goal": real_goal, "randomize_goal": False},
         )
         obs = real_sim.observe(state)
-        # horizon must be long enough that the hard terminal-velocity==0
-        # constraint is actually reachable from state's v=0.6 within
-        # max_accel=2.0, dt=DT: decelerating needs >= 0.6 / (2.0 * DT) = 6
-        # steps; 10 leaves margin.
+        # horizon must clear CasadiTrajectoryProjector's own construction-time
+        # feasibility check for the hard terminal-velocity==0 constraint,
+        # which is based on this simulator's worst-case state bound
+        # (max_speed=max_omega=2.0), not the actual state's v=0.6: needs
+        # >= 2.0 / (2.0 * DT) = 20 steps; 22 leaves margin.
         rng = np.random.default_rng(0)
-        u_ref = rng.uniform(-1.0, 1.0, size=(2, 10))
+        u_ref = rng.uniform(-1.0, 1.0, size=(2, 22))
 
         def project_with_anchor(anchor_goal: list[float]) -> np.ndarray:
             sim = DynamicsFactory.create(
@@ -130,7 +142,7 @@ class GoalAnchorIndependenceTests(unittest.TestCase):
                 config={"dt": DT, "max_accel": 2.0, "max_omega": 2.0, "max_speed": 2.0,
                         "goal": anchor_goal, "randomize_goal": False},
             )
-            projector = CasadiTrajectoryProjector(sim, {}, neighbor_slots=0, horizon=10, robot_index=0)
+            projector = CasadiTrajectoryProjector(sim, {}, neighbor_slots=0, horizon=22, robot_index=0)
             return projector.project(obs, u_ref)
 
         u_safe_zeroed = project_with_anchor([0.0, 0.0, 0.0])
@@ -151,22 +163,29 @@ class ProjectorFailClosedFallbackTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.simulator = _build_two_robot_simulator(goal0=[5.0, 0.0, 0.0], goal1=[-5.0, 0.0, 0.0])
+        # horizon must clear CasadiTrajectoryProjector's own construction-time
+        # feasibility check for the hard terminal-velocity==0 constraint
+        # (based on max_speed=max_omega=2.0, max_accel=2.0, dt=DT): needs
+        # >= 2.0 / (2.0 * DT) = 20 steps; 22 leaves margin.
         self.projector = CasadiTrajectoryProjector(
-            self.simulator.simulators[0], {}, neighbor_slots=0, horizon=3, robot_index=0
+            self.simulator.simulators[0], {}, neighbor_slots=0, horizon=22, robot_index=0
         )
         self.state0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
         self.obs0 = self.simulator.simulators[0].observe(self.state0)
         # Deliberately out of bounds (max_accel=max_omega=2.0): any solved
         # trajectory is guaranteed to differ from this, so a test asserting
         # "the fallback is NOT u_ref" can't pass by coincidence.
-        self.u_ref = np.full((2, 3), 999.0)
+        self.u_ref = np.full((2, 22), 999.0)
 
     def test_falls_back_to_last_safe_trajectory_when_one_exists(self) -> None:
         self.projector.project(self.obs0, self.u_ref)
         self.assertIsNotNone(self.projector._prev_U_sol)
+        # Matches project()'s own fallback padding: the shifted plan's
+        # extra final slot is zero action (holds the certified-at-rest
+        # terminal state), not a duplicate of the last applied action.
         expected_fallback = np.hstack(
-            [self.projector._prev_U_sol[:, 1:], self.projector._prev_U_sol[:, -1:]]
-        )[:, :3]
+            [self.projector._prev_U_sol[:, 1:], np.zeros((self.projector.sim.nu, 1))]
+        )[:, :22]
 
         self.projector.opti.solve = lambda: (_ for _ in ()).throw(RuntimeError("forced failure"))
         perturbed_obs = self.simulator.simulators[0].observe(self.state0 + 0.01)
@@ -188,6 +207,73 @@ class ProjectorFailClosedFallbackTests(unittest.TestCase):
         self.projector.opti.solve = lambda: (_ for _ in ()).throw(RuntimeError("forced failure"))
         with self.assertRaises(PlannerSolveError):
             self.projector.project(self.obs0, self.u_ref)
+
+    def test_consecutive_fallbacks_stay_at_rest_instead_of_drifting_away(self) -> None:
+        # Regression test for padding the fallback's extra control slot with
+        # a duplicate of the *last applied* action (whatever nonzero
+        # deceleration drove velocity to zero) instead of zero (the action
+        # that actually sustains the certified at-rest terminal state).
+        # Reapplying a stale nonzero action to an already-at-rest state
+        # would accelerate it right back away from rest -- exactly the
+        # "failure recovery does not establish an invariant resting
+        # trajectory" gap. A run of consecutive failures across genuinely
+        # different ticks (a new x0 each time, so each hits the shift-and-
+        # pad branch, not the same-tick reuse-as-is branch) must keep the
+        # fallback's own terminal velocity at zero throughout.
+        self.projector.project(self.obs0, self.u_ref)
+        self.projector.opti.solve = lambda: (_ for _ in ()).throw(RuntimeError("forced failure"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(1, 6):
+                # Perturb position/theta only, leaving velocity exactly at
+                # the certified-zero terminal value -- isolates the padding
+                # recipe itself from _revalidate_fallback's separate,
+                # already-tested tolerance for genuine x0 velocity drift.
+                perturbed_state = self.state0.copy()
+                perturbed_state[:3] += 0.001 * i
+                obs_i = self.simulator.simulators[0].observe(perturbed_state)
+                self.projector.project(obs_i, self.u_ref)
+        terminal_velocity = self.projector._prev_X_sol[
+            list(self.projector.velocity_idx), self.projector.N
+        ]
+        np.testing.assert_allclose(terminal_velocity, 0.0, atol=1e-9)
+
+
+class TerminalConditionSupportTests(unittest.TestCase):
+    """First-order systems need no terminal constraint at all: Assumption 1
+    (a controller exists with a control-invariant safety set encompassing
+    the terminal set) is trivially satisfied everywhere for a driftless
+    first-order system (u=0 is a fixed point at any state), not skipped as
+    a deviation from the paper. A too-short horizon for a velocity-having
+    system, on the other hand, is caught at construction time rather than
+    surfacing only as an opaque runtime NLP infeasibility.
+    """
+
+    def test_first_order_system_constructs_and_solves_without_a_terminal_constraint(self) -> None:
+        sim = DynamicsFactory.create(
+            system_name="single_integrator",
+            config={"dt": DT, "max_vel": 1.0, "goal": [1.0, 1.0], "randomize_goal": False},
+        )
+        projector = CasadiTrajectoryProjector(sim, {}, neighbor_slots=0, horizon=3, robot_index=0)
+        self.assertEqual(projector.velocity_idx, ())
+
+        state0 = np.array([0.0, 0.0])
+        obs0 = sim.observe(state0)
+        # Deliberately large: with no terminal constraint to fight, the
+        # solver should simply saturate toward it every step.
+        u_ref = np.full((2, 3), 999.0)
+        u_safe = projector.project(obs0, u_ref)
+        np.testing.assert_allclose(u_safe, sim.max_action, atol=1e-6)
+
+    def test_too_short_horizon_for_velocity_having_system_raises_at_construction(self) -> None:
+        sim = DynamicsFactory.create(
+            system_name="unicycle2",
+            config={"dt": DT, "max_accel": 2.0, "max_omega": 2.0, "max_speed": 2.0,
+                    "goal": [1.0, 0.0, 0.0], "randomize_goal": False},
+        )
+        # 2.0 / (2.0 * DT) = 20 steps needed; 3 is far short.
+        with self.assertRaises(ValueError):
+            CasadiTrajectoryProjector(sim, {}, neighbor_slots=0, horizon=3, robot_index=0)
 
 
 class PolicySolveFailureRecoveryTests(unittest.TestCase):

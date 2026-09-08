@@ -32,9 +32,10 @@ class CasadiTrajectoryProjector:
     safe, controllable rest state -- not tracking the task goal, which the
     paper's own formulation never asks the projector to do (task-directed
     progress comes entirely from the flow policy's own proposal, ``u_ref``).
-    Requires a system with velocity states; first-order systems (no momentum
-    to carry them unsafely past the horizon, but also nothing for this
-    condition to apply to) are not a supported target for this policy.
+    First-order systems (no velocity state) need no terminal constraint at
+    all: Assumption 1's control-invariant-safety-set requirement is
+    trivially satisfied everywhere for a driftless first-order system (u=0
+    is a fixed point at any state), not skipped as a deviation from it.
     """
 
     def _resolve_r_diag(self, config: Mapping[str, Any], robot_index: int) -> np.ndarray:
@@ -99,13 +100,13 @@ class CasadiTrajectoryProjector:
         # The internal planning horizon matches the tracked portion exactly
         # (SafeFlowMPC, Oelerich et al. 2026, Eq. 12): the terminal "come to
         # rest" condition is enforced at the end of this same N-step horizon,
-        # not on an appended tail beyond it. This is a soft cost here (not a
-        # hard equality constraint as in the paper), so a short horizon does
-        # not make the solve infeasible -- it just means the achievable
-        # terminal velocity may be far from zero whenever the tracked
-        # horizon is too short to decelerate from cruising speed at this
-        # system's own max action, weakening the safety margin the terminal
-        # condition is meant to provide.
+        # not on an appended tail beyond it, as the hard equality constraint
+        # the paper states (see the terminal-velocity block below). A
+        # too-short horizon can therefore make the solve genuinely
+        # infeasible -- not just weaken a soft penalty -- if it cannot
+        # decelerate from this system's own worst-case velocity to zero at
+        # its own max_action; the construction-time check below raises
+        # before that can happen silently at runtime.
         self.N = self.tracked_horizon
 
         self.collision_slack_penalty_weight = float(config.get("collision_slack_penalty_weight", 10000.0))
@@ -240,23 +241,59 @@ class CasadiTrajectoryProjector:
         # the action bounds -- confirmed to cause collisions a plain,
         # unprojected flow rollout did not have.
         #
+        # Eq. 12 zeros every state-derivative level except position -- for
+        # the paper's own manipulator (state = [q, q_dot, q_ddot, jerk]),
+        # that's velocity, acceleration, and jerk, leaving the control (the
+        # *next* derivative, "snap") unconstrained at the boundary. This
+        # system's state chain is only [position, velocity]; control
+        # (acceleration) already fills that same "next derivative" slot, so
+        # the correct analog is to zero velocity alone and leave the control
+        # free -- constraining the control too would be *more* restrictive
+        # than the paper's own condition, not more faithful to it.
+        #
         # Systems with no velocity state at all (single_integrator,
-        # unicycle1) have no momentum to carry them unsafely past the
-        # horizon, so the paper's terminal condition has nothing to apply
-        # to -- rather than silently skip it (a deviation from the paper's
-        # stated safety condition), this refuses to build a projector for
-        # them at all: SafeFlowMPCPolicy is not a supported policy type for
-        # first-order systems.
+        # unicycle1) genuinely need no constraint here -- not a deviation
+        # from the paper, but Assumption 1 ("a controller exists with a
+        # control-invariant safety set encompassing the terminal set")
+        # being trivially satisfied everywhere for a driftless first-order
+        # system: state_{k+1} = state_k + u*dt, so u=0 is a fixed point at
+        # *any* state, not just one specially reached. There is nothing to
+        # "come to rest" from -- a first-order system is always already
+        # instantaneously stoppable.
         self.velocity_idx = tuple(getattr(self.sim, "velocity_state_indices", ()))
-        if not self.velocity_idx:
-            raise ValueError(
-                "CasadiTrajectoryProjector requires a system with velocity states to enforce "
-                "SafeFlowMPC's terminal 'come to rest' condition (Oelerich et al. 2026, Eq. 12) "
-                f"as the hard constraint the paper specifies; {type(self.sim).__name__} has no "
-                "velocity_state_indices. SafeFlowMPCPolicy does not support first-order systems."
-            )
-        terminal_velocity = self.X[list(self.velocity_idx), self.N]
-        self.opti.subject_to(terminal_velocity == 0)
+        if self.velocity_idx:
+            terminal_velocity = self.X[list(self.velocity_idx), self.N]
+            self.opti.subject_to(terminal_velocity == 0)
+
+            # Feasibility sanity check at construction time rather than only
+            # discovering it via opaque runtime solve failures: this hard
+            # constraint is only satisfiable if the horizon is long enough
+            # to decelerate from this system's own worst-case velocity to
+            # zero at its own max_action.
+            dt = float(getattr(self.sim, "dt"))
+            robot_max_action = float(getattr(self.sim, "max_action"))
+            state_upper = getattr(self.sim, "state_upper_bounds", None)
+            state_lower = getattr(self.sim, "state_lower_bounds", None)
+            if state_upper is not None and state_lower is not None and robot_max_action > 0:
+                state_upper = np.asarray(state_upper, dtype=float)
+                state_lower = np.asarray(state_lower, dtype=float)
+                worst_case_speeds = [
+                    max(abs(state_upper[idx]), abs(state_lower[idx]))
+                    for idx in self.velocity_idx
+                    if np.isfinite(state_upper[idx]) and np.isfinite(state_lower[idx])
+                ]
+                if worst_case_speeds:
+                    min_feasible_horizon = max(worst_case_speeds) / (robot_max_action * dt)
+                    if self.N < min_feasible_horizon:
+                        raise ValueError(
+                            f"'horizon' ({self.N}) is too short for {type(self.sim).__name__} to "
+                            "always satisfy the hard terminal-velocity constraint: decelerating from "
+                            f"its worst-case velocity ({max(worst_case_speeds)}) at max_action "
+                            f"({robot_max_action}) needs at least {min_feasible_horizon:.1f} steps at "
+                            f"dt={dt}. Increase 'horizon' (equivalently, the flow policy's own "
+                            "prediction_horizon) -- otherwise this constraint can be infeasible from a "
+                            "reachable state."
+                        )
 
         self.opti.minimize(cost)
         self.opti.subject_to(self.X[:, 0] == self.x0_param)
@@ -440,8 +477,24 @@ class CasadiTrajectoryProjector:
                 state_guess = self._prev_X_sol
                 u_guess = self._prev_U_sol
             else:
+                # Padding beyond the previous solve's own horizon represents
+                # time *after* it already reached the certified at-rest
+                # terminal state -- per Assumption 1 / Eq. 10 (Oelerich et
+                # al. 2026), staying there is what "keeps the robot in the
+                # terminal safety set" means. For this dynamics class that
+                # controller is exactly zero action: with terminal_velocity
+                # == 0 (hard constraint above), applying u=0 from that state
+                # is a fixed point of predict_next_state. Padding with the
+                # *last applied* action instead (whatever nonzero
+                # deceleration drove velocity to zero) would reapply that
+                # deceleration to an already-at-rest state and accelerate it
+                # straight back away from rest -- exactly the "failure
+                # recovery does not establish an invariant resting
+                # trajectory" gap a stale plan could otherwise fall into.
                 state_guess = np.hstack([self._prev_X_sol[:, 1:], self._prev_X_sol[:, -1:]])
-                u_guess = np.hstack([self._prev_U_sol[:, 1:], self._prev_U_sol[:, -1:]])
+                u_guess = np.hstack(
+                    [self._prev_U_sol[:, 1:], np.zeros((self.sim.nu, 1), dtype=float)]
+                )
         else:
             u_guess = np.zeros((self.sim.nu, self.N), dtype=float)
             u_guess[:, : self.tracked_horizon] = u_ref

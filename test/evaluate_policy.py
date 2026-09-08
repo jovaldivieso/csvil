@@ -769,6 +769,13 @@ def run_evaluation(
                 "expert_solve_time_mean_s": expert_solve_time_mean,
                 "policy_solve_time_mean_s": policy_solve_time_mean,
                 "policy_solve_time_mean_s_per_robot": policy_solve_time_mean_per_robot,
+                # Raw per-step samples, kept alongside the per-rollout means
+                # above so the aggregate below can be a true per-step mean
+                # (weighted by each rollout's own step count) rather than an
+                # unweighted mean of per-rollout means, which would let a
+                # 1-step rollout outvote a 200-step one.
+                "expert_solve_times": expert_solve_times,
+                "policy_solve_times": policy_solve_times,
             }
         )
 
@@ -792,14 +799,20 @@ def run_evaluation(
         np.mean([metric["expert_steps"] for metric in per_seed_metrics])
     ) if total_runs > 0 else 0.0
 
-    def _mean_or_none(key: str) -> float | None:
-        values = [metric[key] for metric in per_seed_metrics if metric[key] is not None]
-        return float(np.mean(values)) if values else None
+    def _pooled_mean_or_none(key: str) -> float | None:
+        # Pools every rollout's raw per-step samples into one list before
+        # averaging, so each executed step counts once -- an unweighted
+        # mean of per-rollout means would give a 1-step rollout the same
+        # weight as a 200-step one.
+        pooled = [t for metric in per_seed_metrics for t in metric[key]]
+        return float(np.mean(pooled)) if pooled else None
 
-    mean_expert_solve_time = _mean_or_none("expert_solve_time_mean_s")
-    mean_policy_solve_time = _mean_or_none("policy_solve_time_mean_s")
-    mean_policy_solve_time_per_robot = _mean_or_none("policy_solve_time_mean_s_per_robot")
     num_robots = int(simulator.num_robots)
+    mean_expert_solve_time = _pooled_mean_or_none("expert_solve_times")
+    mean_policy_solve_time = _pooled_mean_or_none("policy_solve_times")
+    mean_policy_solve_time_per_robot = (
+        mean_policy_solve_time / num_robots if mean_policy_solve_time is not None else None
+    )
 
     print("\n--- Evaluation Summary ---")
     print(f"system: {system}")
