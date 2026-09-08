@@ -107,6 +107,25 @@ def min_pair_distance(simulator: DynamicsProtocol, state: np.ndarray) -> float:
     return float(distances.min())
 
 
+def config_start_state(raw_config: Mapping[str, Any]) -> np.ndarray:
+    """Concatenate the per-robot 'start' entries into one fleet state."""
+    robots = raw_config.get("robots")
+    if not isinstance(robots, list) or not robots:
+        raise ValueError("--use-config-start needs a non-empty 'robots' list.")
+    starts = []
+    for robot_idx, robot_entry in enumerate(robots):
+        start = robot_entry.get("start")
+        if start is None:
+            robot_config = robot_entry.get("config")
+            start = robot_config.get("start") if isinstance(robot_config, Mapping) else None
+        if start is None:
+            raise ValueError(
+                f"--use-config-start given, but robots[{robot_idx}] defines no 'start'."
+            )
+        starts.append(np.asarray(start, dtype=np.float32))
+    return np.concatenate(starts)
+
+
 def evaluate_fleet(
     simulator: DynamicsProtocol,
     policy: ActionPolicy,
@@ -116,15 +135,24 @@ def evaluate_fleet(
     seed_start: int,
     action_noise_std: float,
     action_noise_seed: int,
+    fixed_initial_state: np.ndarray | None = None,
 ) -> dict[str, float]:
-    """Roll the policy out over seeded episodes and summarize the outcomes."""
+    """Roll the policy out over seeded episodes and summarize the outcomes.
+
+    With ``fixed_initial_state`` the layout is identical every episode, so the only
+    thing separating episodes is the action-noise draw. Without noise the scenario
+    is fully deterministic and one episode is the whole result.
+    """
     successes = collisions = 0
     steps_taken: list[int] = []
     goal_errors: list[float] = []
     min_distances: list[float] = []
 
     for seed_spec in evaluation_seed_specs(simulator, episodes, seed_start):
-        state = simulator.reset(sample_initial_state(simulator, seed_spec))
+        if fixed_initial_state is not None:
+            state = simulator.reset(fixed_initial_state.copy())
+        else:
+            state = simulator.reset(sample_initial_state(simulator, seed_spec))
         goal_state = simulator.goal_state.copy()
         noise_rng = action_noise_rng_for_rollout(action_noise_seed, seed_spec=seed_spec)
         episode_min_distance = min_pair_distance(simulator, state)
@@ -172,6 +200,14 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--seed-start", type=int, default=50000, help="disjoint from the trainer's --eval-seed-start")
     parser.add_argument("--action-noise-std", type=float, default=0.0)
+    parser.add_argument(
+        "--use-config-start",
+        action="store_true",
+        help=(
+            "start every episode from the per-robot 'start' in the config instead of "
+            "sampling one, for deterministic scenarios such as the antipodal-circle swap"
+        ),
+    )
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--device", default=None, help="cpu, cuda, mps; autodetected when omitted")
     args = parser.parse_args()
@@ -200,19 +236,31 @@ def main() -> None:
         if write_header:
             writer.writeheader()
 
+        episodes = args.episodes
+        if args.use_config_start and args.action_noise_std == 0.0 and episodes > 1:
+            print(
+                "  note: --use-config-start with no action noise is deterministic; "
+                f"collapsing {episodes} identical episodes to 1"
+            )
+            episodes = 1
+
         for config_path in args.configs:
             config = load_and_validate_system_config("multi_robot", config_path)
             simulator = DynamicsFactory.create(system_name="multi_robot", config=config)
+            fixed_start = config_start_state(config) if args.use_config_start else None
+            if fixed_start is not None and simulator.is_collision(fixed_start):
+                raise SystemExit(f"{config_path}: configured start state is already in collision.")
             start_time = time.perf_counter()
             metrics = evaluate_fleet(
                 simulator=simulator,
                 policy=policy,
                 device=device,
-                episodes=args.episodes,
+                episodes=episodes,
                 steps=args.steps,
                 seed_start=args.seed_start,
                 action_noise_std=args.action_noise_std,
                 action_noise_seed=default_action_noise_seed_for_config(config),
+                fixed_initial_state=fixed_start,
             )
             row = {
                 "checkpoint": args.checkpoint,
@@ -221,7 +269,7 @@ def main() -> None:
                 "train_fleet_size": train_fleet_size,
                 "eval_fleet_size": int(simulator.num_robots),
                 "config": config_path,
-                "episodes": args.episodes,
+                "episodes": episodes,
                 "steps": args.steps,
                 "action_noise_std": args.action_noise_std,
                 "wall_time_s": round(time.perf_counter() - start_time, 2),
