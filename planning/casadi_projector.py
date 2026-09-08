@@ -20,15 +20,21 @@ class CasadiTrajectoryProjector:
     ``U`` toward a reference action sequence ``u_ref`` supplied by a learned
     policy (e.g. flow matching), instead of tracking a goal state throughout
     the horizon. Dynamics, action/state bounds are retained from
-    ``CasadiPlanner``; pairwise fleet collision constraints are replaced by a
-    soft ``d_safe`` constraint against externally-supplied neighbor position
-    trajectories (``neighbor_traj_param``). The terminal cost is the
-    control-invariant safety condition itself (SafeFlowMPC, Oelerich et al.,
-    2026, Eq. 12): driving terminal velocity/angular-velocity toward zero so
-    the horizon ends in a safe, controllable rest state -- not tracking the
-    task goal, which the paper's own formulation never asks the projector to
-    do (task-directed progress comes entirely from the flow policy's own
-    proposal, ``u_ref``).
+    ``CasadiPlanner``; pairwise fleet collision avoidance against externally-
+    supplied neighbor position trajectories (``neighbor_traj_param``) is a
+    soft ``d_safe`` buffer distance (relaxable via slack, cheaply penalized)
+    with a hard ``d_collision`` floor beneath it (never relaxable -- see
+    ``__init__``) so slack can eat into the safety margin but never into an
+    actual collision. The terminal condition is the control-invariant safety
+    condition itself (SafeFlowMPC, Oelerich et al., 2026, Eq. 12), enforced
+    as the hard equality constraint the paper states: terminal
+    velocity/angular-velocity must be exactly zero so the horizon ends in a
+    safe, controllable rest state -- not tracking the task goal, which the
+    paper's own formulation never asks the projector to do (task-directed
+    progress comes entirely from the flow policy's own proposal, ``u_ref``).
+    Requires a system with velocity states; first-order systems (no momentum
+    to carry them unsafely past the horizon, but also nothing for this
+    condition to apply to) are not a supported target for this policy.
     """
 
     def _resolve_r_diag(self, config: Mapping[str, Any], robot_index: int) -> np.ndarray:
@@ -103,17 +109,6 @@ class CasadiTrajectoryProjector:
         self.N = self.tracked_horizon
 
         self.collision_slack_penalty_weight = float(config.get("collision_slack_penalty_weight", 10000.0))
-        # Independent of Q_diag/terminal_cost_multiplier: those are tuned for
-        # the expert planner's own goal-distance terminal cost (a much
-        # longer horizon, tracking a possibly-distant position), which is a
-        # different quantity at a different scale than "how much does a
-        # small residual terminal velocity cost." Reusing them here made
-        # even a tiny terminal velocity extremely expensive, so the cheapest
-        # way to satisfy it was to barely accelerate in the first place.
-        self.terminal_velocity_weight = float(config.get("terminal_velocity_weight", 1.0))
-
-        if self.terminal_velocity_weight <= 0:
-            raise ValueError("'terminal_velocity_weight' must be positive.")
         if self.collision_slack_penalty_weight <= 0:
             raise ValueError("'collision_slack_penalty_weight' must be positive.")
 
@@ -124,6 +119,27 @@ class CasadiTrajectoryProjector:
         self.d_safe = float(config.get("d_safe", getattr(self.sim, "d_safe", 0.0)))
         if self.d_safe < 0:
             raise ValueError("'d_safe' must be non-negative.")
+
+        # d_safe is the soft planning buffer (may be relaxed via slack below
+        # when unavoidable); d_collision is the hard physical floor beneath
+        # it that must never be crossed regardless of slack.
+        self.d_collision = float(config.get("d_collision", getattr(self.sim, "d_collision", self.d_safe)))
+        if self.d_collision < 0:
+            raise ValueError("'d_collision' must be non-negative.")
+        if self.d_collision > self.d_safe:
+            raise ValueError(
+                "'d_collision' must not exceed 'd_safe': d_safe is the soft planning buffer "
+                "distance and d_collision is the hard physical floor beneath it."
+            )
+
+        # How close to exactly zero a re-simulated fallback trajectory's
+        # terminal velocity must be to still count as "coasting to a safe
+        # rest" (see _revalidate_fallback) -- not the NLP's own solver
+        # tolerance, which the hard terminal_velocity == 0 constraint below
+        # already enforces for an actual solve.
+        self.fallback_terminal_velocity_tol = float(config.get("fallback_terminal_velocity_tol", 1e-2))
+        if self.fallback_terminal_velocity_tol < 0:
+            raise ValueError("'fallback_terminal_velocity_tol' must be non-negative.")
 
         self.R = np.diag(self._resolve_r_diag(config, robot_index))
 
@@ -181,38 +197,66 @@ class CasadiTrajectoryProjector:
         # packed as (2*neighbor_slots, N+1): row 2j is neighbor j's x, row
         # 2j+1 its y (matches a C-order reshape of a (neighbor_slots, 2, N+1)
         # numpy array).
+        self.pos_idx = tuple(getattr(self.sim, "position_indices", (0, 1)))
+
         self.neighbor_traj_param = None
         if self.neighbor_slots > 0 and self.d_safe > 0.0:
             self.neighbor_traj_param = self.opti.parameter(2 * self.neighbor_slots, self.N + 1)
             collision_slack = self.opti.variable(self.neighbor_slots, self.N + 1)
             self.opti.subject_to(ca.vec(collision_slack) >= 0)
 
-            pos_idx = tuple(getattr(self.sim, "position_indices", (0, 1)))
             for j in range(self.neighbor_slots):
-                diff_x = self.X[pos_idx[0], :] - self.neighbor_traj_param[2 * j, :]
-                diff_y = self.X[pos_idx[1], :] - self.neighbor_traj_param[2 * j + 1, :]
+                diff_x = self.X[self.pos_idx[0], :] - self.neighbor_traj_param[2 * j, :]
+                diff_y = self.X[self.pos_idx[1], :] - self.neighbor_traj_param[2 * j + 1, :]
                 squared_distance = diff_x ** 2 + diff_y ** 2
+                # Soft target: stay at or beyond the d_safe planning buffer
+                # whenever possible, relaxable via collision_slack when it
+                # isn't (mirrors CasadiPlanner's own expert-side handling).
                 self.opti.subject_to(squared_distance + collision_slack[j, :] >= self.d_safe ** 2)
+                # Hard floor: collision_slack is unbounded above, so the soft
+                # term alone never actually guarantees separation -- an
+                # expensive-but-feasible solve could accept slack past the
+                # buffer and into real contact. d_collision (<= d_safe,
+                # enforced in __init__) is the actual physical contact
+                # threshold, so it stays a hard constraint regardless of how
+                # much slack the soft d_safe term takes on.
+                self.opti.subject_to(squared_distance >= self.d_collision ** 2)
 
             cost += self.collision_slack_penalty_weight * ca.sum2(ca.sum1(collision_slack))
 
         # Terminal condition: come to a safe, controllable rest -- the
         # projector's actual terminal safety condition (SafeFlowMPC, Oelerich
         # et al. 2026, Eq. 12: zero velocity/acceleration/jerk at the
-        # horizon's end), not the task goal. All task-directed progress
-        # already comes from the flow network's own learned proposal
-        # (u_ref, tracked by the running cost above); re-adding goal-tracking
-        # here creates a competing incentive to race toward a possibly-
-        # distant goal within just this short horizon, which can override
-        # the network's own learned pacing and saturate the action bounds --
-        # confirmed to cause collisions a plain, unprojected flow rollout did
-        # not have. Systems with no velocity state at all (single_integrator,
+        # horizon's end), enforced as the hard equality constraint the paper
+        # states rather than a soft cost: a soft penalty lets the optimizer
+        # trade residual terminal motion for tracking u_ref, which does not
+        # actually establish the invariant resting trajectory the fallback
+        # in project() relies on (Theorem 2). Not tracking the task goal:
+        # all task-directed progress already comes from the flow network's
+        # own learned proposal (u_ref, tracked by the running cost above);
+        # re-adding goal-tracking here creates a competing incentive to race
+        # toward a possibly-distant goal within just this short horizon,
+        # which can override the network's own learned pacing and saturate
+        # the action bounds -- confirmed to cause collisions a plain,
+        # unprojected flow rollout did not have.
+        #
+        # Systems with no velocity state at all (single_integrator,
         # unicycle1) have no momentum to carry them unsafely past the
-        # horizon, so no terminal condition is needed for them.
-        velocity_idx = tuple(getattr(self.sim, "velocity_state_indices", ()))
-        if velocity_idx:
-            terminal_velocity = self.X[list(velocity_idx), self.N]
-            cost += self.terminal_velocity_weight * ca.sumsqr(terminal_velocity)
+        # horizon, so the paper's terminal condition has nothing to apply
+        # to -- rather than silently skip it (a deviation from the paper's
+        # stated safety condition), this refuses to build a projector for
+        # them at all: SafeFlowMPCPolicy is not a supported policy type for
+        # first-order systems.
+        self.velocity_idx = tuple(getattr(self.sim, "velocity_state_indices", ()))
+        if not self.velocity_idx:
+            raise ValueError(
+                "CasadiTrajectoryProjector requires a system with velocity states to enforce "
+                "SafeFlowMPC's terminal 'come to rest' condition (Oelerich et al. 2026, Eq. 12) "
+                f"as the hard constraint the paper specifies; {type(self.sim).__name__} has no "
+                "velocity_state_indices. SafeFlowMPCPolicy does not support first-order systems."
+            )
+        terminal_velocity = self.X[list(self.velocity_idx), self.N]
+        self.opti.subject_to(terminal_velocity == 0)
 
         self.opti.minimize(cost)
         self.opti.subject_to(self.X[:, 0] == self.x0_param)
@@ -266,6 +310,69 @@ class CasadiTrajectoryProjector:
         # previous (unrelated) episode's final dual multipliers.
         self.opti.set_initial(self.opti.lam_g, 0.0)
 
+    def _revalidate_fallback(
+        self, x0: np.ndarray, u_guess: np.ndarray, neighbor_trajs: np.ndarray | None
+    ) -> np.ndarray | None:
+        """Re-derive and re-check a candidate fallback trajectory against the *current* tick.
+
+        The cached ``_prev_X_sol`` this is shifted from was only ever
+        verified against the state/neighbor forecast at the time it was
+        solved -- the actual current ``x0`` can have drifted from what that
+        solve predicted (execution noise, model mismatch), and
+        ``neighbor_trajs`` for *this* call can differ from what the cached
+        plan assumed. Accepting the stale trajectory on faith would let a
+        run of solve failures return actions that no longer actually respect
+        bounds, the current neighbor forecast, or the terminal rest
+        condition.
+
+        Re-simulates ``u_guess`` (already shifted/padded by the caller) from
+        the real ``x0`` via ``predict_next_state`` -- this is the only
+        dynamics info available without another NLP solve -- and returns the
+        resulting state trajectory if it still respects state bounds, the
+        current neighbor forecast's hard ``d_collision`` floor, and ends
+        acceptably close to the terminal rest condition; ``None`` if any of
+        those no longer hold.
+        """
+        state_guess = np.zeros((self.sim.nx, self.N + 1), dtype=float)
+        state_guess[:, 0] = x0
+        for step in range(self.N):
+            state_guess[:, step + 1] = self.sim.predict_next_state(
+                state_guess[:, step], u_guess[:, step], validate=False
+            )
+
+        tolerance = 1e-6
+        lower_bounds = getattr(self.sim, "state_lower_bounds", None)
+        if lower_bounds is not None:
+            lower_bounds = np.asarray(lower_bounds, dtype=float)
+            finite = np.isfinite(lower_bounds)
+            if np.any(finite) and np.any(
+                state_guess[finite][:, 1:] < lower_bounds[finite][:, None] - tolerance
+            ):
+                return None
+        upper_bounds = getattr(self.sim, "state_upper_bounds", None)
+        if upper_bounds is not None:
+            upper_bounds = np.asarray(upper_bounds, dtype=float)
+            finite = np.isfinite(upper_bounds)
+            if np.any(finite) and np.any(
+                state_guess[finite][:, 1:] > upper_bounds[finite][:, None] + tolerance
+            ):
+                return None
+
+        if self.neighbor_traj_param is not None and neighbor_trajs is not None:
+            neighbor_trajs = np.asarray(neighbor_trajs, dtype=float)
+            robot_pos = state_guess[list(self.pos_idx), :]
+            for j in range(self.neighbor_slots):
+                diff = robot_pos - neighbor_trajs[j]
+                squared_distance = np.sum(diff ** 2, axis=0)
+                if np.any(squared_distance < self.d_collision ** 2 - tolerance):
+                    return None
+
+        terminal_velocity = state_guess[list(self.velocity_idx), self.N]
+        if np.any(np.abs(terminal_velocity) > self.fallback_terminal_velocity_tol):
+            return None
+
+        return state_guess
+
     def project(self, obs: np.ndarray, u_ref: np.ndarray, neighbor_trajs: np.ndarray | None = None) -> np.ndarray:
         """Project a reference action sequence ``u_ref`` (nu, tracked_horizon) onto the safety manifold.
 
@@ -280,13 +387,19 @@ class CasadiTrajectoryProjector:
         ``(neighbor_slots, 2, tracked_horizon + 1)``, in this robot's own
         *absolute* frame. If the NLP solve fails and a previously-solved safe
         trajectory exists, falls back to that trajectory (SafeFlowMPC,
-        Oelerich et al. 2026, Theorem 2), never to the unprojected ``u_ref`` --
-        returning an unprojected action on a transient solver hiccup would
-        bypass every constraint this projector exists to enforce. On a
-        cold-start failure (first call ever, or right after ``reset()``),
-        there is no established safe trajectory to fall back on at all --
-        exactly the situation SafeFlowMPC's Assumption 2 assumes away by
-        requiring one to already exist -- so this raises
+        Oelerich et al. 2026, Theorem 2) only after ``_revalidate_fallback``
+        confirms it still respects bounds, the hard ``d_collision`` floor
+        against *this call's* neighbor forecast, and the terminal rest
+        condition from the *actual current* state -- never blindly, since
+        the cached trajectory was only ever verified against the state/
+        neighbor forecast at the time it was solved. Never falls back to the
+        unprojected ``u_ref`` either way -- returning an unprojected action
+        on a transient solver hiccup would bypass every constraint this
+        projector exists to enforce. On a cold-start failure (first call
+        ever, or right after ``reset()``) or when the cached trajectory no
+        longer re-validates, there is no established safe trajectory to fall
+        back on -- exactly the situation SafeFlowMPC's Assumption 2 assumes
+        away by requiring one to already exist -- so this raises
         ``planning.casadi_planner.PlannerSolveError`` instead of fabricating
         a fallback with no safety basis. Callers should handle it the same
         way they already handle an expert ``PlannerSolveError`` (discard or
@@ -365,36 +478,47 @@ class CasadiTrajectoryProjector:
                 # SafeFlowMPC, Oelerich et al. 2026, Theorem 2: on a
                 # projection failure, the safe fallback is to keep executing
                 # the current/last trajectory, not an arbitrary unprojected
-                # action -- it stays safe for all t > t0+T by Theorem 1.
-                # u_guess/state_guess above are exactly that trajectory
-                # (reused unshifted for a same-tick retry, or shifted by one
-                # step for a new tick), so accept them as though they had
-                # been solved: this both returns a certified-safe action now
-                # and lets a run of consecutive failures keep coasting
-                # further along the same safe trajectory instead of
-                # re-returning an identical fallback every time.
-                warnings.warn(
-                    "CasadiTrajectoryProjector solve failed, falling back to the last "
-                    f"known-safe projected trajectory instead of the unprojected reference: {exc}",
-                    stacklevel=2,
-                )
-                self._prev_X_sol = state_guess
-                self._prev_U_sol = u_guess
-                self._prev_x0 = x0
-                return u_guess[:, : self.tracked_horizon]
+                # action -- it stays safe for all t > t0+T by Theorem 1. But
+                # u_guess/state_guess above were only ever verified against
+                # the state/neighbor forecast *at the time they were solved*
+                # -- the actual current x0 can have drifted from what was
+                # predicted, and neighbor_trajs for *this* call can differ
+                # from what the cached plan assumed. _revalidate_fallback
+                # re-simulates from the real x0 and re-checks bounds,
+                # d_collision against the current neighbor forecast, and the
+                # terminal rest condition before trusting it.
+                revalidated_state = self._revalidate_fallback(x0, u_guess, neighbor_trajs)
+                if revalidated_state is not None:
+                    warnings.warn(
+                        "CasadiTrajectoryProjector solve failed, falling back to the last "
+                        "known-safe projected trajectory (re-validated against the current "
+                        f"state and neighbor forecast) instead of the unprojected reference: {exc}",
+                        stacklevel=2,
+                    )
+                    self._prev_X_sol = revalidated_state
+                    self._prev_U_sol = u_guess
+                    self._prev_x0 = x0
+                    return u_guess[:, : self.tracked_horizon]
+                # The cached plan no longer holds from here -- clear it so a
+                # subsequent call doesn't keep trying to reuse/shift a
+                # trajectory already known to no longer be safe.
+                self._prev_lam_g = None
+                self._prev_X_sol = None
+                self._prev_U_sol = None
+                self._prev_x0 = None
             # SafeFlowMPC's safety guarantee (Theorem 2) rests entirely on
             # Assumption 2 -- "a safe trajectory q^0(t) exists at the start
             # of the robot movement" -- and Algorithm 1 takes that initial
             # safe trajectory as a hard *precondition*, never something the
-            # algorithm derives from nothing. A cold start with no prior
-            # solve to fall back on is exactly the situation the paper
-            # assumes away; there is no paper-faithful safe action to
-            # return here. Silently returning the unprojected u_ref would
-            # misrepresent an unverified action as a handled failure, so
-            # this fails loudly instead -- callers are expected to treat it
-            # like an expert PlannerSolveError (discard/retry this
-            # episode), not attempt to recover an action from it.
+            # algorithm derives from nothing. Neither a true cold start nor a
+            # cached plan that no longer re-validates has a paper-faithful
+            # safe action to fall back on here. Silently returning the
+            # unprojected u_ref, or a stale plan that no longer verifiably
+            # holds, would misrepresent an unverified action as a handled
+            # failure, so this fails loudly instead -- callers are expected
+            # to treat it like an expert PlannerSolveError (discard/retry
+            # this episode), not attempt to recover an action from it.
             raise PlannerSolveError(
-                "CasadiTrajectoryProjector solve failed with no previous safe trajectory to "
-                f"fall back on (cold start -- first call, or right after reset()): {exc}"
+                "CasadiTrajectoryProjector solve failed with no revalidated safe trajectory to "
+                f"fall back on: {exc}"
             ) from exc

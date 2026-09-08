@@ -626,8 +626,12 @@ def rollout_policy_with_action_fn(
             # collect_dagger_rollouts) -- treat like any other episode
             # failure (a collision, a timeout) rather than crashing the
             # whole evaluation/training run over one solver hiccup.
+            # simulator.step() never ran this iteration, so `step` (a
+            # 1-indexed loop counter) overcounts the actually-executed steps
+            # by one -- step - 1 matches every other return in this function,
+            # each of which only reaches `step` after simulator.step() ran.
             print(f"Policy solve failed during evaluation at step={step}: {exc}")
-            return False, step
+            return False, step - 1
         state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng))
         if simulator.is_collision(state):
             return False, step

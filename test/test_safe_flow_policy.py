@@ -117,7 +117,12 @@ class GoalAnchorIndependenceTests(unittest.TestCase):
                     "goal": real_goal, "randomize_goal": False},
         )
         obs = real_sim.observe(state)
-        u_ref = np.array([[0.3, -0.5, 0.8], [1.0, -0.2, 0.4]])
+        # horizon must be long enough that the hard terminal-velocity==0
+        # constraint is actually reachable from state's v=0.6 within
+        # max_accel=2.0, dt=DT: decelerating needs >= 0.6 / (2.0 * DT) = 6
+        # steps; 10 leaves margin.
+        rng = np.random.default_rng(0)
+        u_ref = rng.uniform(-1.0, 1.0, size=(2, 10))
 
         def project_with_anchor(anchor_goal: list[float]) -> np.ndarray:
             sim = DynamicsFactory.create(
@@ -125,7 +130,7 @@ class GoalAnchorIndependenceTests(unittest.TestCase):
                 config={"dt": DT, "max_accel": 2.0, "max_omega": 2.0, "max_speed": 2.0,
                         "goal": anchor_goal, "randomize_goal": False},
             )
-            projector = CasadiTrajectoryProjector(sim, {}, neighbor_slots=0, horizon=3, robot_index=0)
+            projector = CasadiTrajectoryProjector(sim, {}, neighbor_slots=0, horizon=10, robot_index=0)
             return projector.project(obs, u_ref)
 
         u_safe_zeroed = project_with_anchor([0.0, 0.0, 0.0])
@@ -212,7 +217,9 @@ class PolicySolveFailureRecoveryTests(unittest.TestCase):
             action_fn=failing_action_fn,
         )
         self.assertFalse(reached_goal)
-        self.assertEqual(steps_taken, 1)
+        # failing_action_fn raises on the very first call, before
+        # simulator.step() ever runs -- zero steps were actually executed.
+        self.assertEqual(steps_taken, 0)
 
 
 if __name__ == "__main__":

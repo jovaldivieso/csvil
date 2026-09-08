@@ -25,10 +25,6 @@ class Unicycle1(DynamicsSimulator):
         self.nu = 2
         self.obs_dim = 4
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
-
-        environment = config.get("environment", {})
-        self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
-        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]), dtype=float)
         self.db_lacam_robot_type = "unicycle1_v0"
 
     def validate_observation(self, observation: np.ndarray) -> np.ndarray:
@@ -126,12 +122,9 @@ class Unicycle1(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        while True:
-            pos = self.sample_workspace_position(rng, self.workspace_bounds)
-
-            if np.all((pos >= self.environment_min) & (pos <= self.environment_max)):
-                theta = rng.uniform(-np.pi, np.pi)
-                return np.array([pos[0], pos[1], theta])
+        pos = self.sample_workspace_position(rng, self.workspace_bounds)
+        theta = rng.uniform(-np.pi, np.pi)
+        return np.array([pos[0], pos[1], theta])
 
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
         obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)

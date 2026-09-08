@@ -24,7 +24,6 @@ class PlannerConfig:
     r_weight_per_robot: tuple[tuple[float, ...], ...] = ()
     terminal_cost_multiplier: float = 10.0
     collision_slack_penalty_weight: float = 10000.0
-    terminal_velocity_weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -287,7 +286,6 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
         "R_diag",
         "terminal_cost_multiplier",
         "collision_slack_penalty_weight",
-        "terminal_velocity_weight",
         "initial_state_seed",
         "action_noise_seed",
         "done_hold_steps",
@@ -357,7 +355,6 @@ def _allowed_multi_robot_keys() -> set[str]:
         "R_weight_per_robot",
         "terminal_cost_multiplier",
         "collision_slack_penalty_weight",
-        "terminal_velocity_weight",
         "environment",
         "db_lacam",
     }
@@ -658,7 +655,6 @@ def _validate_planner(
         r_weight_per_robot=r_weight_per_robot,
         terminal_cost_multiplier=_float(config, "terminal_cost_multiplier", 10.0),
         collision_slack_penalty_weight=_float(config, "collision_slack_penalty_weight", 10000.0),
-        terminal_velocity_weight=_float(config, "terminal_velocity_weight", 1.0),
     )
 
     if planner.horizon <= 0:
@@ -667,8 +663,6 @@ def _validate_planner(
         raise ConfigurationError("'terminal_cost_multiplier' must be positive.")
     if planner.collision_slack_penalty_weight <= 0:
         raise ConfigurationError("'collision_slack_penalty_weight' must be positive.")
-    if planner.terminal_velocity_weight <= 0:
-        raise ConfigurationError("'terminal_velocity_weight' must be positive.")
     return planner
 
 def load_and_validate_system_config(system_name: str, config_path: str | Path) -> dict[str, Any]:
@@ -866,7 +860,6 @@ def validate_system_config(
                 "R_diag": list(planner_cfg.r_diag),
                 "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
                 "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
-                "terminal_velocity_weight": planner_cfg.terminal_velocity_weight,
             }
         )
         if len(planner_cfg.r_weight_per_robot) > 0:
@@ -1056,7 +1049,6 @@ def validate_system_config(
             "R_diag": list(planner_cfg.r_diag),
             "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
             "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
-            "terminal_velocity_weight": planner_cfg.terminal_velocity_weight,
         }
     )
 

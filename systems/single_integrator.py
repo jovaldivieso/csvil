@@ -28,11 +28,6 @@ class SingleIntegrator(DynamicsSimulator):
         self.nu = 2
         self.obs_dim = 2
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
-        environment = config.get("environment", {})
-        self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
-        self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]),
-            dtype=float,
-        )
 
         self.db_lacam_robot_type = "integrator1_2d_v0"
 
@@ -91,11 +86,7 @@ class SingleIntegrator(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        while True:
-            initial_state = self.sample_workspace_position(rng, self.workspace_bounds)
-
-            if np.all((initial_state >= self.environment_min) & (initial_state <= self.environment_max)):
-                return initial_state
+        return self.sample_workspace_position(rng, self.workspace_bounds)
 
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
         obs_array = self.validate_observation(obs) if validate else np.asarray(obs, dtype=float)

@@ -191,6 +191,18 @@ class CasadiPlanner(Planner):
         if self.d_safe < 0:
             raise ValueError("'d_safe' must be non-negative.")
 
+        # d_safe is the soft planning buffer (relaxable below via slack);
+        # d_collision is the hard physical floor beneath it that must never
+        # be crossed regardless of slack.
+        self.d_collision = float(config.get("d_collision", getattr(self.sim, "d_collision", self.d_safe)))
+        if self.d_collision < 0:
+            raise ValueError("'d_collision' must be non-negative.")
+        if self.d_collision > self.d_safe:
+            raise ValueError(
+                "'d_collision' must not exceed 'd_safe': d_safe is the soft planning buffer "
+                "distance and d_collision is the hard physical floor beneath it."
+            )
+
         # State variables for open-loop planning
         self.cached_plan = None
         self.step_idx = 0
@@ -350,16 +362,26 @@ class CasadiPlanner(Planner):
                 self.opti.subject_to(
                     squared_distance + collision_slack[pair_idx, :-1] >= self.d_safe ** 2
                 )
+                # Hard floor beneath the soft d_safe buffer: collision_slack
+                # is unbounded above, so the soft term alone never actually
+                # guarantees separation. d_collision (<= d_safe, enforced in
+                # __init__) is the real physical contact threshold, so it
+                # stays a hard constraint regardless of slack -- this also
+                # keeps the expert's own demonstrations, which the policy
+                # imitates, from ever encoding an actual collision as
+                # "solved".
+                self.opti.subject_to(squared_distance >= self.d_collision ** 2)
 
                 # Terminal constraint
                 squared_distance_terminal = ca.DM(0.0)
                 for idx_i, idx_j in zip(pos_indices_i, pos_indices_j):
                     diff = self.X[int(idx_i), self.N] - self.X[int(idx_j), self.N]
                     squared_distance_terminal = squared_distance_terminal + diff ** 2
-                
+
                 self.opti.subject_to(
                     squared_distance_terminal + collision_slack[pair_idx, self.N] >= self.d_safe ** 2
                 )
+                self.opti.subject_to(squared_distance_terminal >= self.d_collision ** 2)
 
             cost += self.collision_slack_penalty_weight * ca.sum2(ca.sum1(collision_slack))
 
