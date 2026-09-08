@@ -519,8 +519,30 @@ class MultiRobotSimulator(DynamicsSimulator):
         # (e.g. 8 robots already fails a joint draw reliably); placing them
         # one at a time keeps the search space per attempt small and
         # constant instead of shrinking with every additional robot.
-        accepted_goals: list[np.ndarray] = []
+        #
+        # Fixed-goal robots (randomize_goal=False) are placed first, ahead
+        # of the retry loop below, rather than interleaved in fleet order:
+        # randomize_goal_for_reset() is a no-op for them, so if they were
+        # retried in place and an earlier *randomized* robot's draw happened
+        # to land within d_safe of one, every retry would be identical and
+        # this would exhaust all attempts and raise -- even though simply
+        # redrawing that earlier randomized robot would trivially resolve
+        # it. Committing the fixed goals up front and only rejection-
+        # sampling the randomized ones against that fixed set (plus each
+        # other) removes the ordering dependency entirely.
+        accepted_goals: list[np.ndarray] = [
+            sim.goal_state for sim in self.simulators if not sim.randomize_goal
+        ]
+        if not self._positions_respect_d_safe(accepted_goals):
+            raise RuntimeError(
+                "Fixed (non-randomized) robot goals conflict with each other under "
+                f"d_safe={self.d_safe}; no amount of resampling can resolve this -- adjust the "
+                "configured goals or widen d_safe."
+            )
+
         for robot_idx, sim in enumerate(self.simulators):
+            if not sim.randomize_goal:
+                continue
             for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
                 sim.randomize_goal_for_reset(rng)
                 if self._positions_respect_d_safe(accepted_goals + [sim.goal_state]):

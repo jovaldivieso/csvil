@@ -24,8 +24,9 @@ class CasadiTrajectoryProjector:
     supplied neighbor position trajectories (``neighbor_traj_param``) is a
     soft ``d_safe`` buffer distance (relaxable via slack, cheaply penalized)
     with a hard ``d_collision`` floor beneath it (never relaxable -- see
-    ``__init__``) so slack can eat into the safety margin but never into an
-    actual collision. The terminal condition is the control-invariant safety
+    ``__init__``) so slack can eat into the safety margin but never into a
+    modeled physical collision. This floor applies only to the neighbor
+    trajectories supplied to the projector. The terminal condition is the control-invariant safety
     condition itself (SafeFlowMPC, Oelerich et al., 2026, Eq. 12), enforced
     as the hard equality constraint the paper states: terminal
     velocity/angular-velocity must be exactly zero so the horizon ends in a
@@ -520,7 +521,27 @@ class CasadiTrajectoryProjector:
             self.opti.set_initial(self.opti.lam_g, self._prev_lam_g)
 
         try:
-            sol = self.opti.solve()
+            try:
+                sol = self.opti.solve()
+            except RuntimeError:
+                # The shifted warm start can occasionally leave IPOPT stuck
+                # at a locally infeasible point for the hard, non-convex
+                # d_collision keep-out constraint -- e.g. once the actual
+                # state, often at near-saturated velocity, has drifted from
+                # what the previous solve predicted -- even though a
+                # feasible trajectory exists (confirmed empirically against
+                # the expert CasadiPlanner, which shares this exact
+                # constraint pattern: a cold restart from the same x0/goal
+                # resolved every reproduced failure). A cold restart here is
+                # strictly better than reaching for the fallback trajectory
+                # below when it works: continued genuine progress instead of
+                # coasting on an old plan, with no new safety risk (the
+                # solution still has to satisfy every hard constraint this
+                # Opti problem enforces, cold-started or not).
+                self.opti.set_initial(self.X, 0.0)
+                self.opti.set_initial(self.U, 0.0)
+                self.opti.set_initial(self.opti.lam_g, 0.0)
+                sol = self.opti.solve()
             self._prev_lam_g = sol.value(self.opti.lam_g)
             self._prev_X_sol = sol.value(self.X)
             self._prev_U_sol = sol.value(self.U)

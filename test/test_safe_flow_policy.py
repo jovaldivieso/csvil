@@ -74,6 +74,44 @@ def _build_safe_flow_policy(simulator) -> SafeFlowMPCPolicy:
     return policy
 
 
+class ProjectorInheritsFleetCollisionDistancesTests(unittest.TestCase):
+    """d_safe/d_collision are attributes of the fleet (MultiRobotSim), not of
+    the single-robot local_sims each projector actually holds -- so
+    CasadiTrajectoryProjector's own config.get("d_safe", getattr(self.sim,
+    "d_safe", 0.0)) fallback could never reach the fleet's real value on its
+    own. Whenever planner_config didn't separately repeat d_safe/d_collision
+    (as {} does here), every projector silently settled on 0.0, i.e. no
+    collision avoidance at all. PolicyFactory.create now fills both in from
+    the fleet simulator before constructing each projector, whenever
+    planner_config doesn't already carry an explicit value of its own.
+    """
+
+    def test_empty_planner_config_still_inherits_fleet_d_safe_and_d_collision(self) -> None:
+        simulator = _build_two_robot_simulator(goal0=[5.0, 0.0, 0.0], goal1=[-5.0, 0.0, 0.0])
+        policy = _build_safe_flow_policy(simulator)
+
+        for projector in policy.projectors:
+            self.assertEqual(projector.d_safe, simulator.d_safe)
+            self.assertEqual(projector.d_collision, simulator.d_collision)
+        self.assertGreater(simulator.d_safe, 0.0)  # sanity: the fleet's own value isn't itself 0
+
+    def test_explicit_planner_config_override_still_wins(self) -> None:
+        simulator = _build_two_robot_simulator(goal0=[5.0, 0.0, 0.0], goal1=[-5.0, 0.0, 0.0])
+        encoder = EncoderFactory.create(
+            "deepset", state_dim=20, neighbor_feature_dim=8, neighbor_slots=1,
+            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+        )
+        policy = PolicyFactory.create(
+            "safeflow",
+            action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=22, num_inference_steps=2,
+            simulator=simulator, planner_config={"d_safe": 0.05, "d_collision": 0.05},
+        )
+
+        for projector in policy.projectors:
+            self.assertEqual(projector.d_safe, 0.05)
+            self.assertEqual(projector.d_collision, 0.05)
+
+
 class GoalAnchorIndependenceTests(unittest.TestCase):
     """Root-cause fix for the same staleness issue a since-removed
     sync_simulator() hook used to patch around: PolicyFactory.create now
@@ -310,37 +348,91 @@ class PolicySolveFailureRecoveryTests(unittest.TestCase):
         self.assertEqual(steps_taken, 0)
 
 
-class FirstOrderNeighborVelocityTests(unittest.TestCase):
-    """Regression test: for velocity-less systems (single_integrator,
-    unicycle1), _build_neighbor_trajectories previously assumed the ego's
-    own position was unchanged between frames (pos_prev = pos_now) when
-    finite-differencing a neighbor's velocity. If the ego actually moved,
-    that injects the ego's own displacement into the estimate -- for a
-    truly stationary neighbor, the result was a fictitious velocity equal
-    to *minus* the ego's own, fed straight into the projector's hard
-    d_collision constraint.
+class FirstOrderMultiRobotRejectionTests(unittest.TestCase):
+    """A velocity-less system (single_integrator, unicycle1) gives
+    _build_neighbor_trajectories no state from which to recover the ego's
+    own previous absolute position, so it could only ever report every
+    neighbor as momentarily stationary -- never bounding an actually
+    approaching neighbor's motion, regardless of how close or fast it's
+    closing. That's a silent, unconditional safety gap for the entire
+    episode, not a one-tick warm-up artifact, so SafeFlowMPCPolicy rejects
+    this combination outright at construction time rather than shipping a
+    policy whose neighbor forecast cannot back its own hard d_collision
+    constraint. A lone first-order robot (no neighbors to forecast at all)
+    is unaffected.
     """
 
-    def test_stationary_neighbor_is_not_assigned_a_fictitious_velocity_when_ego_moves(self) -> None:
+    def test_multi_robot_first_order_fleet_is_rejected_at_construction(self) -> None:
         simulator = DynamicsFactory.create(
             system_name="multi_robot",
             config={
                 "dt": DT,
                 "d_safe": 0.1,
-                # goal=[0, 0] for both robots so PolicyFactory.create's
-                # zeroed-goal local_sims introduce no gauge shift relative
-                # to world coordinates here (see GoalAnchorIndependenceTests
-                # for why any goal anchor would be equally valid) -- this
-                # test checks the neighbor-velocity fix specifically, not
-                # the (separately tested) goal-anchor invariance.
                 "robots": [
                     {"system": "single_integrator", "config": {
-                        "dt": DT, "max_vel": 5.0,
-                        "start": [-1.0, 0.0], "goal": [0.0, 0.0], "randomize_goal": False,
+                        "dt": DT, "max_vel": 5.0, "goal": [0.0, 0.0], "randomize_goal": False,
                     }},
                     {"system": "single_integrator", "config": {
-                        "dt": DT, "max_vel": 5.0,
-                        "start": [3.0, 0.0], "goal": [0.0, 0.0], "randomize_goal": False,
+                        "dt": DT, "max_vel": 5.0, "goal": [0.0, 0.0], "randomize_goal": False,
+                    }},
+                ],
+            },
+        )
+        encoder = EncoderFactory.create(
+            "deepset", state_dim=10, neighbor_feature_dim=4, neighbor_slots=1,
+            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+        )
+
+        with self.assertRaises(ValueError):
+            PolicyFactory.create(
+                "safeflow",
+                action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=3,
+                num_inference_steps=2, simulator=simulator, planner_config={},
+            )
+
+    def test_single_first_order_robot_is_unaffected(self) -> None:
+        # Exercises SafeFlowMPCPolicy.__init__'s guard directly (bypassing
+        # PolicyFactory.create, which would otherwise need a real FlowPolicy
+        # + neighbor-aware encoder just to reach it) since DeepSetEncoder
+        # itself always requires neighbor_feature_dim > 0, independent of
+        # this policy's own neighbor_slots -- an unrelated constraint that a
+        # single-robot config wouldn't pair with "deepset" in practice.
+        sim = DynamicsFactory.create(
+            system_name="single_integrator",
+            config={"dt": DT, "max_vel": 5.0, "goal": [0.0, 0.0], "randomize_goal": False},
+        )
+        projector = CasadiTrajectoryProjector(sim, {}, neighbor_slots=0, horizon=3, robot_index=0)
+
+        policy = SafeFlowMPCPolicy(inner_policy=None, projectors=[projector], local_sims=[sim])
+        self.assertEqual(policy.neighbor_slots, 0)
+
+
+class VelocityHavingNeighborVelocityUnderAccelerationTests(unittest.TestCase):
+    """Regression test: for velocity-having systems (double_integrator,
+    unicycle2), _build_neighbor_trajectories previously back-propagated the
+    ego's own previous position/heading using its *current* frame's
+    velocity/turn-rate, e.g. pos_prev = pos_now - dt * v_now for
+    double_integrator. DoubleIntegrator.predict_next_state actually advances
+    position via next_pos = pos + v*dt + 0.5*a*dt**2 using the *previous*
+    frame's velocity, so whenever the ego genuinely accelerates between
+    frames, that shortcut folds part of the ego's own acceleration into a
+    supposedly-stationary neighbor's estimated velocity. Fixed by reading
+    the actual previous frame from the already-stacked observation.state
+    instead of re-deriving it from the current one.
+    """
+
+    def test_stationary_neighbor_velocity_unbiased_by_egos_own_acceleration(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": DT,
+                "d_safe": 0.1,
+                "robots": [
+                    {"system": "double_integrator", "config": {
+                        "dt": DT, "max_accel": 10.0, "goal": [0.0, 0.0], "randomize_goal": False,
+                    }},
+                    {"system": "double_integrator", "config": {
+                        "dt": DT, "max_accel": 10.0, "goal": [0.0, 0.0], "randomize_goal": False,
                     }},
                 ],
             },
@@ -366,11 +458,20 @@ class FirstOrderNeighborVelocityTests(unittest.TestCase):
                 for r in range(2)
             ]
 
-        # Tick 1: ego (robot 0) at (-1, 0). Tick 2: ego moved to (0, 0) --
-        # a real, nonzero displacement -- while the neighbor (robot 1)
-        # stays fixed at (3, 0) both times.
-        observe_and_stack(np.array([-1.0, 0.0]), np.array([3.0, 0.0]))
-        stacked = observe_and_stack(np.array([0.0, 0.0]), np.array([3.0, 0.0]))
+        # Tick 1: ego (robot 0) at (-1, 0) moving at (2, 0). Applying a
+        # genuine acceleration of (4, 0) for one step -- computed via the
+        # real dynamics, not by hand, so tick 2 is exactly consistent with
+        # predict_next_state's own update rule -- takes it to tick 2 with a
+        # *different* velocity (2.2, 0), not merely a different position.
+        # The neighbor (robot 1) stays fixed at (3, 0), v=(0, 0) throughout.
+        ego_tick1 = np.array([-1.0, 0.0, 2.0, 0.0])
+        ego_tick2 = simulator.simulators[0].predict_next_state(
+            ego_tick1, np.array([4.0, 0.0]), validate=False
+        )
+        neighbor_state = np.array([3.0, 0.0, 0.0, 0.0])
+
+        observe_and_stack(ego_tick1, neighbor_state)
+        stacked = observe_and_stack(ego_tick2, neighbor_state)
 
         observation_dict = {
             name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
@@ -381,14 +482,56 @@ class FirstOrderNeighborVelocityTests(unittest.TestCase):
 
         neighbor_trajs = policy._build_neighbor_trajectories(observation_dict, x0_batch)
 
-        # Robot 0 (the one that moved) sees a genuinely stationary neighbor
-        # -- its extrapolated trajectory must stay at (3, 0) throughout,
-        # not drift according to a fictitious velocity derived from robot
-        # 0's own displacement (which the pre-fix code would have produced:
-        # exactly -1/DT in x, the negative of robot 0's own velocity).
+        # Robot 0 (the accelerating one) sees a genuinely stationary
+        # neighbor -- its extrapolated trajectory must stay at (3, 0)
+        # throughout, not drift at ~0.5*a*dt = 0.1 m/s the way back-
+        # propagating with the current (not previous) frame's velocity
+        # would have produced.
         robot0_neighbor_traj = neighbor_trajs[0, 0]
         np.testing.assert_allclose(robot0_neighbor_traj[0], 3.0, atol=1e-9)
         np.testing.assert_allclose(robot0_neighbor_traj[1], 0.0, atol=1e-9)
+
+
+class SelectActionBatchSizeGuardTests(unittest.TestCase):
+    """select_action indexes self.local_sims[b]/self.projectors[b] directly
+    by batch position, assuming it *is* the fleet's own robot ordering (see
+    build_decentralized_joint_action, the only real caller, which always
+    builds exactly one row per robot in that order). A batch of any other
+    size must be rejected explicitly rather than silently applying the
+    wrong robot's projector/weights (too small a batch) or crashing with an
+    opaque IndexError (too large).
+    """
+
+    @staticmethod
+    def _build_observation_dict(simulator) -> dict[str, torch.Tensor]:
+        history_buffer = ObservationHistoryBuffer(2, 2)
+        state = simulator.reset_random()
+        full_obs = simulator.observe(state)
+        stacked = [
+            history_buffer.append_and_stack(r, simulator.decentralized_policy_observation(full_obs, r))
+            for r in range(2)
+        ]
+        return {
+            name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
+            for name in stacked[0]
+        }
+
+    def test_full_fleet_batch_succeeds(self) -> None:
+        simulator = _build_two_robot_simulator(goal0=[5.0, 0.0, 0.0], goal1=[-5.0, 0.0, 0.0])
+        policy = _build_safe_flow_policy(simulator)
+        observation_dict = self._build_observation_dict(simulator)
+
+        action = policy.select_action(observation_dict)
+        self.assertEqual(action.shape[0], 2)
+
+    def test_mismatched_batch_size_raises_instead_of_silently_misapplying_projectors(self) -> None:
+        simulator = _build_two_robot_simulator(goal0=[5.0, 0.0, 0.0], goal1=[-5.0, 0.0, 0.0])
+        policy = _build_safe_flow_policy(simulator)
+        observation_dict = self._build_observation_dict(simulator)
+        truncated = {name: tensor[:1] for name, tensor in observation_dict.items()}
+
+        with self.assertRaises(ValueError):
+            policy.select_action(truncated)
 
 
 if __name__ == "__main__":

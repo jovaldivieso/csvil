@@ -348,6 +348,15 @@ class ActionWindowCacheTests(unittest.TestCase):
         np.testing.assert_allclose(actions[0].numpy(), cache[3].numpy())
         np.testing.assert_allclose(actions[1].numpy(), cache[5].numpy())
 
+    def test_non_positive_prediction_horizon_rejected(self) -> None:
+        # format_sample_for_policy already rejects this; the cache must too,
+        # rather than silently returning a one-step cache that violates the
+        # horizon its own caller asked for.
+        dataset = _episodes_dataset()
+        for prediction_horizon in (0, -1):
+            with self.assertRaises(ValueError):
+                build_action_window_cache(dataset, prediction_horizon)
+
 
 class ObservationHistoryCacheTests(unittest.TestCase):
     """Coverage for build_observation_history_cache, the once-per-round replacement
@@ -454,6 +463,15 @@ class ObservationHistoryCacheTests(unittest.TestCase):
         for name in _HISTORY_STACKED_FIELDS:
             np.testing.assert_allclose(observations[name][0].numpy(), cache[name][4].numpy())
             np.testing.assert_allclose(observations[name][1].numpy(), cache[name][5].numpy())
+
+    def test_non_positive_observation_horizon_rejected(self) -> None:
+        # format_sample_for_policy already rejects this; the cache must too,
+        # rather than silently returning a cache shaped for horizon=1
+        # regardless of what its caller actually asked for.
+        dataset = _episodes_dataset()
+        for observation_horizon in (0, -1):
+            with self.assertRaises(ValueError):
+                build_observation_history_cache(dataset, observation_horizon)
 
 
 if __name__ == "__main__":

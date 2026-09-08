@@ -203,13 +203,22 @@ config's `training:` block, described next.
 Both random goals and random initial positions are drawn independently and
 uniformly from `workspace_bounds` (the same square for both, per robot). For
 `multi_robot`, sampling happens in two rejection-sampled stages using the
-fleet's `d_safe`: first every robot's goal is drawn, resampling the whole set
-until all pairwise goal-goal distances clear `d_safe`; then every robot's
-initial position is drawn the same way, resampling until it clears `d_safe`
-against every other robot's initial position *and* every robot's goal
-(including its own). A single-robot system used standalone has no fleet to
-reject against, so its own `random_initial_state`/`randomize_goal_for_reset`
-are a plain uniform draw with no minimum-distance guarantee.
+fleet's `d_safe`, each *sequential* rather than joint: first every robot's
+goal is drawn one robot at a time, each redrawn on its own (up to a retry
+limit) until it clears `d_safe` against only the goals already accepted for
+earlier robots, not the whole set at once; then every robot's initial
+position is drawn the same way, redrawing only that robot until it clears
+`d_safe` against every already-accepted initial position *and* every robot's
+goal (including its own). Sequential rejection keeps the search space per
+attempt constant instead of shrinking combinatorially with fleet size (a
+joint draw over all N goals/positions at once becomes vanishingly likely to
+succeed well before N reaches double digits at realistic
+`d_safe`/`workspace_bounds` densities). Fixed (non-randomized) goals are
+committed before any randomized one is drawn, so an unlucky randomized
+neighbor never gets blamed on — or blocks resampling of — a goal that can't
+itself move. A single-robot system used standalone has no fleet to reject
+against, so its own `random_initial_state`/`randomize_goal_for_reset` are a
+plain uniform draw with no minimum-distance guarantee.
 
 Simulator and planner creation is centralized through `DynamicsFactory` and
 `PlannerFactory` in `core/factory.py`.
@@ -317,7 +326,13 @@ python test/evaluate_policy.py \
 
 `--policy-type` supports `mlp`, `flow`, and `safeflow` (flow matching with a
 CasADi safety projection at inference time; SafeFlowMPC, Oelerich et al.,
-2026) -- a `flow`-trained checkpoint can be evaluated as either.
+2026) -- a `flow`-trained checkpoint can generally be evaluated as either.
+The exception: for a system with velocity states, `safeflow` construction
+enforces a hard terminal-rest constraint and rejects (`ValueError`, at
+construction time) any checkpoint whose `prediction_horizon` is too short to
+decelerate from that system's own worst-case velocity to zero at its own
+`max_action` -- a `flow` checkpoint trained with a short horizon is not
+guaranteed to also be evaluable as `safeflow`.
 `--initial-states`/`--goal-states` are
 optional (omit them for randomly seeded rollouts); pass them to check
 performance on a specific scenario, e.g. the same swap/crossing cases used

@@ -466,15 +466,35 @@ class CasadiPlanner(Planner):
 
             try:
                 sol = self.opti.solve()
-                self.last_X_sol = sol.value(self.X)
-                self.last_U_sol = sol.value(self.U)
-                self._prev_lam_g = sol.value(self.opti.lam_g)
-                return self.last_U_sol[:, 0]
-            except RuntimeError as exc:
-                raise PlannerSolveError(
-                    "CasADi planner solve failed in MPC mode. "
-                    f"Current state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
-                ) from exc
+            except RuntimeError:
+                # The shifted warm start occasionally leaves IPOPT stuck at a
+                # locally infeasible point for the hard, non-convex
+                # d_collision keep-out constraint -- e.g. once execution
+                # noise (or, during DAgger aggregation, a still-untrained
+                # policy's actions) has pushed the actual state, often at
+                # near-saturated velocity, away from what the previous solve
+                # predicted. This was never a failure mode when collision
+                # avoidance was purely soft (slack always gave the solver a
+                # way out); now that d_collision is a hard floor, a cold
+                # restart -- confirmed empirically to resolve states that
+                # fail from their warm start -- recovers far more reliably
+                # than declaring the state unsolvable outright.
+                self.opti.set_initial(self.X, 0.0)
+                self.opti.set_initial(self.U, 0.0)
+                self.opti.set_initial(self.opti.lam_g, 0.0)
+                try:
+                    sol = self.opti.solve()
+                except RuntimeError as exc:
+                    raise PlannerSolveError(
+                        "CasADi planner solve failed in MPC mode (both warm-started and "
+                        f"cold-restarted). Current state estimate: {x0.tolist()}, goal: "
+                        f"{self.sim.goal_state.tolist()}."
+                    ) from exc
+
+            self.last_X_sol = sol.value(self.X)
+            self.last_U_sol = sol.value(self.U)
+            self._prev_lam_g = sol.value(self.opti.lam_g)
+            return self.last_U_sol[:, 0]
 
         elif self.mode == "open_loop":
             # Plan once on the first step

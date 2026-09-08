@@ -12,7 +12,7 @@ from planning.casadi_projector import CasadiTrajectoryProjector
 from systems.dynamics import DynamicsProtocol
 
 # Sentinel position (far outside any real workspace) for a masked-out (absent)
-# neighbor slot, so its d_safe constraint is always trivially satisfied.
+# neighbor slot. No collision constraint is meaningful for an unseen neighbor.
 _NO_NEIGHBOR_SENTINEL = 1.0e6
 
 
@@ -54,6 +54,34 @@ class SafeFlowMPCPolicy(ActionPolicy):
         self.local_sims = list(local_sims)
         num_robots = len(self.local_sims)
         self.neighbor_slots = max(0, num_robots - 1)
+
+        # _build_neighbor_trajectories reconstructs this robot's own previous
+        # pose from its own observed proprioception (velocity_state_indices)
+        # to isolate a neighbor's absolute velocity from the raw relative-
+        # offset history (see its docstring). A system with no velocity
+        # state at all (single_integrator, unicycle1) has no way to recover
+        # that previous pose from a single current-frame observation, so
+        # every visible neighbor is reported as momentarily stationary for
+        # the entire episode, not just a one-tick warm-up artifact -- an
+        # approaching neighbor could then satisfy the hard d_collision
+        # forecast while closing distance for real. This is a genuine
+        # incompatibility between decentralized multi-robot SafeFlow
+        # coordination and velocity-less systems (unlike the earlier,
+        # narrower terminal-rest constraint, which such systems satisfy
+        # trivially and are NOT rejected for) -- fail closed here rather
+        # than silently shipping a policy whose neighbor forecast cannot
+        # bound real neighbor motion. A single first-order robot alone
+        # (neighbor_slots == 0, nothing to forecast) is unaffected.
+        if self.neighbor_slots > 0 and not getattr(self.local_sims[0], "velocity_state_indices", ()):
+            raise ValueError(
+                f"SafeFlowMPCPolicy cannot support a multi-robot fleet of "
+                f"{type(self.local_sims[0]).__name__}: this system has no velocity state, so a "
+                "neighbor's absolute velocity can never be recovered from observation history, "
+                "and every neighbor would be forecast as stationary for the whole prediction "
+                "horizon regardless of its actual motion. Use a velocity-having system (e.g. "
+                "unicycle2, double_integrator) for multi-robot SafeFlow, or drop to a single "
+                "robot (no neighbors to forecast)."
+            )
 
         self.projectors = list(projectors)
         if len(self.projectors) != num_robots:
@@ -157,16 +185,23 @@ class SafeFlowMPCPolicy(ActionPolicy):
 
         To avoid both, this reconstructs each neighbor's absolute position at
         both history instants before differencing: "now" from this robot's
-        current pose (always known exactly), and "previous" by
-        back-propagating this robot's *own* pose one step using its own
-        observed proprioception (``velocity_state_indices``, e.g. unicycle2's
-        ``(v, omega)``) under the same constant-twist assumption already used
-        elsewhere here -- the same order of approximation as assuming the
-        neighbor's own velocity is roughly constant over one step. Systems
-        without proprioception (``velocity_state_indices`` empty, e.g.
-        single_integrator) fall back to treating this robot's own pose as
-        unchanged between frames, which is the pre-existing behavior for
-        them.
+        current pose (always known exactly), and "previous" from the actual
+        previous frame of this robot's own observed proprioception
+        (``velocity_state_indices``, e.g. unicycle2's ``(v, omega)``),
+        already available via the stacked ``observation.state`` history --
+        exact for this robot's own contribution to the estimate, leaving only
+        the neighbor's own velocity changing between frames as a source of
+        error, the same order of approximation as assuming that velocity is
+        roughly constant over one step. Systems without proprioception
+        (``velocity_state_indices`` empty, e.g. single_integrator,
+        unicycle1) have no state from which to recover this robot's own
+        previous pose at all, so this could only ever report every neighbor
+        as momentarily stationary regardless of its real motion --
+        ``SafeFlowMPCPolicy.__init__`` therefore rejects a velocity-less
+        system outright as soon as it has any neighbor slots at all, so this
+        method (only ever called when ``neighbor_slots > 0``, see
+        ``select_action``) can assume ``velocity_state_indices`` is always
+        populated.
 
         That reconstructed absolute position/velocity is then extrapolated
         over the horizon. When this system has both a heading
@@ -217,74 +252,85 @@ class SafeFlowMPCPolicy(ActionPolicy):
         use_dynamics_model = theta_idx is not None and len(velocity_idx) == 2
         zero_action = np.zeros(self.local_sims[0].nu)
 
+        # observation.state stacks this robot's own proprioception across
+        # observation_horizon frames (ObservationHistoryBuffer), so the
+        # *actual* previous-frame velocity/turn-rate is already available --
+        # no need to approximate it from the current frame as if unchanged.
+        # predict_next_state advances position/heading using the velocity at
+        # the *start* of each step, so using the real previous reading below
+        # makes the back-propagated pos_prev/theta_prev exact instead of
+        # biased by however much the ego itself accelerated between frames.
+        ego_proprio_dim = len(velocity_idx)
+        ego_proprio_prev_known = observation_horizon >= 2 and ego_proprio_dim > 0
+        if ego_proprio_prev_known:
+            ego_proprio_hist = observation_dict["observation.state"].detach().cpu().numpy()
+            ego_state_mask_hist = observation_dict["observation.state_mask"].detach().cpu().numpy()
+            ego_mask_dim = ego_state_mask_hist.shape[-1] // observation_horizon
+            ego_proprio_prev_all = ego_proprio_hist[:, -2 * ego_proprio_dim : -ego_proprio_dim]
+            ego_state_mask_prev_all = ego_state_mask_hist[:, -2 * ego_mask_dim : -ego_mask_dim]
+
         for b in range(batch_size):
             theta_now = float(x0_batch[b, theta_idx]) if theta_idx is not None else 0.0
             cos_now, sin_now = np.cos(theta_now), np.sin(theta_now)
             pos_now = x0_batch[b, list(pos_idx)]
 
-            ego_pos_prev_known = True
+            has_prev_proprio = (
+                ego_proprio_prev_known and float(np.min(ego_state_mask_prev_all[b])) > 0.5
+            )
+
             if theta_idx is not None and len(velocity_idx) == 2:
                 # Unicycle-style (v, omega) proprioception: back-propagate
-                # this robot's own heading and position under its own
-                # constant-twist assumption.
+                # this robot's own heading and position using the *previous*
+                # frame's v/omega (predict_next_state's own convention),
+                # falling back to the current frame's when no real previous
+                # one exists yet (the episode's first tick).
                 v_now = float(x0_batch[b, velocity_idx[0]])
                 omega_now = float(x0_batch[b, velocity_idx[1]])
-                theta_prev = theta_now - omega_now * dt
+                if has_prev_proprio:
+                    v_prev, omega_prev = (float(value) for value in ego_proprio_prev_all[b])
+                else:
+                    v_prev, omega_prev = v_now, omega_now
+                theta_prev = theta_now - omega_prev * dt
                 cos_prev, sin_prev = np.cos(theta_prev), np.sin(theta_prev)
-                pos_prev = pos_now - v_now * dt * np.array([cos_prev, sin_prev])
-            elif len(velocity_idx) == 2:
+                pos_prev = pos_now - v_prev * dt * np.array([cos_prev, sin_prev])
+            else:
                 # Cartesian (vx, vy) proprioception with no heading to rotate
-                # by (e.g. double_integrator): back-propagate each axis
-                # independently. Reusing (cos_now, sin_now) rather than
-                # re-deriving them from velocity_idx[1] matters here --
+                # by (e.g. double_integrator) -- the only other case reachable
+                # here, since SafeFlowMPCPolicy.__init__ rejects a velocity-
+                # less system outright whenever neighbor_slots > 0 (this
+                # method is never even called otherwise: see select_action).
+                # Back-propagate each axis independently via
+                # predict_next_state's own exact identity pos_now = pos_prev
+                # + 0.5*dt*(v_prev + v_now) -- equivalent to its next_pos =
+                # pos + v*dt + 0.5*a*dt**2 update with the action eliminated
+                # using next_vel = v + a*dt, so this needs no knowledge of
+                # the actual action, only the previous frame's velocity
+                # (falling back to the current frame's, as above, on the
+                # episode's first tick). Reusing (cos_now, sin_now) rather
+                # than re-deriving them from velocity_idx[1] matters here --
                 # that component is vy, not an angular rate, and treating it
                 # as one (as a single len(velocity_idx)==2 check used to)
                 # fabricates a nonexistent rotation from the ego's own
                 # y-velocity.
                 cos_prev, sin_prev = cos_now, sin_now
-                pos_prev = pos_now - dt * x0_batch[b, list(velocity_idx)]
-            else:
-                # No ego proprioception at all (first-order systems:
-                # single_integrator, unicycle1) -- there is no state to
-                # back-propagate the ego's own previous absolute position
-                # from a single current-frame reconstruction, so pos_prev
-                # cannot actually be recovered here. Finite-differencing the
-                # neighbor's relative-offset history against pos_now instead
-                # of the (unknown) true pos_prev would inject the ego's own
-                # displacement into the estimate: if the neighbor is truly
-                # stationary, that computes a fictitious velocity equal to
-                # *minus* the ego's own velocity, not noise around zero.
-                # ego_pos_prev_known=False below forces the zero-velocity
-                # (momentarily-stationary) fallback instead of guessing --
-                # conservative for a receding-horizon replan every tick,
-                # not systematically wrong in a specific, exploitable
-                # direction the way the finite difference would be.
-                cos_prev, sin_prev = cos_now, sin_now
-                pos_prev = pos_now
-                ego_pos_prev_known = False
+                v_now_vec = x0_batch[b, list(velocity_idx)]
+                v_prev_vec = ego_proprio_prev_all[b] if has_prev_proprio else v_now_vec
+                pos_prev = pos_now - 0.5 * dt * (v_prev_vec + v_now_vec)
 
             for j in range(self.neighbor_slots):
                 if mask_now[b, j] <= 0.5:
                     # Masked-out neighbor: leave the far-away sentinel, i.e.
                     # treat it as absent rather than as a bounded-speed
-                    # reachable set. This means the hard d_collision floor
-                    # is not enforced against neighbors currently outside
-                    # inter_robot_visibility_radius -- the paper's safety
-                    # theorems are proved per-robot against a *known*
-                    # trajectory forecast for every other agent, which is
-                    # not available for an unseen one. Formal safety is
-                    # therefore only guaranteed at the fleet level when
-                    # inter_robot_visibility_radius is large enough, relative
-                    # to closing speed and replan rate, that no neighbor can
-                    # cross d_collision between two observations. This is a
-                    # deliberate, accepted trade-off, not an oversight: every
-                    # real sensor (camera, lidar) has exactly the same finite
-                    # range, so this limitation is not specific to this
-                    # implementation and is not something a purely software
-                    # fix can remove -- it can only be pushed back by
-                    # widening the visibility radius or bounding neighbor
-                    # speed, both of which are config/scenario choices, not
-                    # code changes.
+                    # reachable set. The hard d_collision floor is therefore
+                    # enforced only against neighbors represented by the
+                    # current observation and its forecast. This policy does
+                    # not provide a formal fleet-level collision guarantee for
+                    # unseen neighbors, and independent per-robot projections
+                    # do not provide a guarantee against uncoordinated future
+                    # neighbor plans. Widening visibility or bounding relative
+                    # speed can reduce this gap, but does not remove the need
+                    # for conservative reachable sets or coordinated planning
+                    # if a formal fleet-level guarantee is required.
                     continue
                 rx, ry = rel_pos_now[b, j]
                 abs_now = np.array(
@@ -296,10 +342,8 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 # simply being invisible then) -- differencing against a
                 # fabricated [0, 0] "previous position" would otherwise
                 # produce a large fictitious velocity the instant a neighbor
-                # first becomes visible. ego_pos_prev_known guards against
-                # the first-order case above, where pos_prev is a stand-in
-                # for pos_now, not an actual reconstruction.
-                if ego_pos_prev_known and observation_horizon >= 2 and mask[b, -2, j] > 0.5:
+                # first becomes visible.
+                if observation_horizon >= 2 and mask[b, -2, j] > 0.5:
                     prx, pry = feat[b, -2, j, 0:2]
                     abs_prev = np.array(
                         [pos_prev[0] + cos_prev * prx - sin_prev * pry, pos_prev[1] + sin_prev * prx + cos_prev * pry]
@@ -354,6 +398,19 @@ class SafeFlowMPCPolicy(ActionPolicy):
         inner = self.inner_policy
         obs_cond = inner.obs_encoder(observation_dict)
         batch_size = obs_cond.shape[0]
+        # self.local_sims[b]/self.projectors[b] are indexed directly by batch
+        # position under the assumption that it *is* the fleet's own robot
+        # ordering (see build_decentralized_joint_action, the only caller,
+        # which always builds exactly one row per robot in that order) --
+        # not checking this would let a batch of the wrong size silently
+        # apply the wrong robot's projector/local_sim (too small) or crash
+        # with an opaque IndexError (too large) instead of failing clearly.
+        if batch_size != len(self.projectors):
+            raise ValueError(
+                f"SafeFlowMPCPolicy.select_action received a batch of size {batch_size}, but "
+                f"this policy was constructed for a fleet of {len(self.projectors)} robots. Each "
+                "batch row must correspond to exactly one robot, in fleet order."
+            )
         device = obs_cond.device
 
         x = torch.randn(

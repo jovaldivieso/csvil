@@ -104,10 +104,31 @@ class PolicyFactory:
                 local_sim = copy.deepcopy(sim)
                 local_sim.set_goal(np.zeros_like(local_sim.goal))
                 local_sims.append(local_sim)
+
+            # d_safe/d_collision are fleet-level (MultiRobotSim) attributes,
+            # not attributes of the single-robot `sim` each projector holds
+            # (local_sims[i]) -- CasadiTrajectoryProjector's own
+            # config.get("d_safe", getattr(self.sim, "d_safe", 0.0)) fallback
+            # therefore can never actually reach the fleet's real value on
+            # its own, and silently settles on 0.0 (no collision avoidance
+            # at all) whenever planner_config doesn't separately repeat it.
+            # Every current caller's planner_config happens to already carry
+            # both (it's the full validated system config), but nothing
+            # enforces that, so a future caller passing a narrower
+            # planner_config would silently get an unsafe policy with no
+            # error. Explicit planner_config overrides are still respected
+            # via setdefault; only a missing key falls back to the fleet's
+            # own value.
+            projector_config = dict(planner_config)
+            projector_config.setdefault("d_safe", float(getattr(simulator, "d_safe", 0.0)))
+            projector_config.setdefault(
+                "d_collision",
+                float(getattr(simulator, "d_collision", projector_config["d_safe"])),
+            )
             projectors = [
                 CasadiTrajectoryProjector(
                     local_sims[i],
-                    planner_config,
+                    projector_config,
                     neighbor_slots,
                     horizon=inner_policy.prediction_horizon,
                     robot_index=i,

@@ -474,6 +474,8 @@ def build_action_window_cache(
         Tensor of shape ``(len(dataset), prediction_horizon, action_dim)``, indexable
         by each frame's absolute ``"index"`` value.
     """
+    if prediction_horizon <= 0:
+        raise ValueError("'prediction_horizon' must be positive.")
     n = len(dataset)
     if n == 0:
         raise ValueError("Cannot build an action-window cache for an empty dataset.")
@@ -536,6 +538,8 @@ def build_observation_history_cache(
         oldest-to-newest exactly as ``format_sample_for_policy`` concatenates it, and
         indexable by each frame's absolute ``"index"`` value.
     """
+    if observation_horizon <= 0:
+        raise ValueError("'observation_horizon' must be positive.")
     n = len(dataset)
     if n == 0:
         raise ValueError("Cannot build an observation-history cache for an empty dataset.")
