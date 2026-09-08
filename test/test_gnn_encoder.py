@@ -30,7 +30,7 @@ class GNNEncoderTests(unittest.TestCase):
 
     def test_forward_runs_with_default_horizon_one(self) -> None:
         neighbor_slots, neighbor_feature_dim = 1, 4
-        state_dim = 5 + neighbor_slots * (neighbor_feature_dim + 1)
+        state_dim = 6 + neighbor_slots * (neighbor_feature_dim + 1)
         encoder = EncoderFactory.create(
             "gnn",
             state_dim=state_dim,
@@ -42,6 +42,7 @@ class GNNEncoderTests(unittest.TestCase):
         observation = {
             "observation.environment_state": torch.randn(batch, 2),
             "observation.state": torch.randn(batch, 3),
+            "observation.state_mask": torch.ones(batch, 1),
             "observation.neighbor_state": torch.randn(batch, neighbor_slots * neighbor_feature_dim),
             "observation.neighbor_mask": torch.ones(batch, neighbor_slots),
         }
@@ -52,7 +53,8 @@ class GNNEncoderTests(unittest.TestCase):
     def test_forward_runs_with_observation_horizon_greater_than_one(self) -> None:
         neighbor_slots, observation_horizon, per_frame_dim = 2, 3, 2
         neighbor_feature_dim = per_frame_dim * observation_horizon
-        ego_dim = 6
+        # environment_state(3) + state(3)*horizon + state_mask(1)*horizon
+        ego_dim = 3 + 3 * observation_horizon + observation_horizon
         state_dim = ego_dim + neighbor_slots * (neighbor_feature_dim + observation_horizon)
 
         encoder = EncoderFactory.create(
@@ -68,7 +70,8 @@ class GNNEncoderTests(unittest.TestCase):
         batch = 4
         observation = {
             "observation.environment_state": torch.randn(batch, 3),
-            "observation.state": torch.randn(batch, 3),
+            "observation.state": torch.randn(batch, 3 * observation_horizon),
+            "observation.state_mask": torch.ones(batch, observation_horizon),
             "observation.neighbor_state": torch.randn(batch, neighbor_slots * neighbor_feature_dim),
             "observation.neighbor_mask": torch.randint(0, 2, (batch, neighbor_slots * observation_horizon)).float(),
         }
@@ -99,7 +102,8 @@ class GNNEncoderTests(unittest.TestCase):
         torch.testing.assert_close(neighbor_mask[0, 1], torch.tensor([1.0, 0.0]))
 
         # GNNEncoder.forward() must gate visibility on the most recent frame only.
-        state_dim = 2 + neighbor_slots * (neighbor_feature_dim + observation_horizon)
+        # ego = environment_state(1) + state(observation_horizon) + state_mask(observation_horizon)
+        state_dim = 1 + 2 * observation_horizon + neighbor_slots * (neighbor_feature_dim + observation_horizon)
         encoder = EncoderFactory.create(
             "gnn",
             state_dim=state_dim,
@@ -110,7 +114,8 @@ class GNNEncoderTests(unittest.TestCase):
         )
         observation = {
             "observation.environment_state": torch.zeros(1, 1),
-            "observation.state": torch.zeros(1, 1),
+            "observation.state": torch.zeros(1, observation_horizon),
+            "observation.state_mask": torch.ones(1, observation_horizon),
             "observation.neighbor_state": raw_neighbor_state,
             "observation.neighbor_mask": raw_neighbor_mask,
         }

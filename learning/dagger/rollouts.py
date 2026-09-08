@@ -61,7 +61,22 @@ class ObservationHistoryBuffer:
         buffer.append(frame)
         frames = list(buffer)
         pad_count = self.observation_horizon - len(frames)
-        history_stacked_fields = ("observation.neighbor_state", "observation.neighbor_mask")
+        # observation.state (this robot's own proprioception, e.g. [v, omega])
+        # is stacked too, so the policy sees its own recent motion history,
+        # not just the current instant -- needed to correctly interpret the
+        # neighbor history, which is expressed in this robot's own frame at
+        # each past instant. observation.state_mask is its companion (mirrors
+        # observation.neighbor_mask): always 1.0 at generation time, so
+        # stacking's zero-padding for not-yet-collected frames is
+        # distinguishable from a genuine [v=0, omega=0] reading rather than
+        # silently identical to one. observation.environment_state
+        # (goal-relative encoding) stays single-frame.
+        history_stacked_fields = (
+            "observation.neighbor_state",
+            "observation.neighbor_mask",
+            "observation.state",
+            "observation.state_mask",
+        )
         stacked: dict[str, np.ndarray] = {}
         for name in frame:
             if name in history_stacked_fields:

@@ -48,6 +48,7 @@ class DeepSetEncoderTests(unittest.TestCase):
         output = encoder({
             "observation.environment_state": ego,
             "observation.state": torch.zeros((3, 0)),
+            "observation.state_mask": torch.zeros((3, 0)),
             "observation.neighbor_state": x.reshape(3, -1),
             "observation.neighbor_mask": mask.reshape(3, -1),
         })
@@ -56,7 +57,7 @@ class DeepSetEncoderTests(unittest.TestCase):
         self.assertTrue(torch.allclose(output[:, 3:], torch.zeros_like(output[:, 3:])))
 
     def test_rejects_featurewise_masks(self) -> None:
-        encoder = DeepSetEncoder(state_dim=9, neighbor_feature_dim=2, neighbor_slots=2, phi_dims=[8], rho_dims=[4])
+        encoder = DeepSetEncoder(state_dim=10, neighbor_feature_dim=2, neighbor_slots=2, phi_dims=[8], rho_dims=[4])
         x = torch.zeros((2, 3, 2), dtype=torch.float32)
         invalid_mask = torch.ones((2, 3, 2), dtype=torch.float32)
 
@@ -64,6 +65,7 @@ class DeepSetEncoderTests(unittest.TestCase):
             encoder({
                 "observation.environment_state": torch.zeros((2, 1)),
                 "observation.state": torch.zeros((2, 2)),
+                "observation.state_mask": torch.ones((2, 1)),
                 "observation.neighbor_state": x.reshape(2, -1),
                 "observation.neighbor_mask": invalid_mask,
             })
@@ -92,6 +94,7 @@ class DeepSetEncoderTests(unittest.TestCase):
         visible_input = {
             "observation.environment_state": ego,
             "observation.state": torch.zeros((1, 0)),
+            "observation.state_mask": torch.zeros((1, 0)),
             "observation.neighbor_state": x.reshape(1, -1),
             "observation.neighbor_mask": visible_mask.reshape(1, -1),
         }
@@ -123,6 +126,7 @@ class DeepSetEncoderTests(unittest.TestCase):
         output = encoder({
             "observation.environment_state": ego,
             "observation.state": torch.zeros((2, 0)),
+            "observation.state_mask": torch.zeros((2, 0)),
             "observation.neighbor_state": x.reshape(2, -1),
             "observation.neighbor_mask": mask.reshape(2, -1),
         })
@@ -134,7 +138,7 @@ class DeepSetEncoderTests(unittest.TestCase):
 
     def test_encoder_accepts_more_runtime_neighbors_than_configured(self) -> None:
         encoder = DeepSetEncoder(
-            state_dim=9,
+            state_dim=10,
             neighbor_feature_dim=2,
             neighbor_slots=1,
             phi_dims=[8],
@@ -145,11 +149,12 @@ class DeepSetEncoderTests(unittest.TestCase):
             {
                 "observation.environment_state": torch.zeros((2, 3)),
                 "observation.state": torch.zeros((2, 3)),
+                "observation.state_mask": torch.ones((2, 1)),
                 "observation.neighbor_state": torch.zeros((2, 6)),
                 "observation.neighbor_mask": torch.ones((2, 3)),
             }
         )
-        self.assertEqual(tuple(output.shape), (2, 10))
+        self.assertEqual(tuple(output.shape), (2, 11))
 
     def test_stacked_neighbor_history_is_not_scrambled_across_time(self) -> None:
         """Regression guard: DeepSet must reshape via the shared, time-major-aware helper
@@ -173,7 +178,7 @@ class DeepSetEncoderTests(unittest.TestCase):
         torch.testing.assert_close(neighbor_mask[0, 0], torch.tensor([1.0, 1.0]))
         torch.testing.assert_close(neighbor_mask[0, 1], torch.tensor([1.0, 0.0]))
 
-        state_dim = 2 + neighbor_slots * (neighbor_feature_dim + observation_horizon)
+        state_dim = 3 + neighbor_slots * (neighbor_feature_dim + observation_horizon)
         encoder = DeepSetEncoder(
             state_dim=state_dim,
             neighbor_feature_dim=neighbor_feature_dim,
@@ -186,6 +191,7 @@ class DeepSetEncoderTests(unittest.TestCase):
         observation = {
             "observation.environment_state": torch.zeros(1, 1),
             "observation.state": torch.zeros(1, 1),
+            "observation.state_mask": torch.ones(1, 1),
             "observation.neighbor_state": raw_neighbor_state,
             "observation.neighbor_mask": raw_neighbor_mask,
         }

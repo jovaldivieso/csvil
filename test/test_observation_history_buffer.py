@@ -19,6 +19,7 @@ def _make_frame(step: int) -> dict[str, np.ndarray]:
     return {
         "observation.environment_state": np.array([100.0 + step], dtype=np.float32),
         "observation.state": np.array([200.0 + step, 201.0 + step], dtype=np.float32),
+        "observation.state_mask": np.array([1.0], dtype=np.float32),
         "observation.neighbor_state": np.array([300.0 + step, 301.0 + step], dtype=np.float32),
         "observation.neighbor_mask": np.array([1.0], dtype=np.float32),
     }
@@ -31,6 +32,7 @@ def _make_dataset_row(index: int, episode_index: int) -> dict[str, object]:
         "episode_index": episode_index,
         "observation.environment_state": np.array([100.0 + index], dtype=np.float32),
         "observation.state": np.array([200.0 + index, 201.0 + index], dtype=np.float32),
+        "observation.state_mask": np.array([1.0], dtype=np.float32),
         "observation.neighbor_state": np.array([300.0 + index, 301.0 + index], dtype=np.float32),
         "observation.neighbor_mask": np.array([1.0], dtype=np.float32),
         "action": np.array([index, index + 0.5], dtype=np.float32),
@@ -100,7 +102,10 @@ class ObservationHistoryBufferTests(unittest.TestCase):
         np.testing.assert_array_equal(
             stacked["observation.environment_state"], frame0["observation.environment_state"]
         )
-        np.testing.assert_array_equal(stacked["observation.state"], frame0["observation.state"])
+        np.testing.assert_array_equal(
+            stacked["observation.state"],
+            np.concatenate([np.zeros_like(frame0["observation.state"])] * 2 + [frame0["observation.state"]]),
+        )
 
     def test_rolling_window_keeps_last_horizon_frames_oldest_to_newest(self) -> None:
         horizon = 3
@@ -123,7 +128,10 @@ class ObservationHistoryBufferTests(unittest.TestCase):
         np.testing.assert_array_equal(
             stacked["observation.environment_state"], frames[-1]["observation.environment_state"]
         )
-        np.testing.assert_array_equal(stacked["observation.state"], frames[-1]["observation.state"])
+        np.testing.assert_array_equal(
+            stacked["observation.state"],
+            np.concatenate([f["observation.state"] for f in expected_window]),
+        )
 
     def test_reset_clears_history_and_warm_up_zero_fills_again(self) -> None:
         horizon = 3
@@ -147,6 +155,12 @@ class ObservationHistoryBufferTests(unittest.TestCase):
             np.concatenate(
                 [np.zeros_like(new_frame["observation.neighbor_mask"])] * (horizon - 1)
                 + [new_frame["observation.neighbor_mask"]]
+            ),
+        )
+        np.testing.assert_array_equal(
+            stacked["observation.state"],
+            np.concatenate(
+                [np.zeros_like(new_frame["observation.state"])] * (horizon - 1) + [new_frame["observation.state"]]
             ),
         )
 
@@ -224,12 +238,16 @@ class CollateBatchDatasetHistoryTests(unittest.TestCase):
         np.testing.assert_allclose(neighbor_state[1].numpy(), [0.0, 0.0, 303.0, 304.0, 304.0, 305.0])
         np.testing.assert_allclose(neighbor_mask[1].numpy(), [0.0, 1.0, 1.0])
 
-        # environment_state/state are never history-stacked -- always the
-        # current (most recent) frame, regardless of how much history exists.
+        # environment_state is never history-stacked -- always the current
+        # (most recent) frame, regardless of how much history exists.
         np.testing.assert_allclose(observations["observation.environment_state"][0].numpy(), [103.0])
         np.testing.assert_allclose(observations["observation.environment_state"][1].numpy(), [104.0])
-        np.testing.assert_allclose(observations["observation.state"][0].numpy(), [203.0, 204.0])
-        np.testing.assert_allclose(observations["observation.state"][1].numpy(), [204.0, 205.0])
+
+        # state IS history-stacked (same episode-boundary/zero-pad rules as
+        # neighbor_state above): row 0's candidates 1,2 are both excluded
+        # (episode 0), row 1's candidate 2 is excluded but 3 is kept.
+        np.testing.assert_allclose(observations["observation.state"][0].numpy(), [0.0, 0.0, 0.0, 0.0, 203.0, 204.0])
+        np.testing.assert_allclose(observations["observation.state"][1].numpy(), [0.0, 0.0, 203.0, 204.0, 204.0, 205.0])
 
 
 if __name__ == "__main__":

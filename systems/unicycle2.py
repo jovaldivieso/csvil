@@ -20,8 +20,8 @@ class Unicycle2(DynamicsSimulator):
         # fixed goal position:
         self.goal = np.asarray(config.get("goal", [0.0, 0.0, 0.0]))
         self.randomize_goal = config.get("randomize_goal", "goal" not in config)
-        self.goal_position_bounds = tuple(
-            float(value) for value in config.get("goal_position_bounds", [-1.0, 1.0])
+        self.workspace_bounds = tuple(
+            float(value) for value in config.get("workspace_bounds", [-1.0, 1.0])
         )
 
         self.randomize_initial_velocity = config.get("randomize_initial_velocity", False)
@@ -37,17 +37,7 @@ class Unicycle2(DynamicsSimulator):
         self.theta_tol = float(config.get("theta_tol", 0.05))
         self.vel_tol = float(config.get("vel_tol", 0.05))
         self.omega_tol = float(config.get("omega_tol", 0.05))
-        self.initial_position_min_goal_distance = float(
-            config.get("initial_position_min_goal_distance", self.pos_tol)
-        )
-        self.initial_position_radius_bounds = tuple(
-            float(value)
-            for value in config.get(
-                "initial_position_radius_bounds",
-                [self.initial_position_min_goal_distance, 1.0],
-            )
-        )
-        
+
         # number of states and actions:
         self.nx = 5 
         self.nu = 2 
@@ -70,6 +60,10 @@ class Unicycle2(DynamicsSimulator):
     @property
     def angular_state_indices(self) -> tuple[int, ...]:
         return (2,)
+
+    @property
+    def velocity_state_indices(self) -> tuple[int, ...]:
+        return (3, 4)  # (v, omega) -- state = [x, y, theta, v, omega]
 
     def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         """
@@ -218,6 +212,13 @@ class Unicycle2(DynamicsSimulator):
                 "shape": (2,),
                 "names": proprioception_names,
             },
+            # Companion mask for observation.state, mirroring
+            # observation.neighbor_mask: always 1.0 at collection time (this
+            # robot's own proprioception is always genuinely available), so
+            # that history-stacking's zero-padding for not-yet-collected
+            # frames is distinguishable from a genuine [v=0, omega=0] reading
+            # instead of silently looking identical to one.
+            "observation.state_mask": {"dtype": "float32", "shape": (1,), "names": ["state_mask"]},
             "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "action": {
@@ -231,12 +232,7 @@ class Unicycle2(DynamicsSimulator):
         """
         samples random state
         """
-        offset = self.sample_planar_start_offset(
-            rng,
-            radius_bounds=self.initial_position_radius_bounds,
-            min_goal_distance=self.initial_position_min_goal_distance,
-        )
-        pos = self.goal[:2] + offset
+        pos = self.sample_workspace_position(rng, self.workspace_bounds)
         theta = rng.uniform(low=-np.pi, high=np.pi)
 
         v = 0.0
@@ -250,8 +246,8 @@ class Unicycle2(DynamicsSimulator):
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         if self.randomize_goal:
             goal_pos = rng.uniform(
-                low=self.goal_position_bounds[0],
-                high=self.goal_position_bounds[1],
+                low=self.workspace_bounds[0],
+                high=self.workspace_bounds[1],
                 size=self.goal.shape[0] - 1,
             )
             goal_theta = rng.uniform(low=-np.pi, high=np.pi)
@@ -267,6 +263,7 @@ class Unicycle2(DynamicsSimulator):
         return [{
             "observation.environment_state": np.asarray(obs_array[:4], dtype=np.float32),
             "observation.state": np.asarray(obs_array[4:6], dtype=np.float32),
+            "observation.state_mask": np.array([1.0], dtype=np.float32),
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
             "action": np.asarray(action_array, dtype=np.float32),

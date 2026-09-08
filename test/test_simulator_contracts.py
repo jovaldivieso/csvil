@@ -193,7 +193,12 @@ class SimulatorContractTests(unittest.TestCase):
                         f"{name}: feature '{feature_name}' names length mismatch",
                     )
 
-                if feature_name.startswith("observation."):
+                # observation.state_mask is a schema-only bookkeeping field
+                # (always 1.0 at generation time; only becomes meaningful
+                # after history-stacking's zero-padding) -- it's never
+                # actually present in the raw obs array observe() produces,
+                # unlike neighbor_mask which encodes real, varying geometry.
+                if feature_name.startswith("observation.") and feature_name != "observation.state_mask":
                     obs_feature_dim += expected_dim
                 elif feature_name == "action" or feature_name.endswith(".action"):
                     action_feature_dim += expected_dim
@@ -407,6 +412,7 @@ class SimulatorContractTests(unittest.TestCase):
                 return {
                     "observation.environment_state": {"dtype": "float32", "shape": (3,), "names": ["x", "y", "z"]},
                     "observation.state": {"dtype": "float32", "shape": (0,), "names": []},
+                    "observation.state_mask": {"dtype": "float32", "shape": (0,), "names": []},
                     "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
                     "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
                     "action": {"dtype": "float32", "shape": (1,), "names": ["action"]},
@@ -524,11 +530,11 @@ class SimulatorContractTests(unittest.TestCase):
         simulator = DynamicsFactory.create(system_name="unicycle2", config=validated)
         simulator.reset_random()
 
-        self.assertEqual(validated["goal_position_bounds"], [-1.0, 1.0])
+        self.assertEqual(validated["workspace_bounds"], [-1.0, 1.0])
         self.assertTrue(np.all(simulator.goal[:2] >= -1.0))
         self.assertTrue(np.all(simulator.goal[:2] <= 1.0))
 
-    def test_planar_start_offset_is_area_uniform_on_annulus(self) -> None:
+    def test_workspace_position_is_uniform_over_bounds(self) -> None:
         simulator = DynamicsFactory.create(
             system_name="single_integrator",
             config={
@@ -538,92 +544,49 @@ class SimulatorContractTests(unittest.TestCase):
             },
         )
 
-        radius_min = 0.25
-        radius_max = 1.0
+        low, high = -1.0, 2.0
         rng = np.random.default_rng(17)
-        radii_sq = []
-        for _ in range(4000):
-            offset = simulator.sample_planar_start_offset(
-                rng,
-                radius_bounds=(radius_min, radius_max),
-                min_goal_distance=radius_min,
-            )
-            radii_sq.append(float(np.dot(offset, offset)))
+        samples = np.array(
+            [
+                simulator.sample_workspace_position(rng, (low, high))
+                for _ in range(4000)
+            ]
+        )
 
-        empirical_mean = float(np.mean(np.asarray(radii_sq, dtype=float)))
-        expected_mean = 0.5 * (radius_min**2 + radius_max**2)
-        self.assertAlmostEqual(empirical_mean, expected_mean, delta=0.02)
+        self.assertTrue(np.all(samples >= low))
+        self.assertTrue(np.all(samples <= high))
+        expected_mean = 0.5 * (low + high)
+        np.testing.assert_allclose(samples.mean(axis=0), [expected_mean, expected_mean], atol=0.05)
 
-    def test_seeded_reset_random_respects_configured_start_region(self) -> None:
-        def position_distance_to_goal(simulator: DynamicsProtocol, state: np.ndarray) -> float:
-            if simulator.num_robots == 1:
-                return float(np.linalg.norm(state[:2] - simulator.goal_state[:2]))
-
-            distances = []
-            for sub_sim, state_slice in zip(simulator.simulators, simulator.robot_state_slices):
-                robot_state = state[state_slice]
-                distances.append(float(np.linalg.norm(robot_state[:2] - sub_sim.goal_state[:2])))
-            return min(distances)
-
+    def test_seeded_reset_random_is_deterministic_and_within_workspace(self) -> None:
         configs = {
             "single_integrator": {
                 "dt": 0.05,
                 "goal": [0.0, 0.0],
                 "randomize_goal": False,
-                "initial_position_radius_bounds": [0.0, 1.0],
-                "initial_position_min_goal_distance": 0.25,
+                "workspace_bounds": [-1.0, 1.0],
                 "initial_state_seed": 13,
             },
             "double_integrator": {
                 "dt": 0.05,
                 "goal": [0.0, 0.0],
                 "randomize_goal": False,
-                "initial_position_radius_bounds": [0.0, 1.0],
-                "initial_position_min_goal_distance": 0.25,
+                "workspace_bounds": [-1.0, 1.0],
                 "initial_state_seed": 13,
             },
             "unicycle1": {
                 "dt": 0.05,
                 "goal": [0.0, 0.0, 0.0],
                 "randomize_goal": False,
-                "initial_position_radius_bounds": [0.0, 1.0],
-                "initial_position_min_goal_distance": 0.25,
+                "workspace_bounds": [-1.0, 1.0],
                 "initial_state_seed": 13,
             },
             "unicycle2": {
                 "dt": 0.05,
                 "goal": [0.0, 0.0, 0.0],
                 "randomize_initial_velocity": False,
-                "initial_position_radius_bounds": [0.0, 1.0],
-                "initial_position_min_goal_distance": 0.25,
+                "workspace_bounds": [-1.0, 1.0],
                 "initial_state_seed": 13,
-            },
-            "multi_robot": {
-                "dt": 0.05,
-                "d_safe": 0.1,
-                "initial_state_seed": 13,
-                "robots": [
-                    {
-                        "system": "double_integrator",
-                        "config": {
-                            "dt": 0.05,
-                            "goal": [0.0, 0.0],
-                            "randomize_goal": False,
-                            "initial_position_radius_bounds": [0.0, 1.0],
-                            "initial_position_min_goal_distance": 0.25,
-                        },
-                    },
-                    {
-                        "system": "double_integrator",
-                        "config": {
-                            "dt": 0.05,
-                            "goal": [2.0, -1.0],
-                            "randomize_goal": False,
-                            "initial_position_radius_bounds": [0.0, 1.0],
-                            "initial_position_min_goal_distance": 0.25,
-                        },
-                    },
-                ],
             },
         }
 
@@ -636,11 +599,56 @@ class SimulatorContractTests(unittest.TestCase):
             state_b = simulator_b.reset_random()
 
             np.testing.assert_allclose(state_a, state_b, atol=1e-9)
-            self.assertGreater(
-                position_distance_to_goal(simulator_a, state_a),
-                0.25,
-                f"{name}: reset_random sampled inside the configured minimum goal distance",
+            self.assertTrue(
+                np.all(state_a[:2] >= -1.0) and np.all(state_a[:2] <= 1.0),
+                f"{name}: reset_random sampled outside the configured workspace_bounds",
             )
+
+    def test_multi_robot_reset_random_respects_d_safe_from_goals(self) -> None:
+        raw_config = {
+            "dt": 0.05,
+            "d_safe": 0.25,
+            "initial_state_seed": 13,
+            "robots": [
+                {
+                    "system": "double_integrator",
+                    "config": {
+                        "dt": 0.05,
+                        "goal": [0.0, 0.0],
+                        "randomize_goal": False,
+                        "workspace_bounds": [-1.0, 1.0],
+                    },
+                },
+                {
+                    "system": "double_integrator",
+                    "config": {
+                        "dt": 0.05,
+                        "goal": [2.0, -1.0],
+                        "randomize_goal": False,
+                        "workspace_bounds": [-1.0, 1.0],
+                    },
+                },
+            ],
+        }
+
+        validated = validate_system_config(system_name="multi_robot", raw_config=raw_config)
+        simulator_a = DynamicsFactory.create(system_name="multi_robot", config=validated)
+        simulator_b = DynamicsFactory.create(system_name="multi_robot", config=validated)
+
+        state_a = simulator_a.reset_random()
+        state_b = simulator_b.reset_random()
+
+        np.testing.assert_allclose(state_a, state_b, atol=1e-9)
+
+        distances = []
+        for sub_sim, state_slice in zip(simulator_a.simulators, simulator_a.robot_state_slices):
+            robot_state = state_a[state_slice]
+            distances.append(float(np.linalg.norm(robot_state[:2] - sub_sim.goal_state[:2])))
+        self.assertGreater(
+            min(distances),
+            0.25,
+            "reset_random sampled an initial position inside d_safe of a goal",
+        )
 
     def test_multi_robot_per_robot_r_weights(self) -> None:
         raw_config = {

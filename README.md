@@ -179,13 +179,25 @@ to catch malformed keys and shape mismatches early. Planner-specific keys includ
 - `terminal_cost_multiplier`
 - `collision_slack_penalty_weight` (positive scalar penalty for collision slack in soft pairwise avoidance)
 
-Every system still *accepts* `goal`, `randomize_goal`, initial-position sampling
-bounds (`initial_position_radius_bounds`, `initial_position_min_goal_distance`),
-and its own convergence tolerances (`error_tolerance`, or for `unicycle2`:
-`pos_tol`, `theta_tol`, `vel_tol`, `omega_tol`; `error_tolerance` is rejected for
-`unicycle2`) directly in the expert config, defaulting sensibly when omitted —
-but the recommended pattern is to leave them out and set them per-experiment
-instead, in the policy config's `training:` block, described next.
+Every system still *accepts* `goal`, `randomize_goal`, a shared random-sampling
+region (`workspace_bounds`, default `[-1.0, 1.0]` per coordinate — widen this to
+match the scale of your scenarios), and its own convergence tolerances
+(`error_tolerance`, or for `unicycle2`: `pos_tol`, `theta_tol`, `vel_tol`,
+`omega_tol`; `error_tolerance` is rejected for `unicycle2`) directly in the
+expert config, defaulting sensibly when omitted — but the recommended pattern
+is to leave them out and set them per-experiment instead, in the policy
+config's `training:` block, described next.
+
+Both random goals and random initial positions are drawn independently and
+uniformly from `workspace_bounds` (the same square for both, per robot). For
+`multi_robot`, sampling happens in two rejection-sampled stages using the
+fleet's `d_safe`: first every robot's goal is drawn, resampling the whole set
+until all pairwise goal-goal distances clear `d_safe`; then every robot's
+initial position is drawn the same way, resampling until it clears `d_safe`
+against every other robot's initial position *and* every robot's goal
+(including its own). A single-robot system used standalone has no fleet to
+reject against, so its own `random_initial_state`/`randomize_goal_for_reset`
+are a plain uniform draw with no minimum-distance guarantee.
 
 Simulator and planner creation is centralized through `DynamicsFactory` and
 `PlannerFactory` in `core/factory.py`.
@@ -215,8 +227,7 @@ training:
   # and convergence tolerances for this experiment. Applies to both DAgger data
   # collection every round and in-loop evaluation; never to the supervised
   # training step itself, which has no simulator in the loop.
-  initial_position_min_goal_distance: 0.05
-  initial_position_radius_bounds: [0.05, 3.0]
+  workspace_bounds: [-3.0, 3.0]
   tolerance_overrides:
     pos_tol: 0.2
     theta_tol: 1.1
@@ -398,7 +409,7 @@ Use this as a compact quick reference for current entrypoint flags.
 - `learning/train_dagger.py`
   - required args: `--experiment-name`, `--system`, `--expert-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
-  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--round-seeds`, `--restart-round-seed`/`--no-restart-round-seed`, `--initial-states`, `--goal-states`, `--initial-position-min-goal-distance`, `--initial-position-radius-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`
+  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--round-seeds`, `--restart-round-seed`/`--no-restart-round-seed`, `--initial-states`, `--goal-states`, `--workspace-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`
   - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--policy-config`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 
 Every flag above also accepts `--help` for its full description, e.g.

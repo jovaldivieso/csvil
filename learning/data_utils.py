@@ -106,8 +106,21 @@ def format_sample_for_policy(
     # real one, so a padded (feature=0, mask=0) slot reads the same as a
     # genuine out-of-visibility-radius neighbor instead of a plausible-looking
     # duplicate of real motion history (see ObservationHistoryBuffer.append_and_stack).
-    history_stacked_fields = ("observation.neighbor_state", "observation.neighbor_mask")
-    latest_frame_fields = ("observation.environment_state", "observation.state")
+    # observation.state (this robot's own proprioception) is stacked too, for
+    # the same reason as the neighbor tensors: the policy needs its own
+    # recent motion history to correctly interpret neighbor history, which is
+    # expressed in this robot's own frame at each past instant.
+    # observation.state_mask is its companion, mirroring
+    # observation.neighbor_mask: always 1.0 at generation time, so a
+    # zero-padded pre-episode frame is distinguishable from a genuine
+    # [v=0, omega=0] reading instead of silently identical to one.
+    history_stacked_fields = (
+        "observation.neighbor_state",
+        "observation.neighbor_mask",
+        "observation.state",
+        "observation.state_mask",
+    )
+    latest_frame_fields = ("observation.environment_state",)
     observation: StructuredObservation = {}
     for name in history_stacked_fields:
         real_tensors = [_tensor_field(frame, name) for frame in history]

@@ -115,8 +115,7 @@ class DaggerConfig:
     training_curriculum: list[str] | None = None
     round_seeds: list[int] | None = None
     restart_round_seed: bool = False
-    initial_position_min_goal_distance: float | None = None
-    initial_position_radius_bounds: list[float] | None = None
+    workspace_bounds: list[float] | None = None
     tolerance_overrides: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
@@ -173,17 +172,11 @@ class DaggerConfig:
                 "'round_seeds' must contain exactly one entry per DAgger round "
                 f"({self.dagger_iterations}), got {len(self.round_seeds)}."
             )
-        if self.initial_position_min_goal_distance is not None and self.initial_position_min_goal_distance < 0:
-            raise ValueError("'initial_position_min_goal_distance' must be non-negative.")
-        if self.initial_position_radius_bounds is not None:
-            if len(self.initial_position_radius_bounds) != 2:
-                raise ValueError("'initial_position_radius_bounds' must contain exactly two values.")
-            if self.initial_position_radius_bounds[0] < 0:
-                raise ValueError("'initial_position_radius_bounds[0]' must be non-negative.")
-            if self.initial_position_radius_bounds[1] <= self.initial_position_radius_bounds[0]:
-                raise ValueError(
-                    "'initial_position_radius_bounds[1]' must exceed 'initial_position_radius_bounds[0]'."
-                )
+        if self.workspace_bounds is not None:
+            if len(self.workspace_bounds) != 2:
+                raise ValueError("'workspace_bounds' must contain exactly two values.")
+            if self.workspace_bounds[1] <= self.workspace_bounds[0]:
+                raise ValueError("'workspace_bounds[1]' must exceed 'workspace_bounds[0]'.")
         if self.tolerance_overrides is not None and any(
             value <= 0 for value in self.tolerance_overrides.values()
         ):
@@ -256,10 +249,14 @@ class DaggerTrainer:
             existing_meta = LeRobotDatasetMetadata(repo_id=self.cfg.repo_id, root=self.cfg.dataset_root)
             _validate_resumable_dataset_schema(existing_meta.features, features)
         self.obs_feature_names = [n for n in features if n.startswith("observation.")]
-        base_ego_dim = sum(
-            int(features[name]["shape"][0])
-            for name in ("observation.environment_state", "observation.state")
-        )
+        # observation.state (proprioception) and its companion
+        # observation.state_mask are stacked across observation_horizon like
+        # the neighbor tensors; observation.environment_state (goal-relative
+        # encoding) stays single-frame.
+        environment_state_dim = int(features["observation.environment_state"]["shape"][0])
+        proprioception_dim = int(features["observation.state"]["shape"][0])
+        state_mask_dim = int(features["observation.state_mask"]["shape"][0])
+        base_ego_dim = environment_state_dim + (proprioception_dim + state_mask_dim) * self.observation_horizon
         self.action_dim = int(features["action"]["shape"][0])
         self.neighbor_slots = max(0, int(self.simulator.num_robots) - 1)
         neighbor_state_dim = int(features["observation.neighbor_state"]["shape"][0])
@@ -297,7 +294,12 @@ class DaggerTrainer:
         )
         flow = (
             {"num_inference_steps": self.cfg.flow_config.num_inference_steps}
-            if self.cfg.policy_type == "flow"
+            if self.cfg.policy_type in {"flow", "safeflow"}
+            else {}
+        )
+        safeflow = (
+            {"simulator": self.simulator, "planner_config": self.seeded_config}
+            if self.cfg.policy_type == "safeflow"
             else {}
         )
         self.policy = PolicyFactory.create(
@@ -307,6 +309,7 @@ class DaggerTrainer:
             hidden_dims=self.cfg.mlp_hidden_dims,
             prediction_horizon=self.cfg.prediction_horizon,
             **flow,
+            **safeflow,
         ).to(self.device).eval()
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.cfg.learning_rate)
         
@@ -443,10 +446,8 @@ class DaggerTrainer:
     def _apply_runtime_config_overrides(self, config: dict[str, Any]) -> dict[str, Any]:
         """Inject the training config's solver/dynamics tuning knobs (sampling bounds, tolerances), if set."""
         overrides: dict[str, Any] = {}
-        if self.cfg.initial_position_min_goal_distance is not None:
-            overrides["initial_position_min_goal_distance"] = self.cfg.initial_position_min_goal_distance
-        if self.cfg.initial_position_radius_bounds is not None:
-            overrides["initial_position_radius_bounds"] = list(self.cfg.initial_position_radius_bounds)
+        if self.cfg.workspace_bounds is not None:
+            overrides["workspace_bounds"] = list(self.cfg.workspace_bounds)
         if self.cfg.tolerance_overrides:
             overrides.update(self.cfg.tolerance_overrides)
         merged_config = apply_config_overrides(config, overrides)
@@ -812,17 +813,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--initial-position-min-goal-distance",
-        type=float,
-        default=None,
-        help="minimum distance from the goal when sampling random initial positions (random-curriculum rounds and eval fallback).",
-    )
-    p.add_argument(
-        "--initial-position-radius-bounds",
+        "--workspace-bounds",
         nargs=2,
         type=float,
         default=None,
-        help="[min, max] radius from the goal when sampling random initial positions (random-curriculum rounds and eval fallback).",
+        help=(
+            "[min, max] shared per-coordinate square both random goals and random initial "
+            "positions are drawn from (random-curriculum rounds and eval fallback), with "
+            "rejection sampling enforcing d_safe between all robots' goals, and between each "
+            "robot's initial position and every other robot's initial position/goal."
+        ),
     )
     p.add_argument(
         "--tolerance-overrides",
@@ -976,8 +976,7 @@ def main() -> None:
         training_curriculum=training_curriculum,
         round_seeds=round_seeds,
         restart_round_seed=restart_round_seed,
-        initial_position_min_goal_distance=option("initial_position_min_goal_distance", None),
-        initial_position_radius_bounds=option("initial_position_radius_bounds", None),
+        workspace_bounds=option("workspace_bounds", None),
         tolerance_overrides=tolerance_overrides,
         expert_mix_beta_start=float(option("expert_mix_beta_start", 0.8)),
         expert_mix_beta_end=float(option("expert_mix_beta_end", 0.0)),

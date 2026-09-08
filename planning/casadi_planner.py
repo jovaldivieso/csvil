@@ -196,6 +196,7 @@ class CasadiPlanner(Planner):
         self.step_idx = 0
         self.last_X_sol = None
         self.last_U_sol = None
+        self._prev_lam_g: np.ndarray | None = None
 
         # Cost matrices depending on system state
         q_diag = config.get("Q_diag", [10.0] * self.sim.nx)
@@ -386,13 +387,34 @@ class CasadiPlanner(Planner):
         self.opti.minimize(cost)
         self.opti.subject_to(self.X[:, 0] == self.x0_param)
 
-        opts = {"ipopt.print_level": 0, "print_time": 0, "ipopt.sb": "yes"}
+        # In "mpc" mode this same Opti problem is re-solved every real-world
+        # timestep with only slightly perturbed parameters (receding
+        # horizon), so dual-warm-starting the multipliers in __call__ is far
+        # more effective than a cold start every time -- the primal side
+        # already gets a warm shifted guess below, but the bare
+        # warm_start_init_point=yes without also tuning the bound-push/frac
+        # options and mu_init barely helps, since IPOPT still pushes
+        # iterates away from bounds and restarts the barrier parameter high
+        # by default.
+        opts = {
+            "ipopt.print_level": 0,
+            "print_time": 0,
+            "ipopt.sb": "yes",
+            "ipopt.warm_start_init_point": "yes",
+            "ipopt.warm_start_bound_push": 1e-9,
+            "ipopt.warm_start_bound_frac": 1e-9,
+            "ipopt.warm_start_slack_bound_push": 1e-9,
+            "ipopt.warm_start_slack_bound_frac": 1e-9,
+            "ipopt.warm_start_mult_bound_push": 1e-9,
+            "ipopt.mu_init": 1e-6,
+        }
         self.opti.solver("ipopt", opts)
 
     def reset(self) -> None:
         """Signals the start of a new episode."""
         self.last_X_sol = None
         self.last_U_sol = None
+        self._prev_lam_g = None
         self.opti.set_initial(self.X, 0.0)
         self.opti.set_initial(self.U, 0.0)
         if self.mode == "open_loop":
@@ -410,11 +432,14 @@ class CasadiPlanner(Planner):
                 shifted_U = np.hstack([self.last_U_sol[:, 1:], self.last_U_sol[:, -1:]])
                 self.opti.set_initial(self.X, shifted_X)
                 self.opti.set_initial(self.U, shifted_U)
+            if self._prev_lam_g is not None:
+                self.opti.set_initial(self.opti.lam_g, self._prev_lam_g)
 
             try:
                 sol = self.opti.solve()
                 self.last_X_sol = sol.value(self.X)
                 self.last_U_sol = sol.value(self.U)
+                self._prev_lam_g = sol.value(self.opti.lam_g)
                 return self.last_U_sol[:, 0]
             except RuntimeError as exc:
                 raise PlannerSolveError(

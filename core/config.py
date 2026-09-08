@@ -24,18 +24,16 @@ class PlannerConfig:
     r_weight_per_robot: tuple[tuple[float, ...], ...] = ()
     terminal_cost_multiplier: float = 10.0
     collision_slack_penalty_weight: float = 10000.0
+    terminal_velocity_weight: float = 1.0
+    projector_max_iter: int = 10
 
 
 @dataclass(frozen=True)
-class InitialStateSamplingConfig:
-    position_radius_bounds: tuple[float, float]
-    min_goal_distance: float
+class WorkspaceSamplingConfig:
+    """Shared square region both random goals and random initial positions are drawn from."""
+
+    bounds: tuple[float, float] = (-1.0, 1.0)
     seed: int | None = None
-
-
-@dataclass(frozen=True)
-class GoalSamplingConfig:
-    position_bounds: tuple[float, float] = (-1.0, 1.0)
 
 
 @dataclass(frozen=True)
@@ -45,11 +43,7 @@ class SingleIntegratorSystemConfig:
     randomize_goal: bool = True
     max_vel: float = 1.0
     error_tolerance: float = 0.05
-    goal_sampling: GoalSamplingConfig = GoalSamplingConfig()
-    initial_state_sampling: InitialStateSamplingConfig = InitialStateSamplingConfig(
-        position_radius_bounds=(0.05, 1.0),
-        min_goal_distance=0.05,
-    )
+    workspace_sampling: WorkspaceSamplingConfig = WorkspaceSamplingConfig()
 
 
 @dataclass(frozen=True)
@@ -59,11 +53,7 @@ class DoubleIntegratorSystemConfig:
     randomize_goal: bool = True
     max_accel: float = 2.0
     error_tolerance: float = 0.05
-    goal_sampling: GoalSamplingConfig = GoalSamplingConfig()
-    initial_state_sampling: InitialStateSamplingConfig = InitialStateSamplingConfig(
-        position_radius_bounds=(0.05, 1.0),
-        min_goal_distance=0.05,
-    )
+    workspace_sampling: WorkspaceSamplingConfig = WorkspaceSamplingConfig()
 
 
 @dataclass(frozen=True)
@@ -73,11 +63,7 @@ class Unicycle1SystemConfig:
     randomize_goal: bool = True
     max_v: float = 2.0
     error_tolerance: float = 0.05
-    goal_sampling: GoalSamplingConfig = GoalSamplingConfig()
-    initial_state_sampling: InitialStateSamplingConfig = InitialStateSamplingConfig(
-        position_radius_bounds=(0.05, 1.0),
-        min_goal_distance=0.05,
-    )
+    workspace_sampling: WorkspaceSamplingConfig = WorkspaceSamplingConfig()
 
 
 @dataclass(frozen=True)
@@ -93,11 +79,7 @@ class Unicycle2SystemConfig:
     theta_tol: float = 0.05
     vel_tol: float = 0.05
     omega_tol: float = 0.05
-    goal_sampling: GoalSamplingConfig = GoalSamplingConfig()
-    initial_state_sampling: InitialStateSamplingConfig = InitialStateSamplingConfig(
-        position_radius_bounds=(0.05, 1.0),
-        min_goal_distance=0.05,
-    )
+    workspace_sampling: WorkspaceSamplingConfig = WorkspaceSamplingConfig()
 
 
 @dataclass(frozen=True)
@@ -266,52 +248,15 @@ def _positive_vector(raw: Any, key: str, size: int) -> tuple[float, ...]:
     return tuple(out)
 
 
-def _initial_state_sampling(
-    raw_config: Mapping[str, Any],
-    *,
-    default_min_goal_distance: float,
-) -> InitialStateSamplingConfig:
-    min_goal_distance = _float(
-        raw_config,
-        "initial_position_min_goal_distance",
-        default_min_goal_distance,
-    )
-    if min_goal_distance < 0:
-        raise ConfigurationError("'initial_position_min_goal_distance' must be non-negative.")
-
-    radius_bounds = _vector(
-        raw_config,
-        "initial_position_radius_bounds",
-        2,
-        (min_goal_distance, 1.0),
-    )
-    radius_min, radius_max = radius_bounds
-    if radius_min < 0:
-        raise ConfigurationError("'initial_position_radius_bounds[0]' must be non-negative.")
-    effective_radius_min = max(radius_min, min_goal_distance)
-    if radius_max <= effective_radius_min:
-        raise ConfigurationError(
-            "'initial_position_min_goal_distance' must be smaller than the maximum initial radius."
-        )
-
-    return InitialStateSamplingConfig(
-        position_radius_bounds=(effective_radius_min, radius_max),
-        min_goal_distance=min_goal_distance,
+def _workspace_sampling(raw_config: Mapping[str, Any]) -> WorkspaceSamplingConfig:
+    bounds = _vector(raw_config, "workspace_bounds", 2, (-1.0, 1.0))
+    lower, upper = bounds
+    if lower >= upper:
+        raise ConfigurationError("'workspace_bounds[0]' must be smaller than 'workspace_bounds[1]'.")
+    return WorkspaceSamplingConfig(
+        bounds=bounds,
         seed=_optional_non_negative_int(raw_config, "initial_state_seed"),
     )
-
-
-def _goal_sampling(raw_config: Mapping[str, Any]) -> GoalSamplingConfig:
-    position_bounds = _vector(
-        raw_config,
-        "goal_position_bounds",
-        2,
-        (-1.0, 1.0),
-    )
-    lower, upper = position_bounds
-    if lower >= upper:
-        raise ConfigurationError("'goal_position_bounds[0]' must be smaller than 'goal_position_bounds[1]'.")
-    return GoalSamplingConfig(position_bounds=position_bounds)
 
 
 def _state_dimension_for_system(system_name: str) -> int:
@@ -343,6 +288,8 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
         "R_diag",
         "terminal_cost_multiplier",
         "collision_slack_penalty_weight",
+        "terminal_velocity_weight",
+        "projector_max_iter",
         "initial_state_seed",
         "action_noise_seed",
         "done_hold_steps",
@@ -357,9 +304,7 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
             "randomize_goal",
             "max_vel",
             "error_tolerance",
-            "goal_position_bounds",
-            "initial_position_min_goal_distance",
-            "initial_position_radius_bounds",
+            "workspace_bounds",
         }
     if system_name == "double_integrator":
         return common_keys | {
@@ -367,9 +312,7 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
             "randomize_goal",
             "max_accel",
             "error_tolerance",
-            "goal_position_bounds",
-            "initial_position_min_goal_distance",
-            "initial_position_radius_bounds",
+            "workspace_bounds",
         }
     if system_name == "unicycle1":
         return common_keys | {
@@ -377,9 +320,7 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
             "randomize_goal",
             "max_v",
             "error_tolerance",
-            "goal_position_bounds",
-            "initial_position_min_goal_distance",
-            "initial_position_radius_bounds",
+            "workspace_bounds",
         }
     if system_name == "unicycle2":
         return common_keys | {
@@ -394,9 +335,7 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
             "theta_tol",
             "vel_tol",
             "omega_tol",
-            "goal_position_bounds",
-            "initial_position_min_goal_distance",
-            "initial_position_radius_bounds",
+            "workspace_bounds",
         }
     raise ConfigurationError(f"Unknown system '{system_name}' when validating YAML keys.")
 
@@ -420,6 +359,8 @@ def _allowed_multi_robot_keys() -> set[str]:
         "R_weight_per_robot",
         "terminal_cost_multiplier",
         "collision_slack_penalty_weight",
+        "terminal_velocity_weight",
+        "projector_max_iter",
         "environment",
         "db_lacam",
     }
@@ -720,6 +661,8 @@ def _validate_planner(
         r_weight_per_robot=r_weight_per_robot,
         terminal_cost_multiplier=_float(config, "terminal_cost_multiplier", 10.0),
         collision_slack_penalty_weight=_float(config, "collision_slack_penalty_weight", 10000.0),
+        terminal_velocity_weight=_float(config, "terminal_velocity_weight", 1.0),
+        projector_max_iter=_int(config, "projector_max_iter", 10),
     )
 
     if planner.horizon <= 0:
@@ -728,6 +671,10 @@ def _validate_planner(
         raise ConfigurationError("'terminal_cost_multiplier' must be positive.")
     if planner.collision_slack_penalty_weight <= 0:
         raise ConfigurationError("'collision_slack_penalty_weight' must be positive.")
+    if planner.terminal_velocity_weight <= 0:
+        raise ConfigurationError("'terminal_velocity_weight' must be positive.")
+    if planner.projector_max_iter <= 0:
+        raise ConfigurationError("'projector_max_iter' must be a positive integer.")
     return planner
 
 def load_and_validate_system_config(system_name: str, config_path: str | Path) -> dict[str, Any]:
@@ -925,6 +872,8 @@ def validate_system_config(
                 "R_diag": list(planner_cfg.r_diag),
                 "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
                 "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
+                "terminal_velocity_weight": planner_cfg.terminal_velocity_weight,
+                "projector_max_iter": planner_cfg.projector_max_iter,
             }
         )
         if len(planner_cfg.r_weight_per_robot) > 0:
@@ -957,19 +906,14 @@ def validate_system_config(
         error_tolerance = _float(raw_config, "error_tolerance", 0.05)
         if error_tolerance <= 0:
             raise ConfigurationError("'error_tolerance' must be positive.")
-        goal_sampling = _goal_sampling(raw_config)
-        initial_state_sampling = _initial_state_sampling(
-            raw_config,
-            default_min_goal_distance=error_tolerance,
-        )
+        workspace_sampling = _workspace_sampling(raw_config)
         system_cfg = SingleIntegratorSystemConfig(
             dt=dt,
             goal=_vector(raw_config, "goal", 2, (0.0, 0.0)),
             randomize_goal=_bool(raw_config, "randomize_goal", "goal" not in raw_config),
             max_vel=_float(raw_config, "max_vel", 1.0),
             error_tolerance=error_tolerance,
-            goal_sampling=goal_sampling,
-            initial_state_sampling=initial_state_sampling,
+            workspace_sampling=workspace_sampling,
         )
         if system_cfg.max_vel <= 0:
             raise ConfigurationError("'max_vel' must be positive.")
@@ -977,15 +921,13 @@ def validate_system_config(
             "dt": system_cfg.dt,
             "goal": list(system_cfg.goal),
             "randomize_goal": system_cfg.randomize_goal,
-            "goal_position_bounds": list(system_cfg.goal_sampling.position_bounds),
+            "workspace_bounds": list(system_cfg.workspace_sampling.bounds),
             "max_vel": system_cfg.max_vel,
             "error_tolerance": system_cfg.error_tolerance,
             "action_noise_seed": action_noise_seed,
-            "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
-            "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
-        if system_cfg.initial_state_sampling.seed is not None:
-            config_out["initial_state_seed"] = system_cfg.initial_state_sampling.seed
+        if system_cfg.workspace_sampling.seed is not None:
+            config_out["initial_state_seed"] = system_cfg.workspace_sampling.seed
         nx = 2
         nu = 2
 
@@ -995,19 +937,14 @@ def validate_system_config(
         error_tolerance = _float(raw_config, "error_tolerance", 0.05)
         if error_tolerance <= 0:
             raise ConfigurationError("'error_tolerance' must be positive.")
-        goal_sampling = _goal_sampling(raw_config)
-        initial_state_sampling = _initial_state_sampling(
-            raw_config,
-            default_min_goal_distance=error_tolerance,
-        )
+        workspace_sampling = _workspace_sampling(raw_config)
         system_cfg = DoubleIntegratorSystemConfig(
             dt=dt,
             goal=_vector(raw_config, "goal", 2, (0.0, 0.0)),
             randomize_goal=_bool(raw_config, "randomize_goal", "goal" not in raw_config),
             max_accel=_float(raw_config, "max_accel", 2.0),
             error_tolerance=error_tolerance,
-            goal_sampling=goal_sampling,
-            initial_state_sampling=initial_state_sampling,
+            workspace_sampling=workspace_sampling,
         )
         if system_cfg.max_accel <= 0:
             raise ConfigurationError("'max_accel' must be positive.")
@@ -1015,15 +952,13 @@ def validate_system_config(
             "dt": system_cfg.dt,
             "goal": list(system_cfg.goal),
             "randomize_goal": system_cfg.randomize_goal,
-            "goal_position_bounds": list(system_cfg.goal_sampling.position_bounds),
+            "workspace_bounds": list(system_cfg.workspace_sampling.bounds),
             "max_accel": system_cfg.max_accel,
             "error_tolerance": system_cfg.error_tolerance,
             "action_noise_seed": action_noise_seed,
-            "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
-            "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
-        if system_cfg.initial_state_sampling.seed is not None:
-            config_out["initial_state_seed"] = system_cfg.initial_state_sampling.seed
+        if system_cfg.workspace_sampling.seed is not None:
+            config_out["initial_state_seed"] = system_cfg.workspace_sampling.seed
         nx = 4
         nu = 2
 
@@ -1033,19 +968,14 @@ def validate_system_config(
         error_tolerance = _float(raw_config, "error_tolerance", 0.05)
         if error_tolerance <= 0:
             raise ConfigurationError("'error_tolerance' must be positive.")
-        goal_sampling = _goal_sampling(raw_config)
-        initial_state_sampling = _initial_state_sampling(
-            raw_config,
-            default_min_goal_distance=error_tolerance,
-        )
+        workspace_sampling = _workspace_sampling(raw_config)
         system_cfg = Unicycle1SystemConfig(
             dt=dt,
             goal=_vector(raw_config, "goal", 3, (0.0, 0.0, 0.0)),
             randomize_goal=_bool(raw_config, "randomize_goal", "goal" not in raw_config),
             max_v=_float(raw_config, "max_v", 2.0),
             error_tolerance=error_tolerance,
-            goal_sampling=goal_sampling,
-            initial_state_sampling=initial_state_sampling,
+            workspace_sampling=workspace_sampling,
         )
         if system_cfg.max_v <= 0:
             raise ConfigurationError("'max_v' must be positive.")
@@ -1053,15 +983,13 @@ def validate_system_config(
             "dt": system_cfg.dt,
             "goal": list(system_cfg.goal),
             "randomize_goal": system_cfg.randomize_goal,
-            "goal_position_bounds": list(system_cfg.goal_sampling.position_bounds),
+            "workspace_bounds": list(system_cfg.workspace_sampling.bounds),
             "max_v": system_cfg.max_v,
             "error_tolerance": system_cfg.error_tolerance,
             "action_noise_seed": action_noise_seed,
-            "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
-            "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
-        if system_cfg.initial_state_sampling.seed is not None:
-            config_out["initial_state_seed"] = system_cfg.initial_state_sampling.seed
+        if system_cfg.workspace_sampling.seed is not None:
+            config_out["initial_state_seed"] = system_cfg.workspace_sampling.seed
         nx = 3
         nu = 2
 
@@ -1085,11 +1013,7 @@ def validate_system_config(
             raise ConfigurationError("'vel_tol' must be positive.")
         if omega_tol <= 0:
             raise ConfigurationError("'omega_tol' must be positive.")
-        goal_sampling = _goal_sampling(raw_config)
-        initial_state_sampling = _initial_state_sampling(
-            raw_config,
-            default_min_goal_distance=pos_tol,
-        )
+        workspace_sampling = _workspace_sampling(raw_config)
         system_cfg = Unicycle2SystemConfig(
             dt=dt,
             goal=_vector(raw_config, "goal", 3, (0.0, 0.0, 0.0)),
@@ -1102,8 +1026,7 @@ def validate_system_config(
             theta_tol=theta_tol,
             vel_tol=vel_tol,
             omega_tol=omega_tol,
-            goal_sampling=goal_sampling,
-            initial_state_sampling=initial_state_sampling,
+            workspace_sampling=workspace_sampling,
         )
         if system_cfg.max_accel <= 0 or system_cfg.max_speed <= 0 or system_cfg.max_omega <= 0:
             raise ConfigurationError("'max_accel', 'max_speed', and 'max_omega' must be positive.")
@@ -1111,7 +1034,7 @@ def validate_system_config(
             "dt": system_cfg.dt,
             "goal": list(system_cfg.goal),
             "randomize_goal": system_cfg.randomize_goal,
-            "goal_position_bounds": list(system_cfg.goal_sampling.position_bounds),
+            "workspace_bounds": list(system_cfg.workspace_sampling.bounds),
             "randomize_initial_velocity": system_cfg.randomize_initial_velocity,
             "max_accel": system_cfg.max_accel,
             "max_speed": system_cfg.max_speed,
@@ -1121,11 +1044,9 @@ def validate_system_config(
             "vel_tol": system_cfg.vel_tol,
             "omega_tol": system_cfg.omega_tol,
             "action_noise_seed": action_noise_seed,
-            "initial_position_min_goal_distance": system_cfg.initial_state_sampling.min_goal_distance,
-            "initial_position_radius_bounds": list(system_cfg.initial_state_sampling.position_radius_bounds),
         }
-        if system_cfg.initial_state_sampling.seed is not None:
-            config_out["initial_state_seed"] = system_cfg.initial_state_sampling.seed
+        if system_cfg.workspace_sampling.seed is not None:
+            config_out["initial_state_seed"] = system_cfg.workspace_sampling.seed
         nx = 5
         nu = 2
 
@@ -1142,6 +1063,8 @@ def validate_system_config(
             "R_diag": list(planner_cfg.r_diag),
             "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
             "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
+            "terminal_velocity_weight": planner_cfg.terminal_velocity_weight,
+            "projector_max_iter": planner_cfg.projector_max_iter,
         }
     )
 
