@@ -27,7 +27,7 @@ model:
 # Optional DAgger defaults. Explicit command-line arguments override these values.
 training:
   dagger_iterations: 4
-  trajectories_per_iteration: [400, 300, 200, 100]
+  trajectories_per_iteration: [700, 100, 100, 100]
   steps_per_trajectory: 200
   target_epochs_per_round: [50, 40, 30, 20]
   action_noise_std: 0.03

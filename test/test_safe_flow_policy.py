@@ -6,11 +6,13 @@ import unittest
 import warnings
 
 import numpy as np
+import torch
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.factory import DynamicsFactory
+from learning.dagger import ObservationHistoryBuffer
 from learning.models.encoder import EncoderFactory
 from learning.models.policy import PolicyFactory
 from learning.models.safe_flow_policy import SafeFlowMPCPolicy
@@ -306,6 +308,87 @@ class PolicySolveFailureRecoveryTests(unittest.TestCase):
         # failing_action_fn raises on the very first call, before
         # simulator.step() ever runs -- zero steps were actually executed.
         self.assertEqual(steps_taken, 0)
+
+
+class FirstOrderNeighborVelocityTests(unittest.TestCase):
+    """Regression test: for velocity-less systems (single_integrator,
+    unicycle1), _build_neighbor_trajectories previously assumed the ego's
+    own position was unchanged between frames (pos_prev = pos_now) when
+    finite-differencing a neighbor's velocity. If the ego actually moved,
+    that injects the ego's own displacement into the estimate -- for a
+    truly stationary neighbor, the result was a fictitious velocity equal
+    to *minus* the ego's own, fed straight into the projector's hard
+    d_collision constraint.
+    """
+
+    def test_stationary_neighbor_is_not_assigned_a_fictitious_velocity_when_ego_moves(self) -> None:
+        simulator = DynamicsFactory.create(
+            system_name="multi_robot",
+            config={
+                "dt": DT,
+                "d_safe": 0.1,
+                # goal=[0, 0] for both robots so PolicyFactory.create's
+                # zeroed-goal local_sims introduce no gauge shift relative
+                # to world coordinates here (see GoalAnchorIndependenceTests
+                # for why any goal anchor would be equally valid) -- this
+                # test checks the neighbor-velocity fix specifically, not
+                # the (separately tested) goal-anchor invariance.
+                "robots": [
+                    {"system": "single_integrator", "config": {
+                        "dt": DT, "max_vel": 5.0,
+                        "start": [-1.0, 0.0], "goal": [0.0, 0.0], "randomize_goal": False,
+                    }},
+                    {"system": "single_integrator", "config": {
+                        "dt": DT, "max_vel": 5.0,
+                        "start": [3.0, 0.0], "goal": [0.0, 0.0], "randomize_goal": False,
+                    }},
+                ],
+            },
+        )
+        encoder = EncoderFactory.create(
+            "deepset", state_dim=10, neighbor_feature_dim=4, neighbor_slots=1,
+            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+        )
+        policy = PolicyFactory.create(
+            "safeflow",
+            action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=3, num_inference_steps=2,
+            simulator=simulator, planner_config={},
+        )
+
+        history_buffer = ObservationHistoryBuffer(2, 2)
+
+        def observe_and_stack(ego_state: np.ndarray, neighbor_state: np.ndarray):
+            state = np.concatenate([ego_state, neighbor_state])
+            simulator.reset(state)
+            full_obs = simulator.observe(state)
+            return [
+                history_buffer.append_and_stack(r, simulator.decentralized_policy_observation(full_obs, r))
+                for r in range(2)
+            ]
+
+        # Tick 1: ego (robot 0) at (-1, 0). Tick 2: ego moved to (0, 0) --
+        # a real, nonzero displacement -- while the neighbor (robot 1)
+        # stays fixed at (3, 0) both times.
+        observe_and_stack(np.array([-1.0, 0.0]), np.array([3.0, 0.0]))
+        stacked = observe_and_stack(np.array([0.0, 0.0]), np.array([3.0, 0.0]))
+
+        observation_dict = {
+            name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
+            for name in stacked[0]
+        }
+        ego_obs_np = policy._extract_ego_observation(observation_dict)
+        x0_batch = np.stack([policy.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(2)])
+
+        neighbor_trajs = policy._build_neighbor_trajectories(observation_dict, x0_batch)
+
+        # Robot 0 (the one that moved) sees a genuinely stationary neighbor
+        # -- its extrapolated trajectory must stay at (3, 0) throughout,
+        # not drift according to a fictitious velocity derived from robot
+        # 0's own displacement (which the pre-fix code would have produced:
+        # exactly -1/DT in x, the negative of robot 0's own velocity).
+        robot0_neighbor_traj = neighbor_trajs[0, 0]
+        np.testing.assert_allclose(robot0_neighbor_traj[0], 3.0, atol=1e-9)
+        np.testing.assert_allclose(robot0_neighbor_traj[1], 0.0, atol=1e-9)
 
 
 if __name__ == "__main__":

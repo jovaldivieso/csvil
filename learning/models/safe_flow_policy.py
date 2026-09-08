@@ -222,6 +222,7 @@ class SafeFlowMPCPolicy(ActionPolicy):
             cos_now, sin_now = np.cos(theta_now), np.sin(theta_now)
             pos_now = x0_batch[b, list(pos_idx)]
 
+            ego_pos_prev_known = True
             if theta_idx is not None and len(velocity_idx) == 2:
                 # Unicycle-style (v, omega) proprioception: back-propagate
                 # this robot's own heading and position under its own
@@ -243,12 +244,48 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 cos_prev, sin_prev = cos_now, sin_now
                 pos_prev = pos_now - dt * x0_batch[b, list(velocity_idx)]
             else:
+                # No ego proprioception at all (first-order systems:
+                # single_integrator, unicycle1) -- there is no state to
+                # back-propagate the ego's own previous absolute position
+                # from a single current-frame reconstruction, so pos_prev
+                # cannot actually be recovered here. Finite-differencing the
+                # neighbor's relative-offset history against pos_now instead
+                # of the (unknown) true pos_prev would inject the ego's own
+                # displacement into the estimate: if the neighbor is truly
+                # stationary, that computes a fictitious velocity equal to
+                # *minus* the ego's own velocity, not noise around zero.
+                # ego_pos_prev_known=False below forces the zero-velocity
+                # (momentarily-stationary) fallback instead of guessing --
+                # conservative for a receding-horizon replan every tick,
+                # not systematically wrong in a specific, exploitable
+                # direction the way the finite difference would be.
                 cos_prev, sin_prev = cos_now, sin_now
                 pos_prev = pos_now
+                ego_pos_prev_known = False
 
             for j in range(self.neighbor_slots):
                 if mask_now[b, j] <= 0.5:
-                    continue  # masked-out neighbor: leave the far-away sentinel
+                    # Masked-out neighbor: leave the far-away sentinel, i.e.
+                    # treat it as absent rather than as a bounded-speed
+                    # reachable set. This means the hard d_collision floor
+                    # is not enforced against neighbors currently outside
+                    # inter_robot_visibility_radius -- the paper's safety
+                    # theorems are proved per-robot against a *known*
+                    # trajectory forecast for every other agent, which is
+                    # not available for an unseen one. Formal safety is
+                    # therefore only guaranteed at the fleet level when
+                    # inter_robot_visibility_radius is large enough, relative
+                    # to closing speed and replan rate, that no neighbor can
+                    # cross d_collision between two observations. This is a
+                    # deliberate, accepted trade-off, not an oversight: every
+                    # real sensor (camera, lidar) has exactly the same finite
+                    # range, so this limitation is not specific to this
+                    # implementation and is not something a purely software
+                    # fix can remove -- it can only be pushed back by
+                    # widening the visibility radius or bounding neighbor
+                    # speed, both of which are config/scenario choices, not
+                    # code changes.
+                    continue
                 rx, ry = rel_pos_now[b, j]
                 abs_now = np.array(
                     [pos_now[0] + cos_now * rx - sin_now * ry, pos_now[1] + sin_now * rx + cos_now * ry]
@@ -259,8 +296,10 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 # simply being invisible then) -- differencing against a
                 # fabricated [0, 0] "previous position" would otherwise
                 # produce a large fictitious velocity the instant a neighbor
-                # first becomes visible.
-                if observation_horizon >= 2 and mask[b, -2, j] > 0.5:
+                # first becomes visible. ego_pos_prev_known guards against
+                # the first-order case above, where pos_prev is a stand-in
+                # for pos_now, not an actual reconstruction.
+                if ego_pos_prev_known and observation_horizon >= 2 and mask[b, -2, j] > 0.5:
                     prx, pry = feat[b, -2, j, 0:2]
                     abs_prev = np.array(
                         [pos_prev[0] + cos_prev * prx - sin_prev * pry, pos_prev[1] + sin_prev * prx + cos_prev * pry]

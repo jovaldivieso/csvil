@@ -510,18 +510,28 @@ class MultiRobotSimulator(DynamicsSimulator):
         return self._sample_safe_initial_state(rng=rng, randomize_goals=False)
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
-        for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
-            for sim in self.simulators:
+        # Sequential (not joint) rejection: each robot's goal is only
+        # checked against the goals already accepted for earlier robots,
+        # instead of redrawing every robot's goal whenever any single pair
+        # conflicts. A joint draw needs all N goals simultaneously
+        # unconflicted, which becomes vanishingly likely well before N
+        # reaches double digits at realistic d_safe/workspace densities
+        # (e.g. 8 robots already fails a joint draw reliably); placing them
+        # one at a time keeps the search space per attempt small and
+        # constant instead of shrinking with every additional robot.
+        accepted_goals: list[np.ndarray] = []
+        for robot_idx, sim in enumerate(self.simulators):
+            for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
                 sim.randomize_goal_for_reset(rng)
-
-            goals = [sim.goal_state for sim in self.simulators]
-            if self._positions_respect_d_safe(goals):
-                return
-
-        raise RuntimeError(
-            "Failed to sample safe multi-robot goals. "
-            f"Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
-        )
+                if self._positions_respect_d_safe(accepted_goals + [sim.goal_state]):
+                    accepted_goals.append(sim.goal_state)
+                    break
+            else:
+                raise RuntimeError(
+                    f"Failed to sample a safe goal for robot {robot_idx} against "
+                    f"{len(accepted_goals)} already-placed goals. Tried "
+                    f"{SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with d_safe={self.d_safe}."
+                )
 
     def set_goal(self, goal: np.ndarray) -> None:
         goal_array = np.asarray(goal, dtype=float)
@@ -565,16 +575,25 @@ class MultiRobotSimulator(DynamicsSimulator):
             self.randomize_goal_for_reset(rng)
         goals = [sim.goal_state for sim in self.simulators]
 
-        for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
-            states = [sim.random_initial_state(rng) for sim in self.simulators]
-            if self._positions_respect_d_safe(states + goals):
-                return np.concatenate(states)
-
-        raise RuntimeError(
-            "Unable to sample multi-robot initial states that satisfy d_safe against "
-            f"other robots' initial states and goals. Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} "
-            f"attempts with d_safe={self.d_safe}."
-        )
+        # Sequential (not joint) rejection -- see randomize_goal_for_reset
+        # for why: each robot's start is only checked against the goals and
+        # the starts already accepted for earlier robots, not redrawn from
+        # scratch (with every other robot) over a single conflict.
+        accepted_states: list[np.ndarray] = []
+        for robot_idx, sim in enumerate(self.simulators):
+            for _ in range(SAFE_INITIAL_STATE_MAX_ATTEMPTS):
+                candidate = sim.random_initial_state(rng)
+                if self._positions_respect_d_safe(accepted_states + [candidate] + goals):
+                    accepted_states.append(candidate)
+                    break
+            else:
+                raise RuntimeError(
+                    f"Unable to sample a safe initial state for robot {robot_idx} against "
+                    f"{len(accepted_states)} already-placed robots' initial states and all "
+                    f"goals. Tried {SAFE_INITIAL_STATE_MAX_ATTEMPTS} attempts with "
+                    f"d_safe={self.d_safe}."
+                )
+        return np.concatenate(accepted_states)
 
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
         split_obs = self._split_observation(obs, validate=validate)

@@ -23,4 +23,10 @@ robots:
   config:
     dt: 0.05
     max_accel: 2.0
+    # Widened from the default [-1, 1]: 8 robots need 16 points (starts +
+    # goals) placed at d_safe=0.5 apart, which random rejection sampling
+    # can essentially never satisfy in the default box even after
+    # thousands of retries -- reset_random() failed 100% of the time at
+    # the default bound. [-1.5, 1.5] resolves it reliably.
+    workspace_bounds: [-1.5, 1.5]
 
