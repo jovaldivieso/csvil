@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from collections.abc import Mapping
 
@@ -9,6 +10,35 @@ from learning.models.encoder import DEFAULT_ENCODER_TYPE
 
 DEFAULT_MLP_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 128)
 DEFAULT_FLOW_HIDDEN_DIMS: tuple[int, ...] = (256, 256, 256)
+DEFAULT_DAGGER_TRAINING_CONFIG: dict[str, object] = {
+    "planner": "casadi",
+    "dagger_iterations": 4,
+    "trajectories_per_iteration": [20],
+    "steps_per_trajectory": 150,
+    "action_noise_std": 0.0,
+    "expert_mix_beta_start": 0.8,
+    "expert_mix_beta_end": 0.0,
+    "expert_mix_beta_decay_rate": None,
+    "expert_mix_decay_after_eval_success": None,
+    "adaptive_beta_recovery": False,
+    "target_epochs_per_round": [30.0],
+    "eval_episodes": 10,
+    "eval_steps": None,
+    "eval_seed_start": 10000,
+    "eval_action_noise_std": 0.0,
+    "batch_size": 64,
+    "learning_rate": 1e-3,
+    "seed": 99,
+    "max_train_steps": None,
+    "training_curriculum": None,
+    "round_seeds": None,
+    "restart_round_seed": False,
+    "initial_states": None,
+    "goal_states": None,
+    "initial_position_min_goal_distance": None,
+    "initial_position_radius_bounds": None,
+    "tolerance_overrides": None,
+}
 
 
 @dataclass(frozen=True)
@@ -20,13 +50,43 @@ class EncoderConfig:
 @dataclass(frozen=True)
 class FlowConfig:
     num_inference_steps: int = 10
+    observation_horizon: int = 1
+
+
+@lru_cache(maxsize=None)
+def _cached_yaml_config(policy_config_path: Path) -> dict[str, object]:
+    """Avoid re-parsing the same policy YAML once per load_* call in a training run."""
+    return load_yaml_config(policy_config_path)
+
+
+def load_dagger_training_config(policy_config_path: Path | None) -> dict[str, object]:
+    """Load optional DAgger CLI defaults from a policy configuration file."""
+    config = dict(DEFAULT_DAGGER_TRAINING_CONFIG)
+    if policy_config_path is None:
+        return config
+
+    raw_config = _cached_yaml_config(policy_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ValueError("Policy config model section must be a mapping.")
+    training_section = raw_config.get("training", model_section.get("training", {}))
+    if not isinstance(training_section, Mapping):
+        raise ValueError("Policy config 'training' section must be a mapping.")
+    unknown_keys = sorted(set(training_section) - set(DEFAULT_DAGGER_TRAINING_CONFIG))
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown key(s) in policy config 'training' section: {unknown_keys}. "
+            f"Supported keys are: {sorted(DEFAULT_DAGGER_TRAINING_CONFIG)}."
+        )
+    config.update(training_section)
+    return config
 
 
 def load_mlp_hidden_dims(policy_config_path: Path) -> tuple[int, ...]:
    
     policy_type = load_policy_type(policy_config_path)
     if policy_type == "flow":
-        raw_config = load_yaml_config(policy_config_path)
+        raw_config = _cached_yaml_config(policy_config_path)
         model_section = raw_config.get("model", raw_config)
         hidden_dims_raw = model_section.get("hidden_dims") if isinstance(model_section, Mapping) else None
         if isinstance(hidden_dims_raw, list) and hidden_dims_raw:
@@ -37,9 +97,10 @@ def load_mlp_hidden_dims(policy_config_path: Path) -> tuple[int, ...]:
     return validated.hidden_dims
 
 
-def load_policy_type(policy_config_path: Path) -> str:
-    
-    raw_config = load_yaml_config(policy_config_path)
+def load_policy_type(policy_config_path: Path | None) -> str:
+    if policy_config_path is None:
+        return "mlp"
+    raw_config = _cached_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
         raise ValueError("Model config 'model' section must be a mapping.")
@@ -49,9 +110,11 @@ def load_policy_type(policy_config_path: Path) -> str:
     return policy_type_raw.strip().lower()
 
 
-def load_flow_config(policy_config_path: Path) -> FlowConfig:
-    
-    raw_config = load_yaml_config(policy_config_path)
+def load_flow_config(policy_config_path: Path | None) -> FlowConfig:
+    if policy_config_path is None:
+        return FlowConfig()
+
+    raw_config = _cached_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
         raise ValueError("Model config 'model' section must be a mapping.")
@@ -60,21 +123,40 @@ def load_flow_config(policy_config_path: Path) -> FlowConfig:
     if not isinstance(flow_section, Mapping):
         raise ValueError("Model config 'model.flow' must be a mapping.")
 
-    return FlowConfig(num_inference_steps=int(flow_section.get("num_inference_steps", 10)))
+    return FlowConfig(
+        num_inference_steps=int(flow_section.get("num_inference_steps", 10)),
+        observation_horizon=int(model_section.get("observation_horizon", 1)),
+    )
 
 
-def load_prediction_horizon(policy_config_path: Path) -> int:
-    
-    raw_config = load_yaml_config(policy_config_path)
+def load_prediction_horizon(policy_config_path: Path | None) -> int:
+    if policy_config_path is None:
+        return 1
+    raw_config = _cached_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if isinstance(model_section, Mapping):
         return int(model_section.get("prediction_horizon", 1))
     return 1
 
 
-def load_encoder_config(policy_config_path: Path) -> EncoderConfig:
-    
-    raw_config = load_yaml_config(policy_config_path)
+def load_observation_horizon(policy_config_path: Path | None) -> int:
+    if policy_config_path is None:
+        return 1
+    raw_config = _cached_yaml_config(policy_config_path)
+    model_section = raw_config.get("model", raw_config)
+    if not isinstance(model_section, Mapping):
+        raise ValueError("Policy config model section must be a mapping.")
+    horizon = int(model_section.get("observation_horizon", 1))
+    if horizon <= 0:
+        raise ValueError("'model.observation_horizon' must be positive.")
+    return horizon
+
+
+def load_encoder_config(policy_config_path: Path | None) -> EncoderConfig:
+    if policy_config_path is None:
+        return EncoderConfig(encoder_type=DEFAULT_ENCODER_TYPE, kwargs={})
+
+    raw_config = _cached_yaml_config(policy_config_path)
     model_section = raw_config.get("model", raw_config)
     if not isinstance(model_section, Mapping):
         raise ValueError("Policy config model section must be a mapping.")

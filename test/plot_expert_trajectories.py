@@ -13,8 +13,11 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config, load_yaml_config, validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
+from learning.dagger import apply_config_overrides
 from systems.initial_state_utils import (
+    normalize_goal_state_specs,
     normalize_initial_state_specs,
+    parse_goal_states_argument,
     parse_initial_states_argument,
 )
 from systems.seed_utils import (
@@ -65,11 +68,16 @@ def default_plot_output_path(system: str, planner_name: str) -> str:
 def pairwise_distance_report(
     simulator: DynamicsProtocol,
     trajectories: list[np.ndarray],
-    d_safe: float,
+    d_collision: float,
 ) -> str | None:
     state_slices = simulator.robot_state_slices
     if len(state_slices) < 2 or len(trajectories) == 0:
         return None
+
+    # check_homogeneous_fleet_collisions/is_collision() apply one shared
+    # position_indices (from the first sub-simulator) across the whole fleet,
+    # so mirror that here rather than assuming a 2D position.
+    position_indices = list(simulator.simulators[0].position_indices)
 
     min_distance = float("inf")
     worst_violation = 0.0
@@ -81,21 +89,21 @@ def pairwise_distance_report(
     for trajectory in trajectories:
         for k in range(len(trajectory)):
             for i in range(len(state_slices)):
-                p_i = trajectory[k, state_slices[i]][:2]
+                p_i = trajectory[k, state_slices[i]][position_indices]
                 for j in range(i + 1, len(state_slices)):
-                    p_j = trajectory[k, state_slices[j]][:2]
+                    p_j = trajectory[k, state_slices[j]][position_indices]
                     dist = float(np.linalg.norm(p_i - p_j))
                     min_distance = min(min_distance, dist)
                     total_checked += 1
-                    if dist < d_safe - tolerance:
+                    if dist < d_collision - tolerance:
                         violation_steps += 1
-                        worst_violation = max(worst_violation, d_safe - dist)
-                    elif abs(dist - d_safe) <= tolerance:
+                        worst_violation = max(worst_violation, d_collision - dist)
+                    elif abs(dist - d_collision) <= tolerance:
                         near_boundary_steps += 1
 
     return (
         "Pairwise distance check: "
-        f"min_dist={min_distance:.4f}, d_safe={d_safe:.4f}, "
+        f"min_dist={min_distance:.4f}, d_collision={d_collision:.4f}, "
         f"violations={violation_steps}/{total_checked}, "
         f"near_boundary={near_boundary_steps}/{total_checked}, "
         f"max_shortfall={worst_violation:.4f}"
@@ -166,11 +174,9 @@ def normalize_seed_specs(
     return [int(seed) for seed in seeds]  # type: ignore[arg-type]
 
 
-def sample_initial_state(simulator: DynamicsProtocol, seed_spec: int | list[int]) -> np.ndarray:
+def _rng_for_seed_spec(simulator: DynamicsProtocol, seed_spec: int | list[int]) -> np.random.Generator:
     if isinstance(seed_spec, int):
-        rng = np.random.default_rng(seed_spec)
-        simulator.randomize_goal_for_reset(rng)
-        return simulator.random_initial_state(rng)
+        return np.random.default_rng(seed_spec)
 
     sub_simulators = simulator.simulators
     if len(seed_spec) != len(sub_simulators):
@@ -180,10 +186,12 @@ def sample_initial_state(simulator: DynamicsProtocol, seed_spec: int | list[int]
         )
 
     joint_seed_seq = np.random.SeedSequence([int(robot_seed) for robot_seed in seed_spec])
-    rng = np.random.default_rng(joint_seed_seq)
-    for sub_sim in sub_simulators:
-        sub_sim.randomize_goal_for_reset(rng)
+    return np.random.default_rng(joint_seed_seq)
 
+
+def sample_initial_state(simulator: DynamicsProtocol, seed_spec: int | list[int]) -> np.ndarray:
+    rng = _rng_for_seed_spec(simulator, seed_spec)
+    simulator.randomize_goal_for_reset(rng)
     return simulator.random_initial_state(rng)
 
 
@@ -222,7 +230,7 @@ def rollout_trajectory(
     planner_failed = False
 
     for _ in range(num_steps):
-        observation = simulator.observe(state, validate=False)
+        observation = simulator.observe(state)
         try:
             action = planner(observation)
         except PlannerSolveError as exc:
@@ -258,7 +266,7 @@ def rollout_trajectory(
         else:
             executed_action = action
 
-        state = simulator.step(state, executed_action, validate=False)
+        state = simulator.step(state, executed_action)
         trajectory.append(state.copy())
         if simulator.should_terminate_rollout(state):
             reached_goal = True
@@ -274,6 +282,8 @@ def run_plotting(
     seeds: list[int] | list[list[int]] | None,
     num_steps: int,
     initial_states: Any | None = None,
+    goal_states: Any | None = None,
+    tolerance_overrides: Mapping[str, float] | None = None,
     action_noise_std: float = 0.0,
     num_traj: int | None = None,
     use_config_start: bool = False,
@@ -282,6 +292,8 @@ def run_plotting(
     output_path: str | None = None,
     raw_config: Mapping[str, Any] | None = None,
 ) -> str:
+    if tolerance_overrides:
+        config = apply_config_overrides(config, tolerance_overrides)
     validated_config = validate_system_config(system_name=system, raw_config=config)
     action_noise_seed = default_action_noise_seed_for_config(validated_config)
 
@@ -290,6 +302,10 @@ def run_plotting(
     initial_state_specs = normalize_initial_state_specs(
         simulator=simulator,
         initial_states=initial_states,
+    )
+    goal_state_specs = normalize_goal_state_specs(
+        simulator=simulator,
+        goal_states=goal_states,
     )
     planner = PlannerFactory.create(
         planner_name=planner_name,
@@ -310,6 +326,7 @@ def run_plotting(
     goals_reached = 0
     failed_trajectories = 0
     trajectories: list[np.ndarray] = []
+    trajectory_goal_states: list[np.ndarray] = []
     per_robot_goals_reached: np.ndarray | None = None
 
     if num_traj is not None and num_traj <= 0:
@@ -335,9 +352,9 @@ def run_plotting(
     if num_traj is not None:
         planned_rollouts = int(num_traj)
     elif len(explicit_initial_states) > 0:
-        planned_rollouts = max(len(seed_specs), len(explicit_initial_states))
+        planned_rollouts = max(len(seed_specs), len(explicit_initial_states), len(goal_state_specs))
     else:
-        planned_rollouts = len(seed_specs)
+        planned_rollouts = max(len(seed_specs), len(goal_state_specs))
 
     if len(explicit_initial_states) > 0:
         print(
@@ -361,7 +378,6 @@ def run_plotting(
             else:
                 initial_state_plan.append((None, "rng_fallback", None))
     else:
-        planned_rollouts = len(seed_specs) if num_traj is None else int(num_traj)
         print(f"simulating {planned_rollouts} trajectories...")
         initial_state_plan = []
         for idx in range(planned_rollouts):
@@ -370,15 +386,40 @@ def run_plotting(
             else:
                 initial_state_plan.append((None, "rng_fallback", None))
 
+    baseline_goal = simulator.goal.copy()
     for rollout_idx, (initial_state_spec, initial_state_source, noise_seed_spec) in enumerate(initial_state_plan, start=1):
+        explicit_goal = rollout_idx - 1 < len(goal_state_specs)
+        if explicit_goal:
+            simulator.set_goal(goal_state_specs[rollout_idx - 1])
+        else:
+            # A prior rollout's explicit goal mutates the simulator; restore the
+            # config's baseline goal before any fallback sampling, since
+            # randomize_goal_for_reset() is a no-op under `randomize_goal: false`
+            # and would otherwise silently leak that leftover explicit goal into
+            # this rollout instead of the configured/default one.
+            simulator.set_goal(baseline_goal)
+
         if initial_state_source == "seeded":
-            initial_state = sample_initial_state(simulator=simulator, seed_spec=initial_state_spec)
+            if explicit_goal:
+                initial_state = simulator.random_initial_state(_rng_for_seed_spec(simulator, initial_state_spec))
+            else:
+                initial_state = sample_initial_state(simulator=simulator, seed_spec=initial_state_spec)
             seed_value = initial_state_spec
         elif initial_state_source in {"provided", "config_start"}:
+            if not explicit_goal:
+                goal_rng = (
+                    _rng_for_seed_spec(simulator, noise_seed_spec)
+                    if noise_seed_spec is not None
+                    else np.random.default_rng(rollout_idx)
+                )
+                simulator.randomize_goal_for_reset(goal_rng)
             initial_state = simulator.validate_state(initial_state_spec).copy()
             seed_value = None
         else:
-            initial_state = simulator.reset_random().copy()
+            if explicit_goal:
+                initial_state = simulator.reset_random_state_only().copy()
+            else:
+                initial_state = simulator.reset_random().copy()
             seed_value = None
 
         action_noise_rng = action_noise_rng_for_rollout(
@@ -404,6 +445,7 @@ def run_plotting(
             continue
 
         trajectories.append(trajectory)
+        trajectory_goal_states.append(simulator.goal_state.copy())
 
         if reached_goal:
             goals_reached += 1
@@ -438,6 +480,7 @@ def run_plotting(
         title=f"{planner_name.replace('_', ' ').title()} optimal control paths ({system_title})",
         show_heading=show_heading,
         marker="o",
+        goal_states=trajectory_goal_states,
     )
 
     video_path = None
@@ -449,13 +492,14 @@ def run_plotting(
             title=f"{planner_name.replace('_', ' ').title()} rollout ({system_title})",
             show_heading=show_heading,
             fps=video_fps,
+            goal_states=trajectory_goal_states,
         )
 
-    d_safe = float(validated_config.get("d_safe", 0.0))
+    d_collision = float(validated_config.get("d_collision", validated_config.get("d_safe", 0.0)))
     distance_report = pairwise_distance_report(
         simulator=simulator,
         trajectories=trajectories,
-        d_safe=d_safe,
+        d_collision=d_collision,
     )
 
     print(f"goal reached in {goals_reached}/{len(trajectories)} successful trajectories")
@@ -523,6 +567,28 @@ def main():
         ),
     )
     parser.add_argument(
+        "--goal-states",
+        type=str,
+        default=None,
+        help=(
+            "explicit goal state specs, independently indexed from --initial-states. "
+            "Examples: '[x, y, ...]' for one rollout, '[[...], [...]]' for multiple global goals, or "
+            "'[[[robot1...], [robot2...]], ...]' for multi-robot rollouts. "
+            "When exhausted, plotting falls back to simulator RNG sampling."
+        ),
+    )
+    parser.add_argument(
+        "--tolerance-overrides",
+        type=str,
+        default=None,
+        help=(
+            "per-run override for the expert config's convergence tolerances, as a Python-literal "
+            "dict matching the target system's tolerance keys, e.g. "
+            "'{\"pos_tol\": 0.2, \"theta_tol\": 1.1, \"vel_tol\": 0.05, \"omega_tol\": 0.05}' for unicycle2, "
+            "or '{\"error_tolerance\": 0.05}' for single_integrator/double_integrator/unicycle1."
+        ),
+    )
+    parser.add_argument(
         "--num-traj",
         type=int,
         default=None,
@@ -581,12 +647,23 @@ def main():
     raw_config = load_yaml_config(args.config)
     config = load_and_validate_system_config(system_name=args.system, config_path=args.config)
 
+    tolerance_overrides = None
+    if args.tolerance_overrides:
+        try:
+            tolerance_overrides = ast.literal_eval(args.tolerance_overrides)
+        except (SyntaxError, ValueError) as exc:
+            parser.error(f"Unable to parse --tolerance-overrides: {exc}")
+        if not isinstance(tolerance_overrides, dict):
+            parser.error("--tolerance-overrides must evaluate to a dict.")
+
     run_plotting(
         system=args.system,
         planner_name=args.planner,
         config=config,
         seeds=parse_seed_argument(args.seeds),
         initial_states=parse_initial_states_argument(args.initial_states),
+        goal_states=parse_goal_states_argument(args.goal_states),
+        tolerance_overrides=tolerance_overrides,
         num_steps=args.num_steps,
         action_noise_std=args.action_noise_std,
         num_traj=args.num_traj,

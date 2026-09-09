@@ -23,10 +23,9 @@ class Unicycle1(DynamicsSimulator):
         self.max_action = config.get("max_v", 2.0)
         self.nx = 3
         self.nu = 2
-        self.obs_dim = 6
+        self.obs_dim = 4
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
-        self.current_action = np.zeros(self.nu, dtype=float)
-        
+
         environment = config.get("environment", {})
         self.environment_min = np.asarray(environment.get("min", [-5.0, -5.0]), dtype=float)
         self.environment_max = np.asarray(environment.get("max", [5.0, 5.0]), dtype=float)
@@ -53,16 +52,10 @@ class Unicycle1(DynamicsSimulator):
     def angular_state_indices(self) -> tuple[int, ...]:
         return (2,)
 
-    def reset(self, initial_state: np.ndarray) -> np.ndarray:
-        state = super().reset(initial_state)
-        self.current_action = np.zeros(self.nu, dtype=float)
-        return state
-
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
         clipped_action = np.clip(action_array, -self.max_action, self.max_action)
-        self.current_action = clipped_action.copy()
 
         x, y, theta = state_array
         v, omega = clipped_action
@@ -70,6 +63,12 @@ class Unicycle1(DynamicsSimulator):
         next_y = y + v * np.sin(theta) * self.dt
         next_theta = np.arctan2(np.sin(theta + omega * self.dt), np.cos(theta + omega * self.dt))
         return np.array([next_x, next_y, next_theta], dtype=float)
+
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
+        action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
+        clipped_action = np.clip(action_array, -self.max_action, self.max_action)
+        return self.predict_next_state(state_array, clipped_action)
 
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray:
         """
@@ -91,8 +90,6 @@ class Unicycle1(DynamicsSimulator):
             ego_pos[1],
             np.sin(rel_theta),
             np.cos(rel_theta),
-            self.current_action[0],
-            self.current_action[1],
         ], dtype=float)
         return self.validate_observation(obs) if validate else obs
 
@@ -121,22 +118,13 @@ class Unicycle1(DynamicsSimulator):
             "cos_rel_theta",
         ]
 
-        proprioception_names = [
-            "v",
-            "omega",
-        ]
-
         return {
             "observation.environment_state": {
                 "dtype": "float32",
                 "shape": (4,),
                 "names": exteroception_names,
             },
-            "observation.state": {
-                "dtype": "float32",
-                "shape": (2,),
-                "names": proprioception_names,
-            },
+            "observation.state": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "action": {
@@ -194,7 +182,7 @@ class Unicycle1(DynamicsSimulator):
         action = self.validate_action(action)
         return [{
             "observation.environment_state": np.asarray(obs[:4], dtype=np.float32),
-            "observation.state": np.asarray(obs[4:6], dtype=np.float32),
+            "observation.state": np.empty(0, dtype=np.float32),
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
             "action": np.asarray(action, dtype=np.float32),

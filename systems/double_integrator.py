@@ -35,7 +35,7 @@ class DoubleIntegrator(DynamicsSimulator):
             )
         )
 
-    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+    def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         action_array = self.validate_action(action) if validate else np.asarray(action, dtype=float)
         clipped_action = np.clip(action_array, -self.max_action, self.max_action)
@@ -45,6 +45,9 @@ class DoubleIntegrator(DynamicsSimulator):
         next_pos = position + velocity * self.dt + 0.5 * clipped_action * (self.dt**2)
         next_vel = velocity + clipped_action * self.dt
         return np.concatenate([next_pos, next_vel])
+
+    def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
+        return self.predict_next_state(state, action, validate=validate)
 
     def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
