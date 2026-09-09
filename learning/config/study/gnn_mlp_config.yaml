@@ -1,6 +1,10 @@
 # Encoder-scaling study: GNN baseline.
-# Shared across all fleet sizes; identical to the deepset/transformer study configs
-# except for the neighbour encoder. Context width is 128 in all three.
+# [template-only] run_study.sh does not train from this file: it trains from the
+# [template-only] per-fleet-size configs that generate_study_policy_configs.py derives
+# [template-only] from it, which is also where the 'training' section (tolerances and
+# [template-only] the ring initial_states/goal_states) is added.
+# Identical to the deepset/transformer study configs except for the neighbour encoder.
+# Context width is 128 in all three.
 #
 # Note: GNNEncoder aggregates messages with a sum (index_add_), so its context
 # magnitude grows with the visible-neighbour count. This is a known asymmetry
@@ -8,6 +12,7 @@
 # extrapolating to larger fleets.
 model:
   policy_type: mlp
+  observation_horizon: 2        # number of past observation steps to consider
   prediction_horizon: 1        # single-step: a deterministic MSE-trained MLP regresses to the
                                # conditional mean, so multi-step chunks average over distinct
                                # avoidance manoeuvres. Use the flow policy for horizon > 1.

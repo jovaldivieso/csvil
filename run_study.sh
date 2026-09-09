@@ -9,6 +9,16 @@
 # Pass fleet sizes to restrict it -- `./run_study.sh train 8` trains the three
 # encoders on 8 robots only. Restrict the encoders too with ENCODERS="deepset gnn".
 #
+# There is one policy config per (encoder, fleet size) rather than per encoder,
+# because each one pins part of every DAgger round to hand-written antipodal-ring
+# initial states -- the training-time counterpart of the `circle` scenario below --
+# and those coordinates are per-robot. The 12 configs are generated from the three
+# encoder templates by
+#
+#   python learning/config/study/generate_study_policy_configs.py
+#
+# so encoder changes go in the templates and layout changes in that script.
+#
 # Evaluation is one code path over a table of scenarios; a scenario is just a set
 # of configs plus its rollout defaults, so adding one is a row in the SCENARIO_*
 # tables below.
@@ -33,7 +43,11 @@ TRAIN_FLEET_SIZES=(8 6 4 2)
 # Trajectories per DAgger round, inversely proportional to the fleet size: each
 # episode emits one LeRobot episode *per robot*, so this holds frames-per-round
 # (and therefore optimizer steps per round) constant at ~20k across fleet sizes.
-declare -A TRAJECTORIES=([2]=50 [4]=25 [6]=17 [8]=13)
+#
+# Mirrored by TRAJECTORIES_PER_ROUND in learning/config/study/generate_study_policy_configs.py,
+# which sizes each policy config's ring-layout list as a fixed share of the round.
+# Change one and re-run that script.
+declare -A TRAJECTORIES=([2]=150 [4]=100 [6]=75 [8]=50)
 
 EVAL_FLEET_SIZES=(02 04 06 08 16 32)
 
@@ -104,13 +118,23 @@ train_one() {
   local encoder="$1" fleet_size="$2"
   local padded; padded="$(printf %02d "$fleet_size")"
   local name="${encoder}_n${padded}"
+  local policy_config="learning/config/study/${encoder}_mlp_n${padded}_config.yaml"
+
+  # The per-fleet configs are generated, so a missing one means the generator has
+  # not been run (or not for this fleet size) -- say so here rather than letting
+  # train_dagger.py fail on the path a few seconds into the container.
+  if [[ ! -f "$policy_config" ]]; then
+    echo "[skip] train ${name}: no policy config at ${policy_config};" \
+         "run python learning/config/study/generate_study_policy_configs.py"
+    return
+  fi
 
   docker_run python learning/train_dagger.py \
     --experiment-name "$name" \
     --system multi_robot \
     --expert-config "test/config/study/unicycle2_fleet_${padded}.yaml" \
-    --policy-config "learning/config/study/${encoder}_mlp_config.yaml" \
-    --dagger-iterations 5 \
+    --policy-config "$policy_config" \
+    --dagger-iterations 3 \
     --trajectories-per-iteration "${TRAJECTORIES[$fleet_size]}" \
     --steps-per-trajectory 200 \
     --target-epochs-per-round 10 \
@@ -118,8 +142,7 @@ train_one() {
     --expert-mix-beta-start 0.5 \
     --expert-mix-beta-decay-rate 0.25 \
     --expert-mix-decay-after-success-rate 0.0 \
-    --eval-episodes 50 \
-    --seed 99 \
+    --eval-episodes 20 \
     > "logs/${name}.log" 2>&1
   # Capture before anything else runs: a $(...) ahead of $? would reset it.
   local status=$?
