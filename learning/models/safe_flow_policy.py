@@ -492,7 +492,20 @@ class SafeFlowMPCPolicy(ActionPolicy):
             # concurrently across the per-robot projector pool rather than
             # solved one at a time.
             if self._pool is not None:
-                results = list(self._pool.map(_project_one, range(batch_size)))
+                # Not self._pool.map(...): map()'s iterator raises as soon as
+                # it reaches a failed future, which can be before later
+                # futures have even started -- list(...) would then abort
+                # and leave those still running in the background while the
+                # caller handles the exception (e.g. retries with a fresh
+                # select_action() call), racing a new solve against a
+                # stale one on the same mutable per-robot Opti instance.
+                # Submitting everything first and waiting out every
+                # future's .exception() before any .result() guarantees the
+                # whole batch has finished before an exception can propagate.
+                futures = [self._pool.submit(_project_one, i) for i in range(batch_size)]
+                for future in futures:
+                    future.exception()
+                results = [future.result() for future in futures]
             else:
                 results = [_project_one(i) for i in range(batch_size)]
             for i, u_safe in enumerate(results):

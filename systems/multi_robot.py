@@ -186,6 +186,13 @@ class MultiRobotSimulator(DynamicsSimulator):
         return all(bool(sub_sim.is_euclidean) for sub_sim in self.simulators)
 
     @property
+    def randomize_goal(self) -> bool:
+        # True whenever calling randomize_goal_for_reset() would actually
+        # change something -- i.e. at least one fleet member wants it, since
+        # that method already no-ops per-robot for the rest (see there).
+        return any(bool(sub_sim.randomize_goal) for sub_sim in self.simulators)
+
+    @property
     def angular_state_indices(self) -> tuple[int, ...]:
         global_indices: list[int] = []
         for sub_sim, state_slice in zip(self.simulators, self.robot_state_slices):

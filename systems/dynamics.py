@@ -60,6 +60,7 @@ class DynamicsProtocol(Protocol):
     obs_dim: int
     max_action: float
     is_euclidean: bool
+    randomize_goal: bool
     angular_state_indices: tuple[int, ...]
     position_indices: tuple[int, ...]
     velocity_state_indices: tuple[int, ...]

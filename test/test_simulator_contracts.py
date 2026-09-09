@@ -285,6 +285,18 @@ class SimulatorContractTests(unittest.TestCase):
                 f"{name}: velocity_state_indices mismatch",
             )
 
+    def test_randomize_goal_contract(self) -> None:
+        # MultiRobotSimulator.randomize_goal_for_reset() reads this attribute
+        # directly off each fleet member (systems/multi_robot.py) even though
+        # it's runtime-configurable, not a fixed per-system constant like the
+        # index tuples above -- so this only checks every simulator actually
+        # exposes it, not any particular value.
+        simulators = _build_simulators()
+        for name, simulator in simulators.items():
+            self.assertIsInstance(
+                simulator.randomize_goal, bool, f"{name}: randomize_goal must be a bool"
+            )
+
     def test_multi_robot_casadi_dynamics_maps_homogeneous_fleet(self) -> None:
         simulator = DynamicsFactory.create(
             system_name="multi_robot",
