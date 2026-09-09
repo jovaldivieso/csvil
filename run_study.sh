@@ -141,7 +141,7 @@ train_one() {
     --action-noise-std 0.03 \
     --expert-mix-beta-start 0.5 \
     --expert-mix-beta-decay-rate 0.25 \
-    --expert-mix-decay-after-success-rate 0.0 \
+    --expert-mix-decay-after-eval-success 0.0 \
     --eval-episodes 20 \
     > "logs/${name}.log" 2>&1
   # Capture before anything else runs: a $(...) ahead of $? would reset it.
