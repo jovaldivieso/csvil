@@ -1,0 +1,12 @@
+ Container csvil-csvil-run-2228edabfbec Creating 
+ Container csvil-csvil-run-2228edabfbec Created 
+checkpoint: outputs/train_dagger_multi_robot/deepset_n04/mlp_dagger_checkpoint.pt
+encoder: deepset | policy: mlp | trained on 4 robots | device: cpu
+  eval_fleet= 2  success=0.000  collision=1.000  timeout=0.000  mean_steps=35.0  min_pair_dist=1.100  (0.04s)
+  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=33.0  min_pair_dist=1.061  (0.06s)
+  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=29.0  min_pair_dist=1.150  (0.08s)
+  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=25.0  min_pair_dist=1.186  (0.09s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=26.0  min_pair_dist=1.195  (0.22s)
+  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=42.0  min_pair_dist=1.183  (1.14s)
+
+wrote outputs/study/circle/deepset_n04.csv

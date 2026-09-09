@@ -62,7 +62,10 @@ docker compose run --rm csvil hf auth login
 ```text
 csvil/
 ├── README.md                  # End-to-end usage and experiment recipes
+├── run_study.sh               # Encoder-scaling study driver (train / eval / circle)
 ├── compose.yaml               # Docker services for csvil and optional db-lacam
+├── docs/
+│   └── encoder_scaling_study.md  # Encoder-scaling study: training, evaluation, plots
 ├── requirements.txt           # Python dependencies installed in the csvil image
 ├── docker/
 │   ├── Dockerfile             # Main csvil runtime image
@@ -177,6 +180,11 @@ Canonical multi-robot `unicycle2` + MLP DAgger example:
 - `learning/config/multi_unicycle2_casadi_mlp_config.yaml`
 
 ## Pipeline Tutorial
+
+For the multi-encoder comparison (deepset / transformer / GNN across fleet sizes,
+trained on a remote machine and evaluated on held-out fleet sizes plus an
+antipodal-circle scenario), see
+[docs/encoder_scaling_study.md](docs/encoder_scaling_study.md).
 
 The primary workflow is decentralized DAgger for a homogeneous multi-robot
 `unicycle2` fleet. Each robot runs the shared policy from its ego observation

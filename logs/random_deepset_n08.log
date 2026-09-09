@@ -1,0 +1,12 @@
+ Container csvil-csvil-run-8782557d3ae5 Creating 
+ Container csvil-csvil-run-8782557d3ae5 Created 
+checkpoint: outputs/train_dagger_multi_robot/deepset_n08/mlp_dagger_checkpoint.pt
+encoder: deepset | policy: mlp | trained on 8 robots | device: cpu
+  eval_fleet= 2  success=0.920  collision=0.080  timeout=0.000  mean_steps=122.3  min_pair_dist=2.817  (10.09s)
+  eval_fleet= 4  success=0.760  collision=0.240  timeout=0.000  mean_steps=110.9  min_pair_dist=1.862  (27.07s)
+  eval_fleet= 6  success=0.640  collision=0.360  timeout=0.000  mean_steps=99.3  min_pair_dist=1.489  (31.51s)
+  eval_fleet= 8  success=0.560  collision=0.440  timeout=0.000  mean_steps=95.9  min_pair_dist=1.384  (43.38s)
+  eval_fleet=16  success=0.240  collision=0.760  timeout=0.000  mean_steps=51.0  min_pair_dist=1.216  (65.17s)
+  eval_fleet=32  success=0.020  collision=0.980  timeout=0.000  mean_steps=16.3  min_pair_dist=1.177  (86.36s)
+
+wrote outputs/study/deepset_n08.csv

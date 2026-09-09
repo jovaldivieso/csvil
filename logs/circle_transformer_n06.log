@@ -1,0 +1,12 @@
+ Container csvil-csvil-run-afcb8553c1d7 Creating 
+ Container csvil-csvil-run-afcb8553c1d7 Created 
+checkpoint: outputs/train_dagger_multi_robot/transformer_n06/mlp_dagger_checkpoint.pt
+encoder: transformer | policy: mlp | trained on 6 robots | device: cpu
+  eval_fleet= 2  success=0.000  collision=1.000  timeout=0.000  mean_steps=35.0  min_pair_dist=1.116  (0.06s)
+  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=33.0  min_pair_dist=1.065  (0.07s)
+  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=29.0  min_pair_dist=1.150  (0.08s)
+  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=25.0  min_pair_dist=1.186  (0.11s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=26.0  min_pair_dist=1.197  (0.27s)
+  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=42.0  min_pair_dist=1.191  (1.57s)
+
+wrote outputs/study/circle/transformer_n06.csv

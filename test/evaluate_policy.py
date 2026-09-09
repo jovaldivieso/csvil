@@ -36,6 +36,9 @@ from systems.dynamics import DynamicsProtocol
 
 # Import both policy types
 from utils import plot_xy_trajectories, save_xy_rollout_video
+# Reuse the sibling script's reader so both entrypoints agree on where a
+# config-defined start lives (robot entry top level or nested under 'config').
+from plot_expert_trajectories import _extract_config_start_state
 
 
 def default_evaluation_output_path(system: str, policy_type: str) -> str:
@@ -320,6 +323,7 @@ def run_evaluation(
     initial_states: Any | None = None,
     action_noise_std: float = 0.0,
     output_path: str | None = None,
+    use_config_start: bool = False,
 ):
     validated_config = validate_system_config(system_name=system, raw_config=config)
     action_noise_seed = default_action_noise_seed_for_config(validated_config)
@@ -330,6 +334,14 @@ def run_evaluation(
         simulator=simulator,
         initial_states=initial_states,
     )
+
+    if use_config_start:
+        # Deterministic scenario: one rollout from the configured formation. Both
+        # lists are trimmed to one, otherwise the extra seeds would append further
+        # randomly-sampled rollouts after the configured one.
+        initial_state_specs = [_extract_config_start_state(system, validated_config)]
+        seed_specs = seed_specs[:1]
+        print("using config-defined start state (single deterministic rollout)")
 
     if not os.path.exists(model_dir):
         print(f"assuming '{model_dir}' is a Hugging Face Hub ID")
@@ -787,6 +799,15 @@ def main():
         default=None,
         help="path to generated PDF plot",
     )
+    parser.add_argument(
+        "--use-config-start",
+        action="store_true",
+        help=(
+            "start from the per-robot 'start' in the config instead of sampling, "
+            "for deterministic scenarios such as the antipodal-circle swap; "
+            "produces exactly one rollout"
+        ),
+    )
 
     args = parser.parse_args()
     config = load_and_validate_system_config(system_name=args.system, config_path=args.config)
@@ -801,6 +822,7 @@ def main():
         initial_states=parse_initial_states_argument(args.initial_states),
         action_noise_std=args.action_noise_std,
         output_path=args.output_path,
+        use_config_start=args.use_config_start,
     )
 
 

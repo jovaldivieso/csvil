@@ -1,0 +1,13 @@
+time="2026-09-08T16:22:00+02:00" level=warning msg="Found orphan containers ([csvil-csvil-run-bcf7f5f1521a]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container csvil-csvil-run-a8619e62eb99 Creating 
+ Container csvil-csvil-run-a8619e62eb99 Created 
+checkpoint: outputs/train_dagger_multi_robot/gnn_n04/mlp_dagger_checkpoint.pt
+encoder: gnn | policy: mlp | trained on 4 robots | device: cpu
+  eval_fleet= 2  success=0.000  collision=1.000  timeout=0.000  mean_steps=65.0  min_pair_dist=1.199  (0.09s)
+  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=61.0  min_pair_dist=1.131  (0.11s)
+  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=99.0  min_pair_dist=1.163  (0.55s)
+  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=46.0  min_pair_dist=1.194  (0.16s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=76.0  min_pair_dist=1.167  (0.9s)
+  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=99.0  min_pair_dist=1.195  (3.29s)
+
+wrote outputs/study/circle/gnn_n04.csv

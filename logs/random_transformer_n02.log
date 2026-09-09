@@ -1,0 +1,12 @@
+ Container csvil-csvil-run-2376686bba36 Creating 
+ Container csvil-csvil-run-2376686bba36 Created 
+checkpoint: outputs/train_dagger_multi_robot/transformer_n02/mlp_dagger_checkpoint.pt
+encoder: transformer | policy: mlp | trained on 2 robots | device: cpu
+  eval_fleet= 2  success=0.900  collision=0.100  timeout=0.000  mean_steps=108.6  min_pair_dist=2.821  (13.22s)
+  eval_fleet= 4  success=0.800  collision=0.200  timeout=0.000  mean_steps=105.5  min_pair_dist=1.877  (34.13s)
+  eval_fleet= 6  success=0.680  collision=0.320  timeout=0.000  mean_steps=95.4  min_pair_dist=1.507  (37.98s)
+  eval_fleet= 8  success=0.620  collision=0.380  timeout=0.000  mean_steps=90.3  min_pair_dist=1.389  (56.37s)
+  eval_fleet=16  success=0.180  collision=0.820  timeout=0.000  mean_steps=39.4  min_pair_dist=1.209  (57.39s)
+  eval_fleet=32  success=0.020  collision=0.980  timeout=0.000  mean_steps=15.4  min_pair_dist=1.177  (106.04s)
+
+wrote outputs/study/transformer_n02.csv

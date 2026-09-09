@@ -1,0 +1,12 @@
+ Container csvil-csvil-run-44392bd57950 Creating 
+ Container csvil-csvil-run-44392bd57950 Created 
+checkpoint: outputs/train_dagger_multi_robot/transformer_n04/mlp_dagger_checkpoint.pt
+encoder: transformer | policy: mlp | trained on 4 robots | device: cpu
+  eval_fleet= 2  success=0.920  collision=0.080  timeout=0.000  mean_steps=117.6  min_pair_dist=2.835  (13.68s)
+  eval_fleet= 4  success=0.800  collision=0.200  timeout=0.000  mean_steps=108.8  min_pair_dist=1.883  (36.82s)
+  eval_fleet= 6  success=0.740  collision=0.260  timeout=0.000  mean_steps=109.9  min_pair_dist=1.523  (47.23s)
+  eval_fleet= 8  success=0.540  collision=0.460  timeout=0.000  mean_steps=86.4  min_pair_dist=1.390  (54.54s)
+  eval_fleet=16  success=0.240  collision=0.760  timeout=0.000  mean_steps=50.8  min_pair_dist=1.215  (78.08s)
+  eval_fleet=32  success=0.060  collision=0.940  timeout=0.000  mean_steps=22.7  min_pair_dist=1.179  (119.45s)
+
+wrote outputs/study/transformer_n04.csv

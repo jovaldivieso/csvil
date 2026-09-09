@@ -1,0 +1,12 @@
+ Container csvil-csvil-run-ba3695dca66e Creating 
+ Container csvil-csvil-run-ba3695dca66e Created 
+checkpoint: outputs/train_dagger_multi_robot/deepset_n04/mlp_dagger_checkpoint.pt
+encoder: deepset | policy: mlp | trained on 4 robots | device: cpu
+  eval_fleet= 2  success=0.940  collision=0.060  timeout=0.000  mean_steps=121.6  min_pair_dist=2.837  (10.38s)
+  eval_fleet= 4  success=0.820  collision=0.180  timeout=0.000  mean_steps=116.3  min_pair_dist=1.903  (27.4s)
+  eval_fleet= 6  success=0.680  collision=0.320  timeout=0.000  mean_steps=107.8  min_pair_dist=1.519  (33.23s)
+  eval_fleet= 8  success=0.580  collision=0.420  timeout=0.000  mean_steps=95.9  min_pair_dist=1.380  (45.49s)
+  eval_fleet=16  success=0.280  collision=0.720  timeout=0.000  mean_steps=57.1  min_pair_dist=1.223  (71.9s)
+  eval_fleet=32  success=0.040  collision=0.960  timeout=0.000  mean_steps=19.7  min_pair_dist=1.179  (101.04s)
+
+wrote outputs/study/deepset_n04.csv

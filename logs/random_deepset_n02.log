@@ -1,0 +1,12 @@
+ Container csvil-csvil-run-cf9f027dab71 Creating 
+ Container csvil-csvil-run-cf9f027dab71 Created 
+checkpoint: outputs/train_dagger_multi_robot/deepset_n02/mlp_dagger_checkpoint.pt
+encoder: deepset | policy: mlp | trained on 2 robots | device: cpu
+  eval_fleet= 2  success=0.920  collision=0.080  timeout=0.000  mean_steps=112.7  min_pair_dist=2.831  (9.52s)
+  eval_fleet= 4  success=0.800  collision=0.200  timeout=0.000  mean_steps=106.9  min_pair_dist=1.894  (27.41s)
+  eval_fleet= 6  success=0.720  collision=0.280  timeout=0.000  mean_steps=99.8  min_pair_dist=1.517  (32.19s)
+  eval_fleet= 8  success=0.580  collision=0.420  timeout=0.000  mean_steps=91.1  min_pair_dist=1.386  (45.11s)
+  eval_fleet=16  success=0.180  collision=0.820  timeout=0.000  mean_steps=40.9  min_pair_dist=1.207  (55.25s)
+  eval_fleet=32  success=0.020  collision=0.980  timeout=0.000  mean_steps=15.7  min_pair_dist=1.173  (84.27s)
+
+wrote outputs/study/deepset_n02.csv
