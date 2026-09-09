@@ -304,6 +304,93 @@ class ProjectorFailClosedFallbackTests(unittest.TestCase):
             with self.assertRaises(PlannerSolveError):
                 self.projector.project(sixth_obs, self.u_ref)
 
+    def test_repeated_same_tick_calls_do_not_each_consume_the_fallback_budget(self) -> None:
+        # select_action() calls project() once per flow/Euler denoising step
+        # -- several times per real control tick, all at the *same* x0 (only
+        # u_ref changes as the flow network refines its guess). None of
+        # those represent additional elapsed time or drift, so repeating
+        # far more of them than max_consecutive_fallbacks allows must not
+        # raise, as long as it's genuinely the same tick throughout.
+        self.assertEqual(self.projector.max_consecutive_fallbacks, 5)
+        self.projector.project(self.obs0, self.u_ref)
+        self.projector.opti.solve = lambda: (_ for _ in ()).throw(RuntimeError("forced failure"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for _ in range(20):  # far more than max_consecutive_fallbacks (5)
+                self.projector.project(self.obs0, self.u_ref)
+        self.assertEqual(self.projector._consecutive_fallback_count, 0)
+
+
+class NeighborActiveGateTests(unittest.TestCase):
+    """A masked-out neighbor slot was represented purely by moving
+    neighbor_trajs to a numerically-far-away sentinel (1e6, 1e6), so the
+    hard/soft collision constraints stayed structurally present in the NLP
+    and were only satisfied because that position happens to be far outside
+    any realistic workspace. A misconfigured (or, in principle, a
+    fixed-state/workspace value that happened to coincide with it) scenario
+    could make an absent neighbor register as a real, unavoidable obstacle.
+    neighbor_active now gates the constraint threshold itself (0 -> squared
+    distance >= 0, trivially true for *any* position) so masking no longer
+    depends on where neighbor_trajs happens to point.
+    """
+
+    def setUp(self) -> None:
+        self.sim = DynamicsFactory.create(
+            system_name="unicycle2",
+            config={"dt": DT, "max_accel": 2.0, "max_omega": 2.0, "max_speed": 2.0,
+                    "goal": [2.0, 0.0, 0.0], "randomize_goal": False},
+        )
+        # horizon=22 clears the hard terminal-velocity feasibility check
+        # (2.0 / (2.0 * DT) = 20 steps needed).
+        self.projector = CasadiTrajectoryProjector(
+            self.sim, {"d_safe": 0.5, "d_collision": 0.3}, neighbor_slots=1, horizon=22, robot_index=0,
+        )
+        self.state0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+        self.obs0 = self.sim.observe(self.state0)
+        # Symmetric bang-bang reference (accelerate then decelerate back to
+        # zero, exactly tracking the hard terminal-velocity==0 constraint's
+        # own timing over 22 steps) -- unlike u_ref=0, this actually gives
+        # the optimizer somewhere to go, so the phantom neighbor below can
+        # meaningfully be "in the way" or not.
+        self.u_ref = np.zeros((2, 22))
+        self.u_ref[0, :11] = 2.0
+        self.u_ref[0, 11:] = -2.0
+        # A "neighbor" sitting almost exactly on that unconstrained path
+        # (probed empirically: x ~= 0.42 at k=14) for the whole horizon --
+        # well within d_collision of it unless actively avoided.
+        self.neighbor_trajs = np.tile(np.array([[0.42], [0.0]]), (1, 1, 23))
+
+    def _min_distance_to_phantom_neighbor(self, u_safe: np.ndarray) -> float:
+        state = self.state0.copy()
+        positions = [state[:2]]
+        for k in range(u_safe.shape[1]):
+            state = self.sim.predict_next_state(state, u_safe[:, k], validate=False)
+            positions.append(state[:2].copy())
+        positions = np.array(positions)
+        return float(np.min(np.linalg.norm(positions - np.array([0.42, 0.0]), axis=1)))
+
+    def test_masked_neighbor_is_ignored_regardless_of_its_position(self) -> None:
+        u_safe = self.projector.project(
+            self.obs0, self.u_ref, self.neighbor_trajs, neighbor_active=np.array([0.0]),
+        )
+        # Free to pass right by (0.42, 0) since the slot is inactive --
+        # tracks u_ref's own unconstrained path through that point.
+        self.assertLess(self._min_distance_to_phantom_neighbor(u_safe), 0.3)
+
+    def test_active_neighbor_at_the_same_position_is_avoided(self) -> None:
+        self.projector.reset()
+        u_safe = self.projector.project(
+            self.obs0, self.u_ref, self.neighbor_trajs, neighbor_active=np.array([1.0]),
+        )
+        self.assertGreaterEqual(self._min_distance_to_phantom_neighbor(u_safe), 0.3 - 1e-6)
+
+    def test_omitting_neighbor_active_defaults_to_all_active(self) -> None:
+        # Backward compatibility: a caller that doesn't pass neighbor_active
+        # (the pre-existing signature) must still get full constraint
+        # enforcement, not silently-disabled ones.
+        u_safe = self.projector.project(self.obs0, self.u_ref, self.neighbor_trajs)
+        self.assertGreaterEqual(self._min_distance_to_phantom_neighbor(u_safe), 0.3 - 1e-6)
+
 
 class TerminalConditionSupportTests(unittest.TestCase):
     """First-order systems need no terminal constraint at all: Assumption 1
@@ -606,7 +693,7 @@ class VelocityHavingNeighborVelocityUnderAccelerationTests(unittest.TestCase):
         ego_obs_np = policy._extract_ego_observation(observation_dict)
         x0_batch = np.stack([policy.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(2)])
 
-        neighbor_trajs = policy._build_neighbor_trajectories(observation_dict, x0_batch)
+        neighbor_trajs, _ = policy._build_neighbor_trajectories(observation_dict, x0_batch)
 
         # Robot 0 (the accelerating one) sees a genuinely stationary
         # neighbor -- its extrapolated trajectory must stay at (3, 0)
@@ -690,7 +777,7 @@ class HeterogeneousFleetNeighborForwardSimulationTests(unittest.TestCase):
         ego_obs_np = policy._extract_ego_observation(observation_dict)
         x0_batch = np.stack([policy.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(2)])
 
-        neighbor_trajs = policy._build_neighbor_trajectories(observation_dict, x0_batch)
+        neighbor_trajs, _ = policy._build_neighbor_trajectories(observation_dict, x0_batch)
 
         # Robot 0's forecast of robot 1 must keep advancing at v=8.0 (its
         # own max_speed) for the whole horizon -- forward-simulating with

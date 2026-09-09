@@ -184,8 +184,16 @@ class SafeFlowMPCPolicy(ActionPolicy):
         self,
         observation_dict: Mapping[str, torch.Tensor],
         x0_batch: np.ndarray,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Extrapolate each neighbor's absolute position over the horizon.
+
+        Returns ``(neighbor_trajs, neighbor_active)``: ``neighbor_active``,
+        shape ``(batch_size, neighbor_slots)``, is this tick's visibility
+        mask (1 = a real, currently-visible neighbor; 0 = masked-out/absent)
+        -- CasadiTrajectoryProjector gates its collision constraints on this
+        directly rather than relying solely on a masked slot's
+        ``neighbor_trajs`` entry being a numerically-far-away sentinel
+        position.
 
         The neighbor observation stores each neighbor's relative
         ``[rel_x, rel_y, sin(rel_theta), cos(rel_theta)]`` in *this robot's
@@ -247,7 +255,7 @@ class SafeFlowMPCPolicy(ActionPolicy):
             (batch_size, self.neighbor_slots, 2, horizon + 1), _NO_NEIGHBOR_SENTINEL, dtype=float
         )
         if self.neighbor_slots == 0:
-            return neighbor_trajs
+            return neighbor_trajs, np.zeros((batch_size, 0), dtype=float)
 
         dt = float(self.local_sims[0].dt)
         pos_idx = tuple(getattr(self.local_sims[0], "position_indices", (0, 1)))
@@ -424,7 +432,7 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 neighbor_trajs[b, j, 0, :] = abs_now[0] + abs_vel[0] * steps
                 neighbor_trajs[b, j, 1, :] = abs_now[1] + abs_vel[1] * steps
 
-        return neighbor_trajs
+        return neighbor_trajs, mask_now
 
     @torch.no_grad()
     def select_action(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
@@ -455,9 +463,12 @@ class SafeFlowMPCPolicy(ActionPolicy):
         # absolute state from a goal-relative observation), so this must use
         # each robot's own sim object, not a shared one.
         x0_batch = np.stack([self.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(batch_size)])
-        neighbor_trajs_batch = (
-            self._build_neighbor_trajectories(observation_dict, x0_batch) if self.neighbor_slots > 0 else None
-        )
+        neighbor_trajs_batch = None
+        neighbor_active_batch = None
+        if self.neighbor_slots > 0:
+            neighbor_trajs_batch, neighbor_active_batch = self._build_neighbor_trajectories(
+                observation_dict, x0_batch
+            )
 
         dt = 1.0 / float(inner.num_inference_steps)
         for step in range(inner.num_inference_steps):
@@ -473,7 +484,8 @@ class SafeFlowMPCPolicy(ActionPolicy):
             def _project_one(i: int) -> np.ndarray:
                 u_ref = x_np[i].T  # (action_dim, horizon) -> (nu, N) for CasADi
                 neighbor_trajs = neighbor_trajs_batch[i] if neighbor_trajs_batch is not None else None
-                return self.projectors[i].project(ego_obs_np[i], u_ref, neighbor_trajs)
+                neighbor_active = neighbor_active_batch[i] if neighbor_active_batch is not None else None
+                return self.projectors[i].project(ego_obs_np[i], u_ref, neighbor_trajs, neighbor_active)
 
             # Each robot's projection is fully independent (decentralized;
             # neighbors enter only as parameters), so they're dispatched

@@ -62,6 +62,7 @@ class DynamicsProtocol(Protocol):
     is_euclidean: bool
     angular_state_indices: tuple[int, ...]
     position_indices: tuple[int, ...]
+    velocity_state_indices: tuple[int, ...]
     num_robots: int
     simulators: list["DynamicsProtocol"]
     robot_state_slices: list[slice]
@@ -230,6 +231,17 @@ class DynamicsSimulator(ABC):
         Empty for kinematic/first-order systems with no velocity state (e.g.
         single_integrator, unicycle1) -- their own instantaneous motion
         between two observed frames can't be recovered from state alone.
+
+        A velocity-having system (subclassing DynamicsSimulator or
+        implementing DynamicsProtocol structurally) MUST override this to
+        return its actual velocity indices: CasadiTrajectoryProjector uses
+        an empty result here as license to skip the hard terminal-rest
+        constraint entirely (correct only for systems that genuinely have
+        no velocity state -- see its own construction-time comment), and
+        SafeFlowMPCPolicy uses it to decide whether a multi-robot fleet's
+        neighbor velocities can be estimated at all. A velocity-having
+        system that silently inherits this default would be treated as
+        first-order by both, not merely imprecisely -- unsafely.
         """
         return ()
 

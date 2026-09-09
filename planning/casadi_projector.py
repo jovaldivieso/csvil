@@ -147,14 +147,17 @@ class CasadiTrajectoryProjector:
         # actually at rest -- it's coasting at that small residual velocity,
         # since it's re-simulated under zero action (see project()'s padding
         # comment). Re-validation re-checks bounds/d_collision fresh every
-        # tick against the *current* state and neighbor forecast, so any
-        # single reuse is genuinely safe *through its own checked horizon*
-        # -- but an unbroken run of them would let that residual drift keep
-        # accumulating tick after tick, past what any single tick's own
-        # check covers. Capping how many can be used consecutively (reset by
-        # any genuine solve) bounds the worst case to a small, fixed amount
-        # of drift instead of letting it grow for as long as real solves
-        # keep failing.
+        # *control tick* against the *current* state and neighbor forecast,
+        # so any single reuse is genuinely safe *through its own checked
+        # horizon* -- but an unbroken run of them would let that residual
+        # drift keep accumulating tick after tick, past what any single
+        # tick's own check covers. Capping how many can be used consecutively
+        # (reset by any genuine solve) bounds the worst case to a small,
+        # fixed amount of drift instead of letting it grow for as long as
+        # real solves keep failing. Counted per control tick, not per
+        # project() call: select_action() calls project() once per flow/
+        # Euler denoising step, several times per tick at the same x0, and
+        # those don't represent additional elapsed time or drift.
         self.max_consecutive_fallbacks = int(config.get("max_consecutive_fallbacks", 5))
         if self.max_consecutive_fallbacks <= 0:
             raise ValueError("'max_consecutive_fallbacks' must be positive.")
@@ -218,8 +221,21 @@ class CasadiTrajectoryProjector:
         self.pos_idx = tuple(getattr(self.sim, "position_indices", (0, 1)))
 
         self.neighbor_traj_param = None
+        self.neighbor_active_param = None
         if self.neighbor_slots > 0 and self.d_safe > 0.0:
             self.neighbor_traj_param = self.opti.parameter(2 * self.neighbor_slots, self.N + 1)
+            # Per-slot activity gate (1 = a real, currently-visible neighbor;
+            # 0 = masked-out/absent this tick), constant across the horizon
+            # -- matches _build_neighbor_trajectories's own semantics of
+            # deciding visibility once per tick, not per horizon step.
+            # Multiplying the distance thresholds by this (rather than
+            # relying on a numerically-far-away sentinel position, as
+            # before) means an absent neighbor's constraint is *exactly*
+            # `squared_distance >= 0`, trivially true for any real position
+            # -- not merely true for realistic ones, so it can never
+            # misfire against a workspace/fixed-state coordinate that
+            # happens to be numerically large.
+            self.neighbor_active_param = self.opti.parameter(self.neighbor_slots, 1)
             collision_slack = self.opti.variable(self.neighbor_slots, self.N + 1)
             self.opti.subject_to(ca.vec(collision_slack) >= 0)
 
@@ -227,10 +243,11 @@ class CasadiTrajectoryProjector:
                 diff_x = self.X[self.pos_idx[0], :] - self.neighbor_traj_param[2 * j, :]
                 diff_y = self.X[self.pos_idx[1], :] - self.neighbor_traj_param[2 * j + 1, :]
                 squared_distance = diff_x ** 2 + diff_y ** 2
+                active = self.neighbor_active_param[j]
                 # Soft target: stay at or beyond the d_safe planning buffer
                 # whenever possible, relaxable via collision_slack when it
                 # isn't (mirrors CasadiPlanner's own expert-side handling).
-                self.opti.subject_to(squared_distance + collision_slack[j, :] >= self.d_safe ** 2)
+                self.opti.subject_to(squared_distance + collision_slack[j, :] >= (self.d_safe * active) ** 2)
                 # Hard floor: collision_slack is unbounded above, so the soft
                 # term alone never actually guarantees separation -- an
                 # expensive-but-feasible solve could accept slack past the
@@ -238,7 +255,7 @@ class CasadiTrajectoryProjector:
                 # enforced in __init__) is the actual physical contact
                 # threshold, so it stays a hard constraint regardless of how
                 # much slack the soft d_safe term takes on.
-                self.opti.subject_to(squared_distance >= self.d_collision ** 2)
+                self.opti.subject_to(squared_distance >= (self.d_collision * active) ** 2)
 
             cost += self.collision_slack_penalty_weight * ca.sum2(ca.sum1(collision_slack))
 
@@ -367,7 +384,11 @@ class CasadiTrajectoryProjector:
         self.opti.set_initial(self.opti.lam_g, 0.0)
 
     def _revalidate_fallback(
-        self, x0: np.ndarray, u_guess: np.ndarray, neighbor_trajs: np.ndarray | None
+        self,
+        x0: np.ndarray,
+        u_guess: np.ndarray,
+        neighbor_trajs: np.ndarray | None,
+        neighbor_active: np.ndarray | None,
     ) -> np.ndarray | None:
         """Re-derive and re-check a candidate fallback trajectory against the *current* tick.
 
@@ -418,6 +439,8 @@ class CasadiTrajectoryProjector:
             neighbor_trajs = np.asarray(neighbor_trajs, dtype=float)
             robot_pos = state_guess[list(self.pos_idx), :]
             for j in range(self.neighbor_slots):
+                if neighbor_active is not None and float(neighbor_active[j]) <= 0.5:
+                    continue
                 diff = robot_pos - neighbor_trajs[j]
                 squared_distance = np.sum(diff ** 2, axis=0)
                 if np.any(squared_distance < self.d_collision ** 2 - tolerance):
@@ -429,7 +452,13 @@ class CasadiTrajectoryProjector:
 
         return state_guess
 
-    def project(self, obs: np.ndarray, u_ref: np.ndarray, neighbor_trajs: np.ndarray | None = None) -> np.ndarray:
+    def project(
+        self,
+        obs: np.ndarray,
+        u_ref: np.ndarray,
+        neighbor_trajs: np.ndarray | None = None,
+        neighbor_active: np.ndarray | None = None,
+    ) -> np.ndarray:
         """Project a reference action sequence ``u_ref`` (nu, tracked_horizon) onto the safety manifold.
 
         Returns the projected action sequence, shape matching ``u_ref``. The
@@ -437,6 +466,15 @@ class CasadiTrajectoryProjector:
         exactly (SafeFlowMPC, Oelerich et al. 2026, Eq. 12: the terminal
         "come to rest" condition is enforced at the end of this same
         N-step horizon, not on an appended tail beyond it).
+
+        ``neighbor_active``, shape ``(neighbor_slots,)``, gates each slot's
+        collision constraints on (1) or off (0) for this call -- a masked-out
+        (currently-invisible) neighbor slot's distance threshold becomes
+        exactly 0, trivially satisfied by any real position, rather than
+        depending on ``neighbor_trajs`` placing that slot far enough away to
+        be harmless. Defaults to all-active when omitted (matching the prior
+        behavior of relying solely on ``neighbor_trajs``'s own sentinel
+        position for absent slots).
 
         ``neighbor_trajs``, if this robot has neighbor slots and ``d_safe`` >
         0, must be shaped ``(neighbor_slots, 2, N + 1)``, i.e.
@@ -500,8 +538,17 @@ class CasadiTrajectoryProjector:
         # Falls back to forward-simulating u_ref (the only information
         # available yet) on a true cold start -- first call ever, or right
         # after reset().
+        # Also gates max_consecutive_fallbacks below: select_action() calls
+        # project() once per flow/Euler denoising step, several times per
+        # real control tick, all at this same x0 -- only a *new* tick (x0
+        # has actually moved) represents a real step where residual-velocity
+        # drift could have accumulated, so only that should consume the
+        # fallback budget. Repeated same-tick calls reuse whatever this
+        # tick's fallback decision already was, however many times they
+        # recur, rather than each independently advancing the counter.
+        is_new_control_tick = self._prev_x0 is None or not np.array_equal(x0, self._prev_x0)
         if self._prev_X_sol is not None and self._prev_U_sol is not None:
-            if self._prev_x0 is not None and np.array_equal(x0, self._prev_x0):
+            if not is_new_control_tick:
                 state_guess = self._prev_X_sol
                 u_guess = self._prev_U_sol
             else:
@@ -542,6 +589,12 @@ class CasadiTrajectoryProjector:
                 self.neighbor_traj_param,
                 np.asarray(neighbor_trajs, dtype=float).reshape(2 * self.neighbor_slots, self.N + 1),
             )
+            active = (
+                np.ones(self.neighbor_slots, dtype=float)
+                if neighbor_active is None
+                else np.asarray(neighbor_active, dtype=float).reshape(self.neighbor_slots)
+            )
+            self.opti.set_value(self.neighbor_active_param, active.reshape(self.neighbor_slots, 1))
         self.opti.set_initial(self.X, state_guess)
         self.opti.set_initial(self.U, u_guess)
         if self._prev_lam_g is not None:
@@ -604,7 +657,10 @@ class CasadiTrajectoryProjector:
             self._consecutive_fallback_count = 0
             return self._prev_U_sol[:, : self.tracked_horizon]
         except RuntimeError as exc:
-            if self._prev_U_sol is not None and self._consecutive_fallback_count < self.max_consecutive_fallbacks:
+            fallback_budget_available = (
+                not is_new_control_tick or self._consecutive_fallback_count < self.max_consecutive_fallbacks
+            )
+            if self._prev_U_sol is not None and fallback_budget_available:
                 # SafeFlowMPC, Oelerich et al. 2026, Theorem 2: on a
                 # projection failure, the safe fallback is to keep executing
                 # the current/last trajectory, not an arbitrary unprojected
@@ -617,7 +673,7 @@ class CasadiTrajectoryProjector:
                 # re-simulates from the real x0 and re-checks bounds,
                 # d_collision against the current neighbor forecast, and the
                 # terminal rest condition before trusting it.
-                revalidated_state = self._revalidate_fallback(x0, u_guess, neighbor_trajs)
+                revalidated_state = self._revalidate_fallback(x0, u_guess, neighbor_trajs, neighbor_active)
                 if revalidated_state is not None:
                     warnings.warn(
                         "CasadiTrajectoryProjector solve failed, falling back to the last "
@@ -628,7 +684,8 @@ class CasadiTrajectoryProjector:
                     self._prev_X_sol = revalidated_state
                     self._prev_U_sol = u_guess
                     self._prev_x0 = x0
-                    self._consecutive_fallback_count += 1
+                    if is_new_control_tick:
+                        self._consecutive_fallback_count += 1
                     return u_guess[:, : self.tracked_horizon]
                 # The cached plan no longer holds from here (either it failed
                 # revalidation, or max_consecutive_fallbacks was already hit)

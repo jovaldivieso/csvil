@@ -91,11 +91,10 @@ csvil/
 │   │   ├── safe_flow_policy.py # Flow policy + CasADi safety projection at inference (SafeFlowMPC)
 │   │   ├── mlp_policy.py       # MLP action policy
 │   │   └── policy.py           # Shared interface and factory
-│   ├── data_utils.py           # Stateless policy batch formatting and action chunks
+│   ├── data_utils.py           # Policy batch formatting, observation/action-window caching
 │   ├── dagger/
 │   │   ├── __init__.py        # Public DAgger helper API
 │   │   ├── beta_controller.py # Expert-mixing schedules and adaptive controller
-│   │   ├── feature_cache.py   # Observation schema and feature packing utilities
 │   │   ├── metrics.py         # DAgger evaluation metrics
 │   │   ├── rollouts.py        # Collection, evaluation, and action execution
 │   │   └── utils.py           # Seeding, step resolution, config overrides, and metric logging
@@ -332,7 +331,13 @@ enforces a hard terminal-rest constraint and rejects (`ValueError`, at
 construction time) any checkpoint whose `prediction_horizon` is too short to
 decelerate from that system's own worst-case velocity to zero at its own
 `max_action` -- a `flow` checkpoint trained with a short horizon is not
-guaranteed to also be evaluable as `safeflow`.
+guaranteed to also be evaluable as `safeflow`. This interchangeability also
+assumes the checkpoint's saved observation schema includes
+`observation.state_mask`: a checkpoint trained before that field existed
+saved a smaller `state_dim` than `resolve_checkpoint_observation_dimensions`
+now expects and is rejected outright (for either policy type, not just
+`safeflow`) -- retrain against the current schema rather than trying to
+evaluate such a checkpoint.
 `--initial-states`/`--goal-states` are
 optional (omit them for randomly seeded rollouts); pass them to check
 performance on a specific scenario, e.g. the same swap/crossing cases used

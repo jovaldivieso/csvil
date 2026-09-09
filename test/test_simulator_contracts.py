@@ -257,6 +257,34 @@ class SimulatorContractTests(unittest.TestCase):
                 f"{name}: angular_state_indices mismatch",
             )
 
+    def test_velocity_state_indices_contract(self) -> None:
+        # SafeFlowMPC's terminal-rest constraint and its multi-robot
+        # neighbor-velocity estimation both key off this: a velocity-having
+        # system that silently reported () here (e.g. a future system that
+        # forgets to override the DynamicsSimulator default, or a custom
+        # DynamicsProtocol implementation with no inheritance-enforced
+        # override at all) would be treated as first-order by both --
+        # unsafely, not just imprecisely. multi_robot's own top-level value
+        # is () regardless of what its sub-robots report (PolicyFactory.create
+        # unwraps to those sub-simulators for exactly this reason).
+        simulators = _build_simulators()
+        expected_velocity_state_indices = {
+            "single_integrator": (),
+            "double_integrator": (2, 3),
+            "unicycle1": (),
+            "unicycle2": (3, 4),
+            "multi_robot": (),
+        }
+
+        for name, expected in expected_velocity_state_indices.items():
+            self.assertIn(name, simulators)
+            simulator = simulators[name]
+            self.assertEqual(
+                tuple(simulator.velocity_state_indices),
+                expected,
+                f"{name}: velocity_state_indices mismatch",
+            )
+
     def test_multi_robot_casadi_dynamics_maps_homogeneous_fleet(self) -> None:
         simulator = DynamicsFactory.create(
             system_name="multi_robot",

@@ -10,7 +10,7 @@ import csv
 import time
 import yaml
 import shutil
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -79,6 +79,25 @@ def _validate_resumable_dataset_schema(
                 "Start a fresh dataset (omit --repo-id/--dataset-root) or resume a dataset recorded "
                 "with the current schema."
             )
+
+
+def _yaml_safe(value: Any) -> Any:
+    """Recursively coerce a value into plain types yaml.safe_dump can render."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {key: _yaml_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_yaml_safe(item) for item in value]
+    return value
+
+
+def _print_yaml_block(title: str, data: dict[str, Any]) -> None:
+    print(f"{title}:")
+    for line in yaml.safe_dump(_yaml_safe(data), sort_keys=False).splitlines():
+        print(f"  {line}")
 
 
 @dataclass(frozen=True)
@@ -419,15 +438,8 @@ class DaggerTrainer:
             repo_id=self.cfg.repo_id,
             root=self.cfg.dataset_root,
         )
-        cache_start = time.perf_counter()
         action_window_cache = build_action_window_cache(dataset, self.cfg.prediction_horizon)
         observation_history_cache = build_observation_history_cache(dataset, self.cfg.observation_horizon)
-        print(
-            f"  Built action-window + observation-history caches for {len(dataset)} frames in "
-            f"{time.perf_counter() - cache_start:.2f}s (avoids re-fetching "
-            f"{self.cfg.prediction_horizon - 1} future and {self.cfg.observation_horizon - 1} "
-            "past frames per sample on every epoch)"
-        )
         generator = torch.Generator().manual_seed(self.cfg.seed + training_round)
         loader = DataLoader(
             dataset,
@@ -895,6 +907,7 @@ def save_experiment_configs(args: argparse.Namespace, experiment_dir: Path,  rep
         
 def main() -> None:
     args = parse_args()
+    _print_yaml_block("CLI arguments (train_dagger.py, unset flags fall back to policy YAML/defaults)", vars(args))
     validated = load_and_validate_system_config(args.system, args.expert_config)
     training_config = load_dagger_training_config(args.policy_config)
 
@@ -1015,6 +1028,7 @@ def main() -> None:
         seed=int(option("seed", 99)),
         max_train_steps=option("max_train_steps", None),
     )
+    _print_yaml_block("Resolved DaggerConfig (CLI + policy YAML + hardcoded defaults, fully merged)", asdict(cfg))
     DaggerTrainer(cfg).run()
     
 if __name__ == "__main__":
