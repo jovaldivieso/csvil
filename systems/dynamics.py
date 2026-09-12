@@ -236,8 +236,8 @@ class DynamicsSimulator(ABC):
         A velocity-having system (subclassing DynamicsSimulator or
         implementing DynamicsProtocol structurally) MUST override this to
         return its actual velocity indices: CasadiTrajectoryProjector uses
-        an empty result here as license to skip the hard terminal-rest
-        constraint entirely (correct only for systems that genuinely have
+        an empty result here as license to skip the terminal-velocity cost
+        entirely (correct only for systems that genuinely have
         no velocity state -- see its own construction-time comment), and
         SafeFlowMPCPolicy uses it to decide whether a multi-robot fleet's
         neighbor velocities can be estimated at all. A velocity-having

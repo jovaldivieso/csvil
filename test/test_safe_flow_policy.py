@@ -474,7 +474,7 @@ class PolicySolveFailureRecoveryTests(unittest.TestCase):
         def failing_action_fn(observation: np.ndarray) -> np.ndarray:
             raise PlannerSolveError("forced failure for test")
 
-        reached_goal, steps_taken = rollout_policy_with_action_fn(
+        reached_goal, steps_taken, failure_reason = rollout_policy_with_action_fn(
             simulator=simulator,
             initial_state=initial_state,
             num_steps=10,
@@ -484,6 +484,7 @@ class PolicySolveFailureRecoveryTests(unittest.TestCase):
         # failing_action_fn raises on the very first call, before
         # simulator.step() ever runs -- zero steps were actually executed.
         self.assertEqual(steps_taken, 0)
+        self.assertEqual(failure_reason, "solve_failure")
 
 
 class FirstOrderMultiRobotRejectionTests(unittest.TestCase):

@@ -856,7 +856,21 @@ def run_evaluation(
         np.mean([metric["expert_collided"] for metric in per_seed_metrics])
         if total_runs > 0 else 0.0
     )
+    # A run that neither reached the goal nor collided ran out of steps --
+    # tracked separately since "timed out while still avoiding" and
+    # "collided outright" are different (and not equally bad) failure
+    # modes that success_rate alone can't distinguish.
+    policy_timeout_rate = (
+        np.mean(
+            [
+                (not metric["policy_reached_goal"]) and (not metric["policy_collided"])
+                for metric in per_seed_metrics
+            ]
+        )
+        if total_runs > 0 else 0.0
+    )
     print(f"policy_collision_rate: {policy_collision_rate:.4f}")
+    print(f"policy_timeout_rate: {policy_timeout_rate:.4f}")
     print(f"expert_collision_rate: {expert_collision_rate:.4f}")
     print(f"mean_policy_steps: {mean_policy_steps:.3f}")
     print(f"mean_expert_steps: {mean_expert_steps:.3f}")
@@ -946,6 +960,7 @@ def run_evaluation(
         "policy_successes": total_successes,
         "success_rate": success_rate,
         "policy_collision_rate": float(policy_collision_rate),
+        "policy_timeout_rate": float(policy_timeout_rate),
         "expert_collision_rate": float(expert_collision_rate),
         "mean_policy_steps": mean_policy_steps,
         "mean_expert_steps": mean_expert_steps,

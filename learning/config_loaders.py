@@ -21,6 +21,8 @@ DEFAULT_DAGGER_TRAINING_CONFIG: dict[str, object] = {
     "expert_mix_beta_decay_rate": None,
     "expert_mix_decay_after_eval_success": None,
     "adaptive_beta_recovery": False,
+    "expert_mix_beta_recovery": 1.0,
+    "expert_mix_beta_recovery_increment": 1.0,
     "target_epochs_per_round": [30.0],
     "eval_episodes": 10,
     "eval_steps": None,
@@ -37,6 +39,7 @@ DEFAULT_DAGGER_TRAINING_CONFIG: dict[str, object] = {
     "goal_states": None,
     "workspace_bounds": None,
     "tolerance_overrides": None,
+    "eval_tolerance_overrides": None,
 }
 
 

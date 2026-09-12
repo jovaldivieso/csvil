@@ -117,6 +117,8 @@ class DaggerConfig:
     expert_mix_beta_decay_rate: float | None
     expert_mix_decay_after_eval_success: float | None
     adaptive_beta_recovery: bool
+    expert_mix_beta_recovery: float
+    expert_mix_beta_recovery_increment: float
     target_epochs_per_round: list[float]
     eval_episodes: int
     eval_steps: int | None
@@ -140,6 +142,14 @@ class DaggerConfig:
     restart_round_seed: bool = False
     workspace_bounds: list[float] | None = None
     tolerance_overrides: dict[str, float] | None = None
+    # Independent of tolerance_overrides: that one shapes what gets
+    # demonstrated/trained on (tight tolerances during collection encourage
+    # precise demonstrations), while this one only affects whether an eval
+    # rollout counts as a success -- eval cares about "close enough and
+    # collision-free", not exact final-pose matching, so it's reasonable for
+    # this to be more relaxed without touching training dynamics or
+    # demonstration length. Falls back to tolerance_overrides when unset.
+    eval_tolerance_overrides: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         if self.dagger_iterations < 0:
@@ -168,6 +178,14 @@ class DaggerConfig:
             and not 0 <= self.expert_mix_decay_after_eval_success <= 1
         ):
             raise ValueError("Beta gate must be in [0, 1].")
+        if not 0 <= self.expert_mix_beta_recovery <= 1:
+            raise ValueError("'expert_mix_beta_recovery' must be in [0, 1].")
+        if self.expert_mix_beta_recovery_increment <= 0:
+            raise ValueError(
+                "'expert_mix_beta_recovery_increment' must be positive, so backtrack "
+                "recovery always reaches beta=1.0 (the safe, guaranteed-recoverable "
+                "fallback) in finitely many retries."
+            )
         if len(self.target_epochs_per_round) not in {1, self.dagger_iterations}:
             raise ValueError(
                 "'target_epochs_per_round' must contain one or one value per round."
@@ -204,6 +222,10 @@ class DaggerConfig:
             value <= 0 for value in self.tolerance_overrides.values()
         ):
             raise ValueError("'tolerance_overrides' values must be positive.")
+        if self.eval_tolerance_overrides is not None and any(
+            value <= 0 for value in self.eval_tolerance_overrides.values()
+        ):
+            raise ValueError("'eval_tolerance_overrides' values must be positive.")
         if not self.dataset_root.exists() and not self.start_with_aggregation:
             raise FileNotFoundError(self.dataset_root)
 
@@ -325,7 +347,10 @@ class DaggerTrainer:
                 # against its isotropic unit-scale noise prior. Homogeneous
                 # fleet (validated elsewhere), so simulators[0] speaks for
                 # every robot's own action bound.
-                "action_scale": [float(v) for v in np.asarray(self.simulator.simulators[0].max_action, dtype=float)],
+                "action_scale": np.broadcast_to(
+                    np.asarray(self.simulator.simulators[0].max_action, dtype=float),
+                    (self.action_dim,),
+                ).tolist(),
             }
             if self.cfg.policy_type in {"flow", "safeflow"}
             else {}
@@ -371,6 +396,13 @@ class DaggerTrainer:
                 f"decay_rounds={self.cfg.dagger_iterations}, "
                 f"decay_after_eval_success={self.cfg.expert_mix_decay_after_eval_success if self.cfg.expert_mix_decay_after_eval_success is not None else 'none'}"
             )
+        print(
+            "Backtrack recovery schedule: "
+            f"beta_recovery={self.cfg.expert_mix_beta_recovery:.3f}, "
+            f"beta_recovery_increment={self.cfg.expert_mix_beta_recovery_increment:.3f} "
+            "(escalates toward 1.0 per retry at the same backtracked state; "
+            "resets to beta_recovery fresh on every new backtrack)"
+        )
         print(f"MLP hidden dims: {list(self.cfg.mlp_hidden_dims)}")
         print(f"Prediction horizon: {self.cfg.prediction_horizon}")
         print(f"Policy type: {self.cfg.policy_type}")
@@ -379,9 +411,13 @@ class DaggerTrainer:
                 "Flow inference: "
                 f"num_inference_steps={self.cfg.flow_config.num_inference_steps}"
             )
+            action_scale = np.broadcast_to(
+                np.asarray(self.simulator.simulators[0].max_action, dtype=float),
+                (self.action_dim,),
+            ).tolist()
             print(
                 "Flow action normalization: "
-                f"action_scale={[float(v) for v in np.asarray(self.simulator.simulators[0].max_action, dtype=float)]} "
+                f"action_scale={action_scale} "
                 "(per-dimension divisor against the flow-matching noise prior, from this robot's own max_action)"
             )
         if self.cfg.start_with_aggregation:
@@ -485,13 +521,25 @@ class DaggerTrainer:
         print(f"  mean_step_loss={mean_loss:.6f}")
         return mean_loss
 
-    def _apply_runtime_config_overrides(self, config: dict[str, Any]) -> dict[str, Any]:
-        """Inject the training config's solver/dynamics tuning knobs (sampling bounds, tolerances), if set."""
+    def _apply_runtime_config_overrides(
+        self, config: dict[str, Any], *, tolerance_overrides: Mapping[str, float] | None = None
+    ) -> dict[str, Any]:
+        """Inject the training config's solver/dynamics tuning knobs (sampling bounds, tolerances), if set.
+
+        tolerance_overrides defaults to self.cfg.tolerance_overrides (the
+        collection/training value) when not given -- evaluate_current_policy
+        passes self.cfg.eval_tolerance_overrides here instead, so eval can
+        use a more relaxed pass/fail standard without touching what
+        collection/training actually demonstrates against.
+        """
         overrides: dict[str, Any] = {}
         if self.cfg.workspace_bounds is not None:
             overrides["workspace_bounds"] = list(self.cfg.workspace_bounds)
-        if self.cfg.tolerance_overrides:
-            overrides.update(self.cfg.tolerance_overrides)
+        effective_tolerance_overrides = (
+            tolerance_overrides if tolerance_overrides is not None else self.cfg.tolerance_overrides
+        )
+        if effective_tolerance_overrides:
+            overrides.update(effective_tolerance_overrides)
         merged_config = apply_config_overrides(config, overrides)
         return validate_system_config(self.cfg.system, merged_config)
 
@@ -502,7 +550,8 @@ class DaggerTrainer:
         if self.cfg.eval_episodes == 0:
             return None
         eval_config = self._apply_runtime_config_overrides(
-            copy.deepcopy(dict(self.seeded_config))
+            copy.deepcopy(dict(self.seeded_config)),
+            tolerance_overrides=self.cfg.eval_tolerance_overrides,
         )
         simulator = DynamicsFactory.create(
             system_name=self.cfg.system,
@@ -608,7 +657,10 @@ class DaggerTrainer:
                 # evaluating caller's --config later changes those physical
                 # bounds -- see FlowPolicy's own docstring for why training
                 # and inference must agree on this exactly.
-                "action_scale": [float(v) for v in np.asarray(self.simulator.simulators[0].max_action, dtype=float)],
+                "action_scale": np.broadcast_to(
+                    np.asarray(self.simulator.simulators[0].max_action, dtype=float),
+                    (self.action_dim,),
+                ).tolist(),
             }
         prefix = "flow_dagger" if self.cfg.policy_type in {"flow", "safeflow"} else "mlp_dagger"
         latest_checkpoint = self.cfg.checkpoint_dir / f"{prefix}_checkpoint.pt"
@@ -754,6 +806,8 @@ class DaggerTrainer:
                     expert_mixing_beta=round_beta,
                     round_index=schedule,
                     restart_initial_state_round=self.cfg.restart_round_seed,
+                    beta_recovery=self.cfg.expert_mix_beta_recovery,
+                    beta_recovery_increment=self.cfg.expert_mix_beta_recovery_increment,
                     policy_action_fn=action_fn,
                     policy_reset_fn=reset_policy_state,
                     frame_builder=frames,
@@ -884,11 +938,24 @@ def parse_args() -> argparse.Namespace:
             "or '{\"error_tolerance\": 0.05}' for single_integrator/double_integrator/unicycle1."
         ),
     )
+    p.add_argument(
+        "--eval-tolerance-overrides",
+        type=str,
+        default=None,
+        help=(
+            "same format as --tolerance-overrides, but applied only to evaluation rollouts, not "
+            "data collection/training. Falls back to --tolerance-overrides when omitted. Use this "
+            "to relax the pass/fail standard for eval (e.g. 'close enough and collision-free') "
+            "without changing what collection/training demonstrates against."
+        ),
+    )
     p.add_argument("--expert-mix-beta-start", type=float)
     p.add_argument("--expert-mix-beta-end", type=float)
     p.add_argument("--expert-mix-beta-decay-rate", type=float)
     p.add_argument("--expert-mix-decay-after-eval-success", type=float)
     p.add_argument("--adaptive-beta-recovery", action=argparse.BooleanOptionalAction)
+    p.add_argument("--expert-mix-beta-recovery", type=float)
+    p.add_argument("--expert-mix-beta-recovery-increment", type=float)
     p.add_argument("--target-epochs-per-round", nargs="+", type=float)
     p.add_argument("--eval-episodes", type=int)
     p.add_argument("--eval-steps", type=int)
@@ -972,6 +1039,19 @@ def main() -> None:
             raise ValueError("--tolerance-overrides must evaluate to a dict.")
     else:
         tolerance_overrides = tolerance_overrides_config
+    eval_tolerance_overrides_config = option("eval_tolerance_overrides", None)
+    if isinstance(eval_tolerance_overrides_config, str):
+        try:
+            eval_tolerance_overrides = ast.literal_eval(eval_tolerance_overrides_config)
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(
+                "Unable to parse --eval-tolerance-overrides. Use Python-literal dict syntax like "
+                "'{\"pos_tol\": 0.2, \"theta_tol\": 1.1}'."
+            ) from exc
+        if not isinstance(eval_tolerance_overrides, dict):
+            raise ValueError("--eval-tolerance-overrides must evaluate to a dict.")
+    else:
+        eval_tolerance_overrides = eval_tolerance_overrides_config
     if (args.repo_id is None) != (args.dataset_root is None):
         raise ValueError("Provide both --repo-id and --dataset-root together, or omit both.")
     fresh = args.repo_id is None
@@ -1028,11 +1108,14 @@ def main() -> None:
         restart_round_seed=restart_round_seed,
         workspace_bounds=option("workspace_bounds", None),
         tolerance_overrides=tolerance_overrides,
+        eval_tolerance_overrides=eval_tolerance_overrides,
         expert_mix_beta_start=float(option("expert_mix_beta_start", 0.8)),
         expert_mix_beta_end=float(option("expert_mix_beta_end", 0.0)),
         expert_mix_beta_decay_rate=option("expert_mix_beta_decay_rate", None),
         expert_mix_decay_after_eval_success=option("expert_mix_decay_after_eval_success", None),
         adaptive_beta_recovery=bool(option("adaptive_beta_recovery", False)),
+        expert_mix_beta_recovery=float(option("expert_mix_beta_recovery", 1.0)),
+        expert_mix_beta_recovery_increment=float(option("expert_mix_beta_recovery_increment", 1.0)),
         target_epochs_per_round=epochs,
         eval_episodes=int(option("eval_episodes", 10)),
         eval_steps=option("eval_steps", None),

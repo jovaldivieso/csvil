@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -18,7 +19,11 @@ from learning.dagger.rollouts import (
     evaluate_policy_rollouts,
 )
 from planning.casadi_planner import PlannerSolveError
-from systems.seed_utils import initial_state_seed_for_rollout
+from systems.seed_utils import (
+    action_noise_seed_for_rollout,
+    initial_state_seed_for_rollout,
+    torch_inference_seed_for_rollout,
+)
 
 
 class _FakeSimulator:
@@ -527,6 +532,262 @@ class CollectDaggerRolloutsBacktrackTests(unittest.TestCase):
         self.assertIn("executed_steps=1", output)
 
 
+class BacktrackRecoveryEscalationTests(unittest.TestCase):
+    """Coverage for the gradual (escalating-beta) backtrack recovery path:
+    beta_recovery < 1.0 mixes policy_action_fn in during recovery instead of
+    jumping straight to expert-only control, escalating toward 1.0 (the
+    original, still-default behavior) by beta_recovery_increment on each
+    failed attempt at the same candidate.
+    """
+
+    def test_recovery_succeeds_at_beta_recovery_without_escalating(self) -> None:
+        # expert_mixing_beta=1.0 keeps the forward loop from ever querying
+        # the policy itself, so any policy call observed below can only have
+        # come from recovery.
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
+        planner = _ScriptedPlanner(unsafe_action=[100.0], safe_action=[1.0])
+        policy_calls: list[np.ndarray] = []
+
+        def fake_policy(observation: np.ndarray) -> np.ndarray:
+            policy_calls.append(np.asarray(observation).copy())
+            return np.array([1.0])
+
+        writer = _FakeDatasetWriter()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            metrics = collect_dagger_rollouts(
+                simulator=simulator,
+                expert_planner=planner,
+                dataset_writer=writer,
+                trajectories_per_iteration=1,
+                steps_per_trajectory=2,
+                action_noise_std=0.0,
+                action_noise_seed=0,
+                initial_state_seed=0,
+                expert_mixing_beta=1.0,
+                policy_action_fn=fake_policy,
+                frame_builder=_frame_builder,
+                initial_states=[[0.0]],
+                goal_states=None,
+                beta_recovery=0.0,
+                beta_recovery_increment=1.0,
+            )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        # beta_recovery=0.0 deterministically picks the policy every retry
+        # (Generator.random() never returns a negative value), so recovery
+        # must have actually invoked it rather than falling back to expert.
+        self.assertGreaterEqual(len(policy_calls), 1)
+        self.assertEqual(len(writer.frames), 1)
+        # The label is always the expert's own action regardless of who
+        # executed, per collect_dagger_rollouts' DAgger convention.
+        self.assertEqual(writer.frames[0]["action"], [1.0])
+        self.assertIn("Recovery from s_0 succeeded at beta_recovery=0.000", stdout.getvalue())
+        # The one recovered step was policy-executed (beta=0.0), so the
+        # per-recovery expert/policy breakdown printed alongside the final
+        # "Backtracked to state" line should read 0% expert, 0/1 steps.
+        # candidate_index=0 means there's no pre-backtrack portion at all, so
+        # the full-episode split matches the recovered segment exactly here.
+        self.assertIn(
+            "(recovered segment: 0.0% expert, 0/1 steps; "
+            "full episode: 0.0% expert, 0/1 steps)",
+            stdout.getvalue(),
+        )
+
+    def test_recovery_escalates_to_beta_one_after_a_failed_lower_beta_attempt(self) -> None:
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
+        planner = _ScriptedPlanner(unsafe_action=[100.0], safe_action=[1.0])
+
+        def unsafe_policy(observation: np.ndarray) -> np.ndarray:
+            return np.array([100.0])
+
+        writer = _FakeDatasetWriter()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            metrics = collect_dagger_rollouts(
+                simulator=simulator,
+                expert_planner=planner,
+                dataset_writer=writer,
+                trajectories_per_iteration=1,
+                steps_per_trajectory=2,
+                action_noise_std=0.0,
+                action_noise_seed=0,
+                initial_state_seed=0,
+                expert_mixing_beta=1.0,
+                policy_action_fn=unsafe_policy,
+                frame_builder=_frame_builder,
+                initial_states=[[0.0]],
+                goal_states=None,
+                beta_recovery=0.0,
+                beta_recovery_increment=1.0,
+            )
+
+        # The beta=0.0 attempt deterministically executes the policy's
+        # unsafe [100.0] and fails; escalating to beta=1.0 (pure expert,
+        # safe_action=[1.0]) must still recover the episode.
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        self.assertEqual(len(writer.frames), 1)
+        self.assertEqual(writer.frames[0]["action"], [1.0])
+
+        output = stdout.getvalue()
+        self.assertIn("Recovery attempt 1 from s_0 failed at beta_recovery=0.000", output)
+        self.assertIn("retrying with beta_recovery=1.000", output)
+        # beta=1.0 short-circuits to the original deterministic path, which
+        # never prints a "succeeded" line (see backtrack_and_complete's own
+        # Phase 2).
+        self.assertNotIn("Recovery from s_0 succeeded", output)
+        # The kept (restored) segment is Phase 1's pure-expert completion,
+        # not the failed policy-mixed attempt -- 100% expert.
+        self.assertIn(
+            "(recovered segment: 100.0% expert, 1/1 steps; "
+            "full episode: 100.0% expert, 1/1 steps)",
+            output,
+        )
+
+    def test_full_episode_split_includes_the_pre_backtrack_forward_pass(self) -> None:
+        """Regression guard: 'full episode' must combine the pre-backtrack
+        forward-pass portion (executed under the round's own
+        expert_mixing_beta) with the recovered segment (under beta_recovery)
+        -- not just repeat the recovered segment's own number.
+        """
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
+        # Step 1's label [0.5] is safe, so it executes normally (via the
+        # policy, since expert_mixing_beta=0.0 below) with no backtrack.
+        # Step 2's label [100.0] is unsafe and triggers backtrack back to
+        # s_1; from there the (pure-expert, beta_recovery omitted) recovery
+        # uses [1.0] to reach the goal.
+        planner = _SequencedPlanner(actions=[[0.5], [100.0], [1.0]])
+
+        def fake_policy(observation: np.ndarray) -> np.ndarray:
+            return np.array([0.3])
+
+        writer = _FakeDatasetWriter()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            metrics = collect_dagger_rollouts(
+                simulator=simulator,
+                expert_planner=planner,
+                dataset_writer=writer,
+                trajectories_per_iteration=1,
+                steps_per_trajectory=5,
+                action_noise_std=0.0,
+                action_noise_seed=0,
+                initial_state_seed=0,
+                expert_mixing_beta=0.0,
+                policy_action_fn=fake_policy,
+                frame_builder=_frame_builder,
+                initial_states=[[0.0]],
+                goal_states=None,
+            )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        # Step 1 (policy-executed, [0.3]) survives untouched; the recovered
+        # step used the expert's [1.0] label.
+        self.assertEqual(len(writer.frames), 2)
+        self.assertEqual(writer.frames[0]["action"], [0.5])
+        self.assertEqual(writer.frames[1]["action"], [1.0])
+        # Recovered segment alone is 1/1 expert (100%); the full episode
+        # also counts step 1's policy execution, landing at 1/2 (50%).
+        self.assertIn(
+            "(recovered segment: 100.0% expert, 1/1 steps; "
+            "full episode: 50.0% expert, 1/2 steps)",
+            stdout.getvalue(),
+        )
+
+    def test_default_beta_recovery_calls_policy_zero_times_during_recovery(self) -> None:
+        """Regression guard: omitting beta_recovery/beta_recovery_increment
+        (the pre-existing call signature) must reproduce the original
+        expert-only recovery exactly -- no RNG draw, no policy_action_fn call.
+        """
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
+        planner = _ScriptedPlanner(unsafe_action=[100.0], safe_action=[1.0])
+        policy_calls: list[np.ndarray] = []
+
+        def fake_policy(observation: np.ndarray) -> np.ndarray:
+            policy_calls.append(np.asarray(observation).copy())
+            return np.array([1.0])
+
+        writer = _FakeDatasetWriter()
+        metrics = collect_dagger_rollouts(
+            simulator=simulator,
+            expert_planner=planner,
+            dataset_writer=writer,
+            trajectories_per_iteration=1,
+            steps_per_trajectory=2,
+            action_noise_std=0.0,
+            action_noise_seed=0,
+            initial_state_seed=0,
+            expert_mixing_beta=1.0,
+            policy_action_fn=fake_policy,
+            frame_builder=_frame_builder,
+            initial_states=[[0.0]],
+            goal_states=None,
+            # beta_recovery / beta_recovery_increment intentionally omitted.
+        )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        self.assertEqual(policy_calls, [])
+        self.assertEqual(writer.frames[0]["action"], [1.0])
+
+
+class EvaluatePolicyRolloutsTorchSeedingTests(unittest.TestCase):
+    """A flow/safeflow policy's inference draws from an unseeded torch.randn
+    for its ODE initial noise, so without pinning torch's RNG per episode,
+    the exact same checkpoint on the exact same scenario can succeed or fail
+    from pure sampling luck -- evaluate_policy_rollouts must call
+    torch.manual_seed with a value derived only from that episode's own seed
+    spec, so re-evaluating the same scenario reproduces the same draw.
+    """
+
+    def test_manual_seed_is_called_once_per_episode_with_the_derived_seed(self) -> None:
+        simulator = _FakeSimulator(collision_threshold=1e9, goal_threshold=1e9)
+        with mock.patch("learning.dagger.rollouts.torch.manual_seed") as manual_seed:
+            evaluate_policy_rollouts(
+                simulator=simulator,
+                num_episodes=3,
+                num_steps=2,
+                seed_start=100,
+                action_fn=lambda observation: np.array([0.0]),
+            )
+        # _FakeSimulator has num_robots=1, so evaluation_seed_specs yields
+        # plain ints seed_start, seed_start+1, ... ; the torch seed is the
+        # *derived* (stream-ID-mixed) value, not that raw int -- see
+        # torch_inference_seed_for_rollout.
+        manual_seed.assert_has_calls([
+            mock.call(torch_inference_seed_for_rollout(0, seed_spec=100)),
+            mock.call(torch_inference_seed_for_rollout(0, seed_spec=101)),
+            mock.call(torch_inference_seed_for_rollout(0, seed_spec=102)),
+        ])
+
+    def test_torch_seed_is_decorrelated_from_the_action_noise_seed(self) -> None:
+        """Regression guard for the exact bug this stream ID exists to
+        prevent: both seeds are derived from the same seed_spec, but must
+        not collide or trivially track each other.
+        """
+        seed_spec = 100
+        torch_seed = torch_inference_seed_for_rollout(0, seed_spec=seed_spec)
+        noise_seed = action_noise_seed_for_rollout(0, seed_spec=seed_spec)
+        self.assertNotEqual(torch_seed, noise_seed)
+
+    def test_reevaluating_the_same_scenario_reproduces_the_same_seed(self) -> None:
+        simulator = _FakeSimulator(collision_threshold=1e9, goal_threshold=1e9)
+        seeds_seen: list[list[int]] = [[], []]
+        for run_idx in range(2):
+            with mock.patch("learning.dagger.rollouts.torch.manual_seed", side_effect=seeds_seen[run_idx].append):
+                evaluate_policy_rollouts(
+                    simulator=simulator,
+                    num_episodes=2,
+                    num_steps=2,
+                    seed_start=7,
+                    action_fn=lambda observation: np.array([0.0]),
+                )
+        self.assertEqual(seeds_seen[0], seeds_seen[1])
+
+
 class RestartInitialStateRoundTests(unittest.TestCase):
     """Coverage for restart_initial_state_round: it must make initial-state/goal
     sampling reproducible across rounds that key off the same seed, without
@@ -617,6 +878,61 @@ class EvaluatePolicyRolloutsSourceSplitTests(unittest.TestCase):
         self.assertEqual(metrics.config_num_episodes, 0)
         self.assertEqual(metrics.config_successes, 0)
         self.assertEqual(metrics.random_num_episodes, 3)
+
+
+class EvaluatePolicyRolloutsFailureBreakdownTests(unittest.TestCase):
+    """evaluate_policy_rollouts must report *why* a failed episode failed --
+    collision, timeout, or solve_failure -- not just a pooled success_rate.
+    A policy that times out while actively avoiding is a different (and
+    better) outcome than one that collides outright, which success_rate
+    alone can't distinguish.
+    """
+
+    def test_collision_timeout_and_solve_failure_are_counted_separately(self) -> None:
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1000.0)
+
+        def action_fn(observation: np.ndarray) -> np.ndarray:
+            # Sentinel initial state [5.0] marks the solve_failure episode;
+            # everything else is a plain no-op action (never moves, so it
+            # can only time out or start already past the collision
+            # threshold).
+            if float(np.asarray(observation)[0]) == 5.0:
+                raise PlannerSolveError("forced failure for test")
+            return np.array([0.0])
+
+        metrics = evaluate_policy_rollouts(
+            simulator=simulator,
+            num_episodes=3,
+            num_steps=3,
+            seed_start=0,
+            action_fn=action_fn,
+            # goal_threshold=1000.0 means none of these ever reach the goal;
+            # no goal_states, so all 3 are sourced from this initial_states
+            # list, indexed 0/1/2 in order.
+            initial_states=[[15.0], [0.0], [5.0]],
+        )
+
+        assert metrics is not None
+        self.assertEqual(metrics.success_rate, 0.0)
+        self.assertEqual(metrics.collision_failures, 1)
+        self.assertEqual(metrics.timeout_failures, 1)
+        self.assertEqual(metrics.solve_failures, 1)
+
+    def test_successful_episodes_are_not_counted_as_any_failure(self) -> None:
+        simulator = _FakeSimulator(collision_threshold=1e9, goal_threshold=0.0)
+        metrics = evaluate_policy_rollouts(
+            simulator=simulator,
+            num_episodes=2,
+            num_steps=3,
+            seed_start=0,
+            action_fn=lambda observation: np.array([0.0]),
+            initial_states=[[0.0], [0.0]],
+        )
+        assert metrics is not None
+        self.assertEqual(metrics.success_rate, 1.0)
+        self.assertEqual(metrics.collision_failures, 0)
+        self.assertEqual(metrics.timeout_failures, 0)
+        self.assertEqual(metrics.solve_failures, 0)
 
 
 if __name__ == "__main__":

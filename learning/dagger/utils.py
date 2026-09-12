@@ -134,6 +134,13 @@ def print_rollout_metrics(label: str, prefix: str, metrics: DaggerEvalMetrics) -
         print(
             f"  {prefix}_success_by_source: config={config_display} random={random_display}"
         )
+    total_failures = metrics.collision_failures + metrics.timeout_failures + metrics.solve_failures
+    if total_failures > 0:
+        print(
+            f"  {prefix}_failure_breakdown: collision={metrics.collision_failures} "
+            f"timeout={metrics.timeout_failures} solve_failure={metrics.solve_failures} "
+            f"(of {total_failures} failures)"
+        )
 
 
 def evaluation_seed_specs(
