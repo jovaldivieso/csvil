@@ -96,12 +96,17 @@ declare -A SCENARIO_MERGED=(
   [circle]="outputs/study/circle/circle_scaling.csv"
 )
 
-# -u/HOME: without these the container writes root-owned files into the bind mount.
+# -u/HOME/USER: without -u the container writes root-owned files into the bind mount,
+# but the host uid then has no entry in the image's passwd database, so anything
+# calling getpass.getuser() (LeRobot's dataset stack does) dies with
+# "KeyError: getpwuid(): uid not found". getuser() reads LOGNAME/USER/LNAME/USERNAME
+# before it falls back to the passwd database, so setting USER is enough. A fixed
+# literal rather than $(id -un) keeps runs identical across machines.
 # *_NUM_THREADS=1: IPOPT/BLAS and torch each grab every core otherwise, so parallel
 # runs would oversubscribe the machine and finish slower than running them serially.
 docker_run() {
   docker compose run --rm -T \
-    -u "$(id -u):$(id -g)" -e HOME=/tmp \
+    -u "$(id -u):$(id -g)" -e HOME=/tmp -e USER=csvil \
     -e OMP_NUM_THREADS=1 -e MKL_NUM_THREADS=1 -e OPENBLAS_NUM_THREADS=1 \
     csvil "$@"
 }

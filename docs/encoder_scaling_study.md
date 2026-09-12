@@ -59,8 +59,14 @@ everything up to `csvil` and run the `python ...` part directly.
 
 **Docker flags that matter:**
 
-- `-u "$(id -u):$(id -g)"` and `HOME=/tmp` — without them the container runs as root
-  and every checkpoint it writes into the bind mount is root-owned.
+- `-u "$(id -u):$(id -g)"`, `HOME=/tmp` and `USER=csvil` — without `-u` the container
+  runs as root and every checkpoint it writes into the bind mount is root-owned. But
+  once it runs as a host uid, that uid has no entry in the image's passwd database,
+  so anything calling `getpass.getuser()` (LeRobot's dataset stack does) fails with
+  `KeyError: getpwuid(): uid not found: <uid>`. `getuser()` reads
+  `LOGNAME`/`USER`/`LNAME`/`USERNAME` before falling back to the passwd database, so
+  setting `USER` is enough. This bites on any machine whose uid is not baked into
+  the image.
 - `*_NUM_THREADS=1` — IPOPT/BLAS and torch each grab every core otherwise, so
   parallel runs oversubscribe the machine. `docker compose run` has no `--cpus` flag.
 - `compose.yaml` sets `network: host` on the `csvil` build. BuildKit copies the
