@@ -247,11 +247,22 @@ class CasadiPlanner(Planner):
         # Add single vectorized constraint: X[:, 1:] == X_next
         self.opti.subject_to(self.X[:, 1:] == X_next)
 
-        # Vectorized actuator limits over all horizon steps.
+        # Vectorized actuator limits over all horizon steps. max_action may
+        # be a per-action-dimension array (e.g. unicycle2's independent
+        # [a_v, a_omega] bounds) rather than one scalar shared by every
+        # component -- broadcast a scalar to match, but repeat an array
+        # bound across the horizon explicitly: vec() flattens column-major,
+        # so comparing against the bare (nu,) array would misalign it
+        # against the flattened (nu*N,) actions instead of repeating
+        # per-column like a (nu, N) comparison would.
         for sub_sim, action_slice in zip(self.sub_simulators, self.robot_action_slices):
-            robot_max_action = float(getattr(sub_sim, "max_action", self.sim.max_action))
-            self.opti.subject_to(ca.vec(self.U[action_slice, :]) >= -robot_max_action)
-            self.opti.subject_to(ca.vec(self.U[action_slice, :]) <= robot_max_action)
+            action_dim = action_slice.stop - action_slice.start
+            robot_max_action = np.broadcast_to(
+                np.asarray(getattr(sub_sim, "max_action", self.sim.max_action), dtype=float).reshape(-1, 1),
+                (action_dim, self.N),
+            )
+            self.opti.subject_to(ca.vec(self.U[action_slice, :]) >= ca.vec(-robot_max_action))
+            self.opti.subject_to(ca.vec(self.U[action_slice, :]) <= ca.vec(robot_max_action))
 
         # Vectorized optional per-robot state bounds over steps 1..N.
         for sub_sim, state_slice in zip(self.sub_simulators, self.robot_state_slices):
@@ -487,8 +498,7 @@ class CasadiPlanner(Planner):
                 except RuntimeError as exc:
                     raise PlannerSolveError(
                         "CasADi planner solve failed in MPC mode (both warm-started and "
-                        f"cold-restarted). Current state estimate: {x0.tolist()}, goal: "
-                        f"{self.sim.goal_state.tolist()}."
+                        "cold-restarted)."
                     ) from exc
 
             self.last_X_sol = sol.value(self.X)
@@ -508,8 +518,7 @@ class CasadiPlanner(Planner):
                     self.cached_plan = sol.value(self.U)
                 except RuntimeError as exc:
                     raise PlannerSolveError(
-                        "CasADi planner solve failed in open-loop mode. "
-                        f"Initial state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
+                        "CasADi planner solve failed in open-loop mode."
                     ) from exc
 
             # Iterate through the cached plan

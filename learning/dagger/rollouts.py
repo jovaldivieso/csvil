@@ -304,7 +304,6 @@ def collect_dagger_rollouts(
             round_index=round_index,
         )
         episode_expert_mixing_rng = np.random.default_rng(episode_expert_mixing_seed)
-        planner_failed = False
         episode_discarded = False
         if policy_reset_fn is not None:
             policy_reset_fn()
@@ -488,18 +487,31 @@ def collect_dagger_rollouts(
                 expert_action = expert_planner(observation)
             except PlannerSolveError as exc:
                 print(
-                    "Skipping episode due to planner failure "
-                    f"(attempt={attempted_episodes}, step={step}, action_noise_std={action_noise_std:.6f}, "
-                    f"noise_seed={episode_noise_seed})."
-                )
-                print(
-                    "Planner failure context: "
+                    f"Planner failed to solve (attempt={attempted_episodes}, step={step}, "
+                    f"action_noise_std={action_noise_std:.6f}, noise_seed={episode_noise_seed}): {exc} "
                     f"initial_state={np.array2string(np.asarray(episode_initial_state), precision=6)}, "
                     f"current_state={np.array2string(np.asarray(state), precision=6)}, "
                     f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
                 )
-                print(f"Underlying solver error: {exc}")
-                planner_failed = True
+                # Unlike an unsafe expert label or an actual collision below,
+                # nothing about this state itself is necessarily wrong -- the
+                # solver simply failed to find a solution from it, often
+                # because this state was reached under a partially-trained
+                # policy's influence (expert_mixing_beta < 1) rather than
+                # pure expert control. backtrack_and_complete() re-attempts
+                # closed-loop completion under expert-only control from
+                # progressively earlier visited states, exactly as it already
+                # does for those other two failure modes, before giving up.
+                completed, state, rollout_steps = backtrack_and_complete()
+                if not completed:
+                    print(
+                        "Discarding DAgger episode: expert could not complete the "
+                        "learner trajectory from any collision-free state; the initial "
+                        "state/goal may be infeasible for the expert."
+                    )
+                    episode_discarded = True
+                else:
+                    reached_goal = True
                 break
 
             expert_next_state = simulator.predict_next_state(state, expert_action)
@@ -570,7 +582,7 @@ def collect_dagger_rollouts(
                 rollout_steps = step
                 break
 
-        if planner_failed or episode_discarded:
+        if episode_discarded:
             continue
         total_executed_steps += len(episode_actor_is_expert)
         expert_executed_steps += sum(episode_actor_is_expert)
@@ -667,9 +679,18 @@ def evaluate_policy_rollouts(
     )
     successes = 0
     steps_taken: list[int] = []
+    # Split the same running totals by source so a config-curriculum episode's
+    # (likely memorized/specialized) outcome is never averaged together with
+    # a random-sampled (generalization) one without also being visible on its
+    # own -- see DaggerEvalMetrics for why this distinction is worth keeping.
+    config_successes = 0
+    config_episodes = 0
+    random_successes = 0
+    random_episodes = 0
     baseline_goal = simulator.goal.copy()
     for episode_idx, seed_spec in enumerate(seed_specs):
-        if episode_idx < usable_count:
+        is_config_sourced = episode_idx < usable_count
+        if is_config_sourced:
             initial_state = provided_initial_states[episode_idx]
             if have_goal_states:
                 simulator.set_goal(provided_goal_states[episode_idx])
@@ -693,10 +714,20 @@ def evaluate_policy_rollouts(
         )
         successes += int(reached_goal)
         steps_taken.append(int(rollout_steps))
+        if is_config_sourced:
+            config_successes += int(reached_goal)
+            config_episodes += 1
+        else:
+            random_successes += int(reached_goal)
+            random_episodes += 1
     return DaggerEvalMetrics(
         success_rate=float(successes) / float(num_episodes),
         mean_steps=float(np.mean(np.asarray(steps_taken, dtype=float))),
         min_steps=min(steps_taken),
         max_steps=max(steps_taken),
         num_episodes=num_episodes,
+        config_successes=config_successes,
+        config_num_episodes=config_episodes,
+        random_successes=random_successes,
+        random_num_episodes=random_episodes,
     )

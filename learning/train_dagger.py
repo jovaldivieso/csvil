@@ -316,7 +316,17 @@ class DaggerTrainer:
             **self.cfg.encoder_config.kwargs,
         )
         flow = (
-            {"num_inference_steps": self.cfg.flow_config.num_inference_steps}
+            {
+                "num_inference_steps": self.cfg.flow_config.num_inference_steps,
+                # Per-robot physical action bound, e.g. unicycle2's
+                # [max_linear_accel, max_angular_accel] -- see FlowPolicy's
+                # own docstring for why its diffusion-style training needs
+                # this to keep every action dimension on comparable footing
+                # against its isotropic unit-scale noise prior. Homogeneous
+                # fleet (validated elsewhere), so simulators[0] speaks for
+                # every robot's own action bound.
+                "action_scale": [float(v) for v in np.asarray(self.simulator.simulators[0].max_action, dtype=float)],
+            }
             if self.cfg.policy_type in {"flow", "safeflow"}
             else {}
         )
@@ -368,6 +378,11 @@ class DaggerTrainer:
             print(
                 "Flow inference: "
                 f"num_inference_steps={self.cfg.flow_config.num_inference_steps}"
+            )
+            print(
+                "Flow action normalization: "
+                f"action_scale={[float(v) for v in np.asarray(self.simulator.simulators[0].max_action, dtype=float)]} "
+                "(per-dimension divisor against the flow-matching noise prior, from this robot's own max_action)"
             )
         if self.cfg.start_with_aggregation:
             print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
@@ -587,6 +602,13 @@ class DaggerTrainer:
         if self.cfg.policy_type in {"flow", "safeflow"}:
             data["flow_config"] = {
                 "num_inference_steps": self.cfg.flow_config.num_inference_steps,
+                # Saved explicitly (not re-derived from a live simulator at
+                # eval time) so a checkpoint's normalized action space stays
+                # tied to whatever max_action trained it, even if the
+                # evaluating caller's --config later changes those physical
+                # bounds -- see FlowPolicy's own docstring for why training
+                # and inference must agree on this exactly.
+                "action_scale": [float(v) for v in np.asarray(self.simulator.simulators[0].max_action, dtype=float)],
             }
         prefix = "flow_dagger" if self.cfg.policy_type in {"flow", "safeflow"} else "mlp_dagger"
         latest_checkpoint = self.cfg.checkpoint_dir / f"{prefix}_checkpoint.pt"

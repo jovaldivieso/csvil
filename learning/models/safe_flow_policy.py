@@ -352,8 +352,8 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 # slot 2 is fleet robot 3, not 2. The fleet contract only
                 # requires equal dimensions/types across robots, not equal
                 # numeric parameters (systems/multi_robot.py's per-robot
-                # config), so a neighbor can have a different max_speed than
-                # this robot -- forward-simulating it below with the wrong
+                # config), so a neighbor can have a different max_linear_vel
+                # than this robot -- forward-simulating it below with the wrong
                 # sim object would clip its forecast to *this* robot's
                 # limits instead of its own.
                 neighbor_fleet_idx = j if j < b else j + 1
@@ -470,6 +470,15 @@ class SafeFlowMPCPolicy(ActionPolicy):
                 observation_dict, x0_batch
             )
 
+        # inner._predict_velocity operates in FlowPolicy's normalized action
+        # space (see FlowPolicy.compute_loss/select_action), but the CasADi
+        # projector -- like every other physical consumer -- compares u_ref
+        # against the robot's real max_action, so it needs physical units.
+        # x itself stays in normalized space throughout (that's what the
+        # network was trained to integrate); only the values handed to/read
+        # back from the projector are rescaled at that boundary.
+        action_scale_np = inner.action_scale.detach().cpu().numpy()
+
         dt = 1.0 / float(inner.num_inference_steps)
         for step in range(inner.num_inference_steps):
             t_val = step * dt
@@ -480,9 +489,10 @@ class SafeFlowMPCPolicy(ActionPolicy):
 
             # --- SafeFlowMPC projection step ---
             x_np = x.detach().cpu().numpy()
+            x_physical_np = x_np * action_scale_np
 
             def _project_one(i: int) -> np.ndarray:
-                u_ref = x_np[i].T  # (action_dim, horizon) -> (nu, N) for CasADi
+                u_ref = x_physical_np[i].T  # (action_dim, horizon) -> (nu, N) for CasADi
                 neighbor_trajs = neighbor_trajs_batch[i] if neighbor_trajs_batch is not None else None
                 neighbor_active = neighbor_active_batch[i] if neighbor_active_batch is not None else None
                 return self.projectors[i].project(ego_obs_np[i], u_ref, neighbor_trajs, neighbor_active)
@@ -509,7 +519,12 @@ class SafeFlowMPCPolicy(ActionPolicy):
             else:
                 results = [_project_one(i) for i in range(batch_size)]
             for i, u_safe in enumerate(results):
-                x_np[i] = u_safe.T
+                # u_safe is physical units (same convention as u_ref above);
+                # back to normalized space before it re-enters the Euler loop.
+                x_np[i] = u_safe.T / action_scale_np
             x = torch.tensor(x_np, device=device, dtype=x.dtype)
 
-        return x
+        # Rescale the final normalized-space trajectory to physical units,
+        # matching FlowPolicy.select_action's own return convention -- every
+        # caller (apply_execution_noise, simulator.step, ...) expects that.
+        return x * inner.action_scale

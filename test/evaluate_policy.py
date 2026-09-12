@@ -354,15 +354,11 @@ def rollout_planner(
             print(
                 "Expert planner failed during evaluation "
                 f"(rollout={rollout_label}, source={initial_state_source}, seed={seed_value}, "
-                f"action_noise_std={action_noise_std:.6f})."
-            )
-            print(
-                "Planner failure context: "
+                f"action_noise_std={action_noise_std:.6f}): {exc} "
                 f"initial_state={np.array2string(np.asarray(initial_state), precision=6)}, "
                 f"current_state={np.array2string(np.asarray(state), precision=6)}, "
                 f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
             )
-            print(f"Underlying solver error: {exc}")
             break
         solve_times.append(time.perf_counter() - solve_start)
 
@@ -496,7 +492,15 @@ def _load_checkpoint_policy_components(
     Returns (checkpoint, state_dict, obs_encoder, action_dim, hidden_dims,
     prediction_horizon, observation_horizon).
     """
-    checkpoint = torch.load(model_dir, map_location=device)
+    # This checkpoint format was never "weights only" -- save_checkpoints
+    # (learning/train_dagger.py) always mixes plain Python metadata
+    # (encoder_kwargs, obs_feature_names, action_scale, ...) in alongside the
+    # actual tensors, which PyTorch >=2.6's weights_only=True default (aimed
+    # at untrusted, internet-sourced files) was never going to accept. These
+    # are locally-generated checkpoints from this same codebase's own
+    # training run, not third-party files, so there's nothing to defend
+    # against here that weights_only=True is designed to catch.
+    checkpoint = torch.load(model_dir, map_location=device, weights_only=False)
     if not (isinstance(checkpoint, dict) and "model_state_dict" in checkpoint):
         raise ValueError(
             f"'{policy_type}' models require a metadata checkpoint to infer the prediction_horizon "
@@ -590,6 +594,16 @@ def run_evaluation(
         flow_config_raw = checkpoint.get("flow_config")
         if isinstance(flow_config_raw, Mapping):
             num_inference_steps = int(flow_config_raw.get("num_inference_steps", 10))
+            # Absent on a checkpoint saved before per-dimension action
+            # normalization existed -- FlowPolicy's own default (all-ones,
+            # a no-op) is exactly what such a checkpoint was actually
+            # trained against, so leaving the kwarg unset there (rather
+            # than substituting today's live simulator's max_action) is
+            # what keeps it loadable and correct, not a fallback that
+            # happens to be convenient.
+            action_scale_raw = flow_config_raw.get("action_scale")
+            if action_scale_raw is not None:
+                policy_kwargs["action_scale"] = list(action_scale_raw)
         policy_kwargs["num_inference_steps"] = num_inference_steps
     if policy_type == "safeflow":
         policy_kwargs["simulator"] = simulator

@@ -17,6 +17,7 @@ robots:
   system: unicycle2
   config:
     dt: 0.05
-    max_accel: 3.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0

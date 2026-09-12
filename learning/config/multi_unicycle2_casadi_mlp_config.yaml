@@ -1,19 +1,19 @@
-# MLP architecture config for learning/train_dagger.py
+# Flow Policy architecture config for learning/train_dagger.py
 model:
   policy_type: mlp              # options: mlp, flow
   observation_horizon: 2        # number of past observation steps to consider
   prediction_horizon: 1         # number of future action steps to predict, set to 1 for single-step prediction
-  hidden_dims: [256, 256, 256]  # Trajectory prediction network hidden layers
-
+  hidden_dims: [256, 256, 256]  # Velocity prediction network hidden layers
+  
   encoder: deepset              # Set to transformer, GNN, etc
-
+  
   deepset:
     phi_dims: [128, 128]
     rho_dims: [128]
     pool_type: sum              # Can be sum, max, mean
 
   #encoder: transformer
-  
+
   #transformer:
   #  hidden_dim: 64
   #  num_heads: 4
@@ -22,33 +22,44 @@ model:
 
 # Optional DAgger defaults. Explicit command-line arguments override these values.
 training:
-  dagger_iterations: 3
-  trajectories_per_iteration: [200, 150, 100]
-  steps_per_trajectory: 200
-  target_epochs_per_round: [50, 40, 30]
+  dagger_iterations: 5
+  trajectories_per_iteration: [200, 200, 200, 200, 200]
+  steps_per_trajectory: 250
+  target_epochs_per_round: [40, 40, 40, 40, 40]
   action_noise_std: 0.03
   expert_mix_beta_start: 0.5
   expert_mix_beta_decay_rate: 0.25
-  expert_mix_decay_after_eval_success: 0.0
+  expert_mix_decay_after_eval_success: 0.5
+  # adaptive_beta_recovery: true
   eval_episodes: 100
   workspace_bounds: [-3.0, 3.0]
   tolerance_overrides:
-    pos_tol: 0.2
-    theta_tol: 1.1
+    pos_tol: 0.1
+    theta_tol: 0.78
     vel_tol: 0.1
     omega_tol: 0.1
-  training_curriculum: [random, config, random]
-  round_seeds: [0, 0, 0]   # base seed per round for random initial-state/goal sampling
-  restart_round_seed: true  # true replays identical draws whenever round_seeds repeats a value
+  training_curriculum: [config, config, config, config, config]
+  # round_seeds: [0, 0, 0]    # base seed per round for random initial-state/goal sampling
+  # restart_round_seed: true  # true replays identical draws whenever round_seeds repeats a value
   initial_states:
     - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
     - [[0.0, -2.0, 1.57, 0.0, 0.0], [0.0, 2.0, -1.57, 0.0, 0.0]]
     - [[-1.5, -1.5, 0.79, 0.0, 0.0], [1.5, 1.5, -2.36, 0.0, 0.0]]
     - [[-1.5, 1.5, -0.79, 0.0, 0.0], [1.5, -1.5, 2.36, 0.0, 0.0]]
+    - [[-2.0, 0.0, 1.57, 0.0, 0.0], [1.0, 0.0, 1.57, 0.0, 0.0]]
     - [[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
+    - [[-2.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 3.14, 0.0, 0.0]]
+    - [[2.0, 0.0, 3.14, 0.0, 0.0], [0.0, 0.0, 3.14, 0.0, 0.0]]
+    - [[0.0, 0.0, 3.14, 0.0, 0.0], [-2.0, 0.0, 0.0, 0.0, 0.0]]
+    - [[0.0, 0.0, 3.14, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]
   goal_states:
     - [[2.0, 0.0, 0.0], [-2.0, 0.0, 3.14]]
     - [[0.0, 2.0, 1.57], [0.0, -2.0, -1.57]]
     - [[1.5, 1.5, 0.79], [-1.5, -1.5, -2.36]]
     - [[1.5, -1.5, -0.79], [-1.5, 1.5, 2.36]]
-    - [[0.5, 1.5, 1.57], [-0.5, -1.5, -1.57]]
+    - [[1.0, 0.0, 1.57], [2.5, 0.0, 1.57]]
+    - [[1.0, 1.5, 1.57], [-1.0, 1.5, 1.57]]
+    - [[2.0, 0.0, 0.0], [0.0, 0.0, 3.14]]
+    - [[-2.0, 0.0, 3.14], [0.0, 0.0, 3.14]]
+    - [[0.0, 0.0, 3.14], [2.0, 0.0, 0.0]]
+    - [[0.0, 0.0, 3.14], [-2.0, 0.0, 3.14]]

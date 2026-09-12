@@ -27,11 +27,17 @@ class Unicycle2(DynamicsSimulator):
         self.randomize_initial_velocity = config.get("randomize_initial_velocity", False)
 
         # physical limits from unicycle2_v0:
-        self.max_accel = float(config.get("max_accel", 0.25))
-        self.max_action = self.max_accel
-        
-        self.max_speed = float(config.get("max_speed", 0.5))
-        self.max_omega = float(config.get("max_omega", 0.5))
+        self.max_linear_accel = float(config.get("max_linear_accel", 0.25))
+        # Defaults to max_linear_accel (symmetric, matching prior behavior)
+        # when omitted, rather than requiring every existing config to be
+        # updated -- but action = [a_v, a_omega] is no more inherently
+        # symmetric than state = [..., v, omega] already isn't
+        # (max_linear_vel and max_angular_vel have always been independent).
+        self.max_angular_accel = float(config.get("max_angular_accel", self.max_linear_accel))
+        self.max_action = np.array([self.max_linear_accel, self.max_angular_accel], dtype=float)
+
+        self.max_linear_vel = float(config.get("max_linear_vel", 0.5))
+        self.max_angular_vel = float(config.get("max_angular_vel", 0.5))
 
         self.pos_tol = float(config.get("pos_tol", 0.05))
         self.theta_tol = float(config.get("theta_tol", 0.05))
@@ -45,11 +51,11 @@ class Unicycle2(DynamicsSimulator):
 
         # constrains velocity and orientation:
         self.state_lower_bounds = np.array(
-            [-np.inf, -np.inf, -np.inf, -self.max_speed, -self.max_omega],
+            [-np.inf, -np.inf, -np.inf, -self.max_linear_vel, -self.max_angular_vel],
             dtype=float,
         )
         self.state_upper_bounds = np.array(
-            [np.inf, np.inf, np.inf, self.max_speed, self.max_omega],
+            [np.inf, np.inf, np.inf, self.max_linear_vel, self.max_angular_vel],
             dtype=float,
         )
 
@@ -80,8 +86,8 @@ class Unicycle2(DynamicsSimulator):
         y = y + v * np.sin(theta) * self.dt
         theta = np.arctan2(np.sin(theta + omega * self.dt), np.cos(theta + omega * self.dt))
 
-        v = np.clip(v + a_v * self.dt, -self.max_speed, self.max_speed)
-        omega = np.clip(omega + a_omega * self.dt, -self.max_omega, self.max_omega)
+        v = np.clip(v + a_v * self.dt, -self.max_linear_vel, self.max_linear_vel)
+        omega = np.clip(omega + a_omega * self.dt, -self.max_angular_vel, self.max_angular_vel)
 
         return np.array([x, y, theta, v, omega], dtype=float)
 
@@ -238,8 +244,8 @@ class Unicycle2(DynamicsSimulator):
         v = 0.0
         omega = 0.0
         if self.randomize_initial_velocity:
-            v = rng.uniform(-self.max_speed, self.max_speed)
-            omega = rng.uniform(-self.max_omega, self.max_omega)
+            v = rng.uniform(-self.max_linear_vel, self.max_linear_vel)
+            omega = rng.uniform(-self.max_angular_vel, self.max_angular_vel)
         
         return np.array([pos[0], pos[1], theta, v, omega])
 

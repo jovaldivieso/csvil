@@ -58,7 +58,7 @@ class DynamicsProtocol(Protocol):
     nx: int
     nu: int
     obs_dim: int
-    max_action: float
+    max_action: float | np.ndarray
     is_euclidean: bool
     randomize_goal: bool
     angular_state_indices: tuple[int, ...]

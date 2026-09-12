@@ -1,4 +1,4 @@
-# Controller Synthesis via Imitation Learning
+# Multi-Robot Controller Synthesis via Imitation Learning
 
 This repository distils a computationally expensive motion planner into a faster neural policy for online control. It supports single robots and homogeneous fleets through the same fleet-first simulator interface, with CasADi as the current expert planner and optional db-LaCAM and future planner backends.
 
@@ -151,7 +151,9 @@ Available planners are:
 Each planner and corresponding dynamics use a YAML configuration file in
 `test/config/`. These "expert configs" hold only solver/dynamics
 parameters — time step, MPC horizon, cost weights, collision radii, and
-system-specific limits (e.g. `max_accel`, `max_omega`). They intentionally do
+system-specific limits (e.g. `max_accel` for double_integrator,
+`max_linear_accel`/`max_angular_accel`/`max_linear_vel`/`max_angular_vel` for
+unicycle2). They intentionally do
 **not** define a goal, random initial-state sampling bounds, or convergence
 tolerances any more: those are experiment-specific and now live in the policy
 config's `training:` block (see below), so the same expert config is reused,
@@ -166,9 +168,10 @@ robots:
   system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 2.0
+    max_angular_accel: 5.0
+    max_linear_vel: 2.0
+    max_angular_vel: 2.0
 ```
 
 This expands into `num_robots` identical entries before validation, so nothing
@@ -326,18 +329,30 @@ python test/evaluate_policy.py \
 `--policy-type` supports `mlp`, `flow`, and `safeflow` (flow matching with a
 CasADi safety projection at inference time; SafeFlowMPC, Oelerich et al.,
 2026) -- a `flow`-trained checkpoint can generally be evaluated as either.
-The exception: for a system with velocity states, `safeflow` construction
-enforces a hard terminal-rest constraint and rejects (`ValueError`, at
-construction time) any checkpoint whose `prediction_horizon` is too short to
-decelerate from that system's own worst-case velocity to zero at its own
-`max_action` -- a `flow` checkpoint trained with a short horizon is not
-guaranteed to also be evaluable as `safeflow`. This interchangeability also
+For a system with velocity states, `safeflow`'s projector pulls terminal
+velocity/angular-velocity toward zero as a soft cost (`terminal_velocity_weight`),
+not a hard constraint: a hard equality is only satisfiable when the horizon
+leaves no margin beyond the system's own worst-case braking distance for
+anything else sharing that horizon (tracking the flow policy's own proposal,
+collision avoidance), which in practice made the projector spend the whole
+horizon braking and never actually progress. This interchangeability also
 assumes the checkpoint's saved observation schema includes
 `observation.state_mask`: a checkpoint trained before that field existed
 saved a smaller `state_dim` than `resolve_checkpoint_observation_dimensions`
 now expects and is rejected outright (for either policy type, not just
 `safeflow`) -- retrain against the current schema rather than trying to
-evaluate such a checkpoint.
+evaluate such a checkpoint. For a multi-robot fleet specifically (more than
+one robot, so each has neighbors to forecast), `SafeFlowMPCPolicy`
+construction additionally rejects (`ValueError`) any checkpoint whose
+`model.observation_horizon` is `1` -- a neighbor's velocity can only be
+estimated by differencing two consecutive observation frames -- and any
+system with no velocity state (e.g. `single_integrator`, `unicycle1`), since
+neither can support the decentralized neighbor-velocity forecast SafeFlow's
+multi-robot coordination needs. `learning/config/multi_double_integrator_casadi_flow_config.yaml`
+sets `observation_horizon: 1` and is therefore a `flow`-only config for
+multi-robot use -- it cannot also be evaluated as `safeflow` without
+retraining at `observation_horizon >= 2`. A single robot (no neighbors) is
+unaffected by either check.
 `--initial-states`/`--goal-states` are
 optional (omit them for randomly seeded rollouts); pass them to check
 performance on a specific scenario, e.g. the same swap/crossing cases used
@@ -517,3 +532,7 @@ lerobot-dataset-viz \
 - Benjamin Rivière, Wolfgang Hönig, Yisong Yue, Soon-Jo Chung. (2020). GLAS: Global-to-Local Safe Autonomy Synthesis for Multi-Robot Motion Planning with End-to-End Learning. https://doi.org/10.1109/LRA.2020.2994035
 - Stéphane Ross, Geoffrey J. Gordon, J. Andrew Bagnell. (2011). A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning. https://doi.org/10.48550/arXiv.1011.0686
 - Manzil Zaheer, Satwik Kottur, Siamak Ravanbhakhsh, Barnabás Póczos, Ruslan Salakhutdinov, Alexander J. Smola. (2017). Deep Sets. https://doi.org/10.48550/arXiv.1703.06114
+
+## License
+
+This project is licensed under the MIT License, see the LICENSE file for details.

@@ -70,9 +70,10 @@ class Unicycle2SystemConfig:
     goal: tuple[float, float, float] = (0.0, 0.0, 0.0)
     randomize_goal: bool = True
     randomize_initial_velocity: bool = False
-    max_accel: float = 0.25
-    max_speed: float = 0.5
-    max_omega: float = 0.5
+    max_linear_accel: float = 0.25
+    max_angular_accel: float = 0.25
+    max_linear_vel: float = 0.5
+    max_angular_vel: float = 0.5
     pos_tol: float = 0.05
     theta_tol: float = 0.05
     vel_tol: float = 0.05
@@ -323,9 +324,10 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
             "goal",
             "randomize_goal",
             "randomize_initial_velocity",
-            "max_accel",
-            "max_speed",
-            "max_omega",
+            "max_linear_accel",
+            "max_angular_accel",
+            "max_linear_vel",
+            "max_angular_vel",
             "error_tolerance",
             "pos_tol",
             "theta_tol",
@@ -1000,31 +1002,44 @@ def validate_system_config(
         if omega_tol <= 0:
             raise ConfigurationError("'omega_tol' must be positive.")
         workspace_sampling = _workspace_sampling(raw_config)
+        max_linear_accel = _float(raw_config, "max_linear_accel", 0.25)
         system_cfg = Unicycle2SystemConfig(
             dt=dt,
             goal=_vector(raw_config, "goal", 3, (0.0, 0.0, 0.0)),
             randomize_goal=_bool(raw_config, "randomize_goal", "goal" not in raw_config),
             randomize_initial_velocity=_bool(raw_config, "randomize_initial_velocity", False),
-            max_accel=_float(raw_config, "max_accel", 0.25),
-            max_speed=_float(raw_config, "max_speed", 0.5),
-            max_omega=_float(raw_config, "max_omega", 0.5),
+            max_linear_accel=max_linear_accel,
+            # Defaults to max_linear_accel (symmetric) when omitted, rather
+            # than requiring every existing config to set it explicitly.
+            max_angular_accel=_float(raw_config, "max_angular_accel", max_linear_accel),
+            max_linear_vel=_float(raw_config, "max_linear_vel", 0.5),
+            max_angular_vel=_float(raw_config, "max_angular_vel", 0.5),
             pos_tol=pos_tol,
             theta_tol=theta_tol,
             vel_tol=vel_tol,
             omega_tol=omega_tol,
             workspace_sampling=workspace_sampling,
         )
-        if system_cfg.max_accel <= 0 or system_cfg.max_speed <= 0 or system_cfg.max_omega <= 0:
-            raise ConfigurationError("'max_accel', 'max_speed', and 'max_omega' must be positive.")
+        if (
+            system_cfg.max_linear_accel <= 0
+            or system_cfg.max_angular_accel <= 0
+            or system_cfg.max_linear_vel <= 0
+            or system_cfg.max_angular_vel <= 0
+        ):
+            raise ConfigurationError(
+                "'max_linear_accel', 'max_angular_accel', 'max_linear_vel', and 'max_angular_vel' "
+                "must be positive."
+            )
         config_out = {
             "dt": system_cfg.dt,
             "goal": list(system_cfg.goal),
             "randomize_goal": system_cfg.randomize_goal,
             "workspace_bounds": list(system_cfg.workspace_sampling.bounds),
             "randomize_initial_velocity": system_cfg.randomize_initial_velocity,
-            "max_accel": system_cfg.max_accel,
-            "max_speed": system_cfg.max_speed,
-            "max_omega": system_cfg.max_omega,
+            "max_linear_accel": system_cfg.max_linear_accel,
+            "max_angular_accel": system_cfg.max_angular_accel,
+            "max_linear_vel": system_cfg.max_linear_vel,
+            "max_angular_vel": system_cfg.max_angular_vel,
             "pos_tol": system_cfg.pos_tol,
             "theta_tol": system_cfg.theta_tol,
             "vel_tol": system_cfg.vel_tol,

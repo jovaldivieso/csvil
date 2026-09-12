@@ -26,17 +26,23 @@ class CasadiTrajectoryProjector:
     with a hard ``d_collision`` floor beneath it (never relaxable -- see
     ``__init__``) so slack can eat into the safety margin but never into a
     modeled physical collision. This floor applies only to the neighbor
-    trajectories supplied to the projector. The terminal condition is the control-invariant safety
-    condition itself (SafeFlowMPC, Oelerich et al., 2026, Eq. 12), enforced
-    as the hard equality constraint the paper states: terminal
-    velocity/angular-velocity must be exactly zero so the horizon ends in a
-    safe, controllable rest state -- not tracking the task goal, which the
-    paper's own formulation never asks the projector to do (task-directed
-    progress comes entirely from the flow policy's own proposal, ``u_ref``).
-    First-order systems (no velocity state) need no terminal constraint at
-    all: Assumption 1's control-invariant-safety-set requirement is
-    trivially satisfied everywhere for a driftless first-order system (u=0
-    is a fixed point at any state), not skipped as a deviation from it.
+    trajectories supplied to the projector. The terminal condition -- the
+    control-invariant safety condition itself (SafeFlowMPC, Oelerich et al.,
+    2026, Eq. 12): driving terminal velocity/angular-velocity toward zero so
+    the horizon ends in a safe, controllable rest state -- is a soft cost,
+    not a hard equality: a hard ``velocity == 0`` constraint is only
+    satisfiable when the horizon is long enough to brake from this system's
+    own worst-case speed at its own max_action with *no* margin left for
+    anything else (u_ref tracking, collision avoidance sharing the same
+    horizon), which made the projector fight itself and stall rather than
+    make progress even in ordinary, non-adversarial scenarios. Not tracking
+    the task goal, which the paper's own formulation never asks the
+    projector to do (task-directed progress comes entirely from the flow
+    policy's own proposal, ``u_ref``). First-order systems (no velocity
+    state) need no terminal term at all: Assumption 1's
+    control-invariant-safety-set requirement is trivially satisfied
+    everywhere for a driftless first-order system (u=0 is a fixed point at
+    any state).
     """
 
     def _resolve_r_diag(self, config: Mapping[str, Any], robot_index: int) -> np.ndarray:
@@ -101,18 +107,26 @@ class CasadiTrajectoryProjector:
         # The internal planning horizon matches the tracked portion exactly
         # (SafeFlowMPC, Oelerich et al. 2026, Eq. 12): the terminal "come to
         # rest" condition is enforced at the end of this same N-step horizon,
-        # not on an appended tail beyond it, as the hard equality constraint
-        # the paper states (see the terminal-velocity block below). A
-        # too-short horizon can therefore make the solve genuinely
-        # infeasible -- not just weaken a soft penalty -- if it cannot
-        # decelerate from this system's own worst-case velocity to zero at
-        # its own max_action; the construction-time check below raises
-        # before that can happen silently at runtime.
+        # not on an appended tail beyond it -- as a soft cost (see the
+        # terminal-velocity block below), so a too-short horizon just
+        # weakens how close to rest that cost can pull the solution, rather
+        # than risking outright infeasibility.
         self.N = self.tracked_horizon
 
         self.collision_slack_penalty_weight = float(config.get("collision_slack_penalty_weight", 10000.0))
         if self.collision_slack_penalty_weight <= 0:
             raise ValueError("'collision_slack_penalty_weight' must be positive.")
+
+        # Independent of Q_diag/terminal_cost_multiplier: those are tuned for
+        # the expert planner's own goal-distance terminal cost (a much
+        # longer horizon, tracking a possibly-distant position), which is a
+        # different quantity at a different scale than "how much does a
+        # small residual terminal velocity cost." Reusing them here made
+        # even a tiny terminal velocity extremely expensive, so the cheapest
+        # way to satisfy it was to barely accelerate in the first place.
+        self.terminal_velocity_weight = float(config.get("terminal_velocity_weight", 1.0))
+        if self.terminal_velocity_weight <= 0:
+            raise ValueError("'terminal_velocity_weight' must be positive.")
 
         self.neighbor_slots = int(neighbor_slots)
         if self.neighbor_slots < 0:
@@ -136,9 +150,10 @@ class CasadiTrajectoryProjector:
 
         # How close to exactly zero a re-simulated fallback trajectory's
         # terminal velocity must be to still count as "coasting to a safe
-        # rest" (see _revalidate_fallback) -- not the NLP's own solver
-        # tolerance, which the hard terminal_velocity == 0 constraint below
-        # already enforces for an actual solve.
+        # rest" (see _revalidate_fallback). The live solve below only
+        # penalizes terminal velocity as a soft cost (see
+        # terminal_velocity_weight), so this tolerance is the only actual
+        # guarantee a *reused* fallback trajectory is safe to coast out on.
         self.fallback_terminal_velocity_tol = float(config.get("fallback_terminal_velocity_tol", 1e-2))
         if self.fallback_terminal_velocity_tol < 0:
             raise ValueError("'fallback_terminal_velocity_tol' must be non-negative.")
@@ -182,9 +197,17 @@ class CasadiTrajectoryProjector:
         X_next = F_map(self.X[:, :-1], self.U)
         self.opti.subject_to(self.X[:, 1:] == X_next)
 
-        robot_max_action = float(getattr(self.sim, "max_action"))
-        self.opti.subject_to(ca.vec(self.U) >= -robot_max_action)
-        self.opti.subject_to(ca.vec(self.U) <= robot_max_action)
+        # max_action may be a per-action-dimension array (e.g. unicycle2's
+        # independent [a_v, a_omega] bounds) rather than one scalar shared
+        # by every component -- broadcast_to handles both a bare scalar and
+        # an array uniformly; vec() then flattens column-major, matching
+        # how self.U itself flattens.
+        robot_max_action = np.broadcast_to(
+            np.asarray(getattr(self.sim, "max_action"), dtype=float).reshape(-1, 1),
+            (self.sim.nu, self.tracked_horizon),
+        )
+        self.opti.subject_to(ca.vec(self.U) >= ca.vec(-robot_max_action))
+        self.opti.subject_to(ca.vec(self.U) <= ca.vec(robot_max_action))
 
         sub_lower = getattr(self.sim, "state_lower_bounds", None)
         sub_upper = getattr(self.sim, "state_upper_bounds", None)
@@ -262,18 +285,30 @@ class CasadiTrajectoryProjector:
         # Terminal condition: come to a safe, controllable rest -- the
         # projector's actual terminal safety condition (SafeFlowMPC, Oelerich
         # et al. 2026, Eq. 12: zero velocity/acceleration/jerk at the
-        # horizon's end), enforced as the hard equality constraint the paper
-        # states rather than a soft cost: a soft penalty lets the optimizer
-        # trade residual terminal motion for tracking u_ref, which does not
-        # actually establish the invariant resting trajectory the fallback
-        # in project() relies on (Theorem 2). Not tracking the task goal:
-        # all task-directed progress already comes from the flow network's
-        # own learned proposal (u_ref, tracked by the running cost above);
-        # re-adding goal-tracking here creates a competing incentive to race
-        # toward a possibly-distant goal within just this short horizon,
-        # which can override the network's own learned pacing and saturate
-        # the action bounds -- confirmed to cause collisions a plain,
-        # unprojected flow rollout did not have.
+        # horizon's end), modeled as a soft cost rather than a hard equality.
+        # A hard `terminal_velocity == 0` constraint is only satisfiable when
+        # the horizon is long enough to brake from this system's own
+        # worst-case speed at its own max_action with *no* margin left for
+        # anything else sharing that same horizon (u_ref tracking, collision
+        # avoidance) -- in practice this made the live solve spend the
+        # entire horizon braking whenever the robot was moving anywhere near
+        # top speed, unable to also make progress, even in ordinary,
+        # non-adversarial scenarios (confirmed: reverting just this
+        # constraint to a soft cost, nothing else, took a stalled/wandering
+        # rollout back to converging normally). The safe-rest guarantee a
+        # *reused* fallback trajectory needs (Theorem 2) doesn't actually
+        # depend on the live optimal solve always resting exactly either --
+        # it comes from `_revalidate_fallback` re-checking the cached
+        # trajectory's own terminal velocity against
+        # `fallback_terminal_velocity_tol` before ever reusing it, which is
+        # independent of what this cost function optimizes for. Not tracking
+        # the task goal: all task-directed progress already comes from the
+        # flow network's own learned proposal (u_ref, tracked by the running
+        # cost above); re-adding goal-tracking here creates a competing
+        # incentive to race toward a possibly-distant goal within just this
+        # short horizon, which can override the network's own learned
+        # pacing and saturate the action bounds -- confirmed to cause
+        # collisions a plain, unprojected flow rollout did not have.
         #
         # Eq. 12 zeros every state-derivative level except position -- for
         # the paper's own manipulator (state = [q, q_dot, q_ddot, jerk]),
@@ -297,37 +332,7 @@ class CasadiTrajectoryProjector:
         self.velocity_idx = tuple(getattr(self.sim, "velocity_state_indices", ()))
         if self.velocity_idx:
             terminal_velocity = self.X[list(self.velocity_idx), self.N]
-            self.opti.subject_to(terminal_velocity == 0)
-
-            # Feasibility sanity check at construction time rather than only
-            # discovering it via opaque runtime solve failures: this hard
-            # constraint is only satisfiable if the horizon is long enough
-            # to decelerate from this system's own worst-case velocity to
-            # zero at its own max_action.
-            dt = float(getattr(self.sim, "dt"))
-            robot_max_action = float(getattr(self.sim, "max_action"))
-            state_upper = getattr(self.sim, "state_upper_bounds", None)
-            state_lower = getattr(self.sim, "state_lower_bounds", None)
-            if state_upper is not None and state_lower is not None and robot_max_action > 0:
-                state_upper = np.asarray(state_upper, dtype=float)
-                state_lower = np.asarray(state_lower, dtype=float)
-                worst_case_speeds = [
-                    max(abs(state_upper[idx]), abs(state_lower[idx]))
-                    for idx in self.velocity_idx
-                    if np.isfinite(state_upper[idx]) and np.isfinite(state_lower[idx])
-                ]
-                if worst_case_speeds:
-                    min_feasible_horizon = max(worst_case_speeds) / (robot_max_action * dt)
-                    if self.N < min_feasible_horizon:
-                        raise ValueError(
-                            f"'horizon' ({self.N}) is too short for {type(self.sim).__name__} to "
-                            "always satisfy the hard terminal-velocity constraint: decelerating from "
-                            f"its worst-case velocity ({max(worst_case_speeds)}) at max_action "
-                            f"({robot_max_action}) needs at least {min_feasible_horizon:.1f} steps at "
-                            f"dt={dt}. Increase 'horizon' (equivalently, the flow policy's own "
-                            "prediction_horizon) -- otherwise this constraint can be infeasible from a "
-                            "reachable state."
-                        )
+            cost += self.terminal_velocity_weight * ca.sumsqr(terminal_velocity)
 
         self.opti.minimize(cost)
         self.opti.subject_to(self.X[:, 0] == self.x0_param)
@@ -601,34 +606,6 @@ class CasadiTrajectoryProjector:
             self.opti.set_initial(self.opti.lam_g, self._prev_lam_g)
 
         try:
-            if self.velocity_idx:
-                # __init__'s own feasibility check only catches this for a
-                # system that declares state_upper_bounds/state_lower_bounds
-                # (e.g. unicycle2, via max_speed/max_omega) -- DoubleIntegrator
-                # has a velocity state but no such bound (velocity is
-                # unconstrained there apart from what the trajectory itself
-                # does), so that check silently never fires for it, and a
-                # sufficiently fast *actual* x0 would otherwise only surface
-                # as an opaque IPOPT failure below. Checking the real x0
-                # here (rather than a worst case) is a strictly *necessary*
-                # condition regardless of system: even braking at
-                # max_action every single step from k=0, this state's own
-                # current speed cannot reach exactly zero by step N if it
-                # needs more than N steps to do so, independent of dynamics,
-                # goal, or collision terms -- so there is no point spending
-                # two IPOPT solves (warm and cold) on a problem already
-                # known infeasible; skip straight to fallback recovery.
-                current_speed = float(np.max(np.abs(x0[list(self.velocity_idx)])))
-                dt = float(getattr(self.sim, "dt"))
-                robot_max_action = float(getattr(self.sim, "max_action"))
-                if robot_max_action > 0 and current_speed > robot_max_action * dt * self.N:
-                    raise RuntimeError(
-                        f"Current speed ({current_speed}) cannot be decelerated to the hard "
-                        f"terminal-rest constraint within this projector's {self.N}-step horizon "
-                        f"at max_action={robot_max_action}, dt={dt} (needs >= "
-                        f"{current_speed / (robot_max_action * dt):.1f} steps) -- provably "
-                        "infeasible regardless of warm start."
-                    )
             try:
                 sol = self.opti.solve()
             except RuntimeError:

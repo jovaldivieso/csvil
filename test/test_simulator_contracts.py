@@ -561,9 +561,9 @@ class SimulatorContractTests(unittest.TestCase):
                 "dt": 0.05,
                 "randomize_goal": True,
                 "randomize_initial_velocity": False,
-                "max_accel": 0.25,
-                "max_speed": 0.5,
-                "max_omega": 0.5,
+                "max_linear_accel": 0.25,
+                "max_linear_vel": 0.5,
+                "max_angular_vel": 0.5,
             },
         )
 

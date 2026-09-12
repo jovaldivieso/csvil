@@ -15,7 +15,9 @@ from learning.dagger.rollouts import (
     MAX_BACKTRACK_CANDIDATES,
     _geometric_backtrack_indices,
     collect_dagger_rollouts,
+    evaluate_policy_rollouts,
 )
+from planning.casadi_planner import PlannerSolveError
 from systems.seed_utils import initial_state_seed_for_rollout
 
 
@@ -45,6 +47,10 @@ class _FakeSimulator:
     @property
     def goal_dim(self) -> int:
         return 1
+
+    @property
+    def goal_state(self) -> np.ndarray:
+        return self.goal.copy()
 
     def set_goal(self, goal: np.ndarray) -> None:
         self.goal = np.asarray(goal, dtype=float).copy()
@@ -120,6 +126,26 @@ class _SequencedPlanner:
         self.call_count += 1
         index = min(self.call_count, len(self.actions)) - 1
         return self.actions[index].copy()
+
+
+class _FailThenSucceedPlanner:
+    """Raises PlannerSolveError (a genuine solve failure) on its first call, then
+    returns a constant safe action -- unlike _ScriptedPlanner, which always
+    successfully solves but returns an action that's unsafe to execute."""
+
+    def __init__(self, safe_action: list[float]) -> None:
+        self.safe_action = np.asarray(safe_action, dtype=float)
+        self.call_count = 0
+        self.reset_count = 0
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+    def __call__(self, observation: np.ndarray) -> np.ndarray:
+        self.call_count += 1
+        if self.call_count == 1:
+            raise PlannerSolveError("forced solver failure for test")
+        return self.safe_action.copy()
 
 
 class _ConstantPlanner:
@@ -202,12 +228,14 @@ class GeometricBacktrackIndicesTests(unittest.TestCase):
 class CollectDaggerRolloutsBacktrackTests(unittest.TestCase):
     """End-to-end coverage of the backtrack/recovery path through collect_dagger_rollouts.
 
-    Both call sites that trigger backtrack_and_complete() are exercised: the
-    raw-expert-label pre-check (predict_next_state says the label is unsafe
-    before it's ever executed) and the actual post-execution collision (the
-    label looked safe but stepping the simulator wasn't). In both cases the
-    scripted planner/simulator make exactly one candidate (s_0) succeed on
-    retry, so the test can assert precisely which frame ends up written.
+    All three call sites that trigger backtrack_and_complete() are exercised:
+    the raw-expert-label pre-check (predict_next_state says the label is
+    unsafe before it's ever executed), the actual post-execution collision
+    (the label looked safe but stepping the simulator wasn't), and a genuine
+    planner solve failure (PlannerSolveError, e.g. an infeasible or
+    unsolvable state -- not merely an unsafe-but-solved label). In every case
+    the scripted planner/simulator make exactly one candidate (s_0) succeed
+    on retry, so the test can assert precisely which frame ends up written.
     """
 
     def test_unsafe_expert_label_triggers_backtrack_and_only_recovered_frame_is_saved(self) -> None:
@@ -267,6 +295,37 @@ class CollectDaggerRolloutsBacktrackTests(unittest.TestCase):
         self.assertEqual(metrics.success_rate, 1.0)
         self.assertEqual(metrics.min_steps, 1)
         self.assertEqual(metrics.max_steps, 1)
+        self.assertEqual(len(writer.frames), 1)
+        self.assertEqual(writer.frames[0]["action"], [1.0])
+        self.assertEqual(writer.episode_boundaries, [1])
+
+    def test_planner_solve_failure_triggers_backtrack_and_only_recovered_frame_is_saved(self) -> None:
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
+        planner = _FailThenSucceedPlanner(safe_action=[1.0])
+        writer = _FakeDatasetWriter()
+
+        metrics = collect_dagger_rollouts(
+            simulator=simulator,
+            expert_planner=planner,
+            dataset_writer=writer,
+            trajectories_per_iteration=1,
+            steps_per_trajectory=2,
+            action_noise_std=0.0,
+            action_noise_seed=0,
+            initial_state_seed=0,
+            expert_mixing_beta=1.0,
+            policy_action_fn=None,
+            frame_builder=_frame_builder,
+            initial_states=[[0.0]],
+            goal_states=None,
+        )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        self.assertEqual(metrics.min_steps, 1)
+        self.assertEqual(metrics.max_steps, 1)
+        # The failed first attempt must not discard the episode outright --
+        # only the recovered, expert-only-control frame is saved.
         self.assertEqual(len(writer.frames), 1)
         self.assertEqual(writer.frames[0]["action"], [1.0])
         self.assertEqual(writer.episode_boundaries, [1])
@@ -509,6 +568,55 @@ class RestartInitialStateRoundTests(unittest.TestCase):
         round0 = self._sample_via_collect(round_index=0, restart_initial_state_round=False)
         round1 = self._sample_via_collect(round_index=1, restart_initial_state_round=False)
         self.assertNotEqual(round0, round1)
+
+
+class EvaluatePolicyRolloutsSourceSplitTests(unittest.TestCase):
+    """evaluate_policy_rollouts must report config- and random-sourced episode
+    outcomes separately (DaggerEvalMetrics.config_*/random_*), not just the
+    pooled success_rate -- the curriculum's explicit initial_states/goal_states
+    are the leading `usable_count` episodes, everything after that falls back
+    to simulator RNG sampling (see its own usable_count logic).
+    """
+
+    def test_config_and_random_successes_are_counted_separately(self) -> None:
+        # goal_threshold=1000.0 with a constant zero action means:
+        # - a config-sourced episode starting exactly at the threshold
+        #   terminates instantly (reached_goal=True, 0 steps) every time.
+        # - a random-sourced episode starts uniformly in [-1, 1] (see
+        #   _FakeSimulator.random_initial_state) and a zero action never
+        #   moves it, so it can never reach 1000.0 -- always a timeout.
+        simulator = _FakeSimulator(collision_threshold=1e9, goal_threshold=1000.0)
+        metrics = evaluate_policy_rollouts(
+            simulator=simulator,
+            num_episodes=5,
+            num_steps=3,
+            seed_start=0,
+            action_fn=lambda observation: np.array([0.0]),
+            initial_states=[[1000.0], [1000.0]],
+            goal_states=[[0.0], [0.0]],
+        )
+        assert metrics is not None
+        self.assertEqual(metrics.num_episodes, 5)
+        self.assertEqual(metrics.config_num_episodes, 2)
+        self.assertEqual(metrics.config_successes, 2)
+        self.assertEqual(metrics.random_num_episodes, 3)
+        self.assertEqual(metrics.random_successes, 0)
+        # Pooled rate still reflects both groups combined.
+        self.assertAlmostEqual(metrics.success_rate, 2.0 / 5.0)
+
+    def test_no_explicit_states_leaves_config_bucket_empty(self) -> None:
+        simulator = _FakeSimulator(collision_threshold=1e9, goal_threshold=1000.0)
+        metrics = evaluate_policy_rollouts(
+            simulator=simulator,
+            num_episodes=3,
+            num_steps=2,
+            seed_start=0,
+            action_fn=lambda observation: np.array([0.0]),
+        )
+        assert metrics is not None
+        self.assertEqual(metrics.config_num_episodes, 0)
+        self.assertEqual(metrics.config_successes, 0)
+        self.assertEqual(metrics.random_num_episodes, 3)
 
 
 if __name__ == "__main__":

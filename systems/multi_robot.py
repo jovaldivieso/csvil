@@ -163,8 +163,12 @@ class MultiRobotSimulator(DynamicsSimulator):
         if np.any(self.robot_visibility_radii < 0):
             raise ValueError("Visibility radii must be non-negative.")
 
-        # Used by some planners as a symmetric control bound fallback.
-        self.max_action = float(max(float(sim.max_action) for sim in self.simulators))
+        # Used by some planners as a symmetric control bound fallback --
+        # a single worst-case-over-every-dimension-and-robot scalar, not a
+        # precise per-action-dimension bound (a sub-sim's own max_action can
+        # itself be a per-dimension array, e.g. unicycle2's independent
+        # [a_v, a_omega] limits).
+        self.max_action = float(max(np.max(sim.max_action) for sim in self.simulators))
         self.d_safe = float(self.config.get("d_safe", 0.0))
         self.d_collision = float(self.config.get("d_collision", self.d_safe))
         if self.d_collision < 0:
