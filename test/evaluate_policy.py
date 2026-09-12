@@ -34,6 +34,7 @@ from learning.models.encoder import (
 from learning.models.policy import ActionPolicy, PolicyFactory
 from planning.planner import PlannerProtocol
 from systems.dynamics import DynamicsProtocol
+from systems.goal_metrics import fleet_goal_errors
 
 # Import both policy types
 from utils import plot_xy_trajectories, save_xy_rollout_video
@@ -688,8 +689,14 @@ def run_evaluation(
 
         policy_final_state = policy_trajectory[-1]
         expert_final_state = expert_trajectory[-1]
-        policy_goal_error = float(np.linalg.norm(policy_final_state - goal_state))
-        expert_goal_error = float(np.linalg.norm(expert_final_state - goal_state))
+        # Split by coordinate geometry: a raw L2 over the state vector scores a
+        # correct-but-wrapped heading as an error of 2*pi. See systems/goal_metrics.py.
+        policy_position_error, policy_heading_error = fleet_goal_errors(
+            simulator, policy_final_state, goal_state
+        )
+        expert_position_error, expert_heading_error = fleet_goal_errors(
+            simulator, expert_final_state, goal_state
+        )
 
         expert_trajectories.append(expert_trajectory)
         policy_trajectories.append(policy_trajectory)
@@ -705,8 +712,10 @@ def run_evaluation(
                 "expert_collided": expert_collided,
                 "policy_steps": max(len(policy_trajectory) - 1, 0),
                 "expert_steps": max(len(expert_trajectory) - 1, 0),
-                "policy_goal_error_l2": policy_goal_error,
-                "expert_goal_error_l2": expert_goal_error,
+                "policy_goal_position_error": policy_position_error,
+                "policy_goal_heading_error": policy_heading_error,
+                "expert_goal_position_error": expert_position_error,
+                "expert_goal_heading_error": expert_heading_error,
             }
         )
 
@@ -717,12 +726,13 @@ def run_evaluation(
         if metric["policy_reached_goal"] and not metric["policy_collided"]
     )
     success_rate = (total_successes / total_runs) if total_runs > 0 else 0.0
-    mean_policy_error = float(
-        np.mean([metric["policy_goal_error_l2"] for metric in per_seed_metrics])
-    ) if total_runs > 0 else 0.0
-    mean_expert_error = float(
-        np.mean([metric["expert_goal_error_l2"] for metric in per_seed_metrics])
-    ) if total_runs > 0 else 0.0
+    def mean_metric(key: str) -> float:
+        return float(np.mean([metric[key] for metric in per_seed_metrics])) if total_runs > 0 else 0.0
+
+    mean_policy_position_error = mean_metric("policy_goal_position_error")
+    mean_policy_heading_error = mean_metric("policy_goal_heading_error")
+    mean_expert_position_error = mean_metric("expert_goal_position_error")
+    mean_expert_heading_error = mean_metric("expert_goal_heading_error")
     mean_policy_steps = float(
         np.mean([metric["policy_steps"] for metric in per_seed_metrics])
     ) if total_runs > 0 else 0.0
@@ -762,8 +772,10 @@ def run_evaluation(
     print(f"expert_collision_rate: {expert_collision_rate:.4f}")
     print(f"mean_policy_steps: {mean_policy_steps:.3f}")
     print(f"mean_expert_steps: {mean_expert_steps:.3f}")
-    print(f"mean_policy_goal_error_l2: {mean_policy_error:.6f}")
-    print(f"mean_expert_goal_error_l2: {mean_expert_error:.6f}")
+    print(f"mean_policy_goal_position_error: {mean_policy_position_error:.6f}")
+    print(f"mean_policy_goal_heading_error: {mean_policy_heading_error:.6f}")
+    print(f"mean_expert_goal_position_error: {mean_expert_position_error:.6f}")
+    print(f"mean_expert_goal_heading_error: {mean_expert_heading_error:.6f}")
 
     # Dynamically set output names
     output_path = output_path or default_evaluation_output_path(
@@ -835,8 +847,10 @@ def run_evaluation(
         "expert_collision_rate": float(expert_collision_rate),
         "mean_policy_steps": mean_policy_steps,
         "mean_expert_steps": mean_expert_steps,
-        "mean_policy_goal_error_l2": mean_policy_error,
-        "mean_expert_goal_error_l2": mean_expert_error,
+        "mean_policy_goal_position_error": mean_policy_position_error,
+        "mean_policy_goal_heading_error": mean_policy_heading_error,
+        "mean_expert_goal_position_error": mean_expert_position_error,
+        "mean_expert_goal_heading_error": mean_expert_heading_error,
         "per_seed": per_seed_metrics,
         "plot_path": output_path,
         "video_path": video_path,

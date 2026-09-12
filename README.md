@@ -218,6 +218,14 @@ training:
   # and convergence tolerances for this experiment. Applies to both DAgger data
   # collection every round and in-loop evaluation; never to the supervised
   # training step itself, which has no simulator in the loop.
+  #
+  # Caution for benchmark studies: `tolerance_overrides` is honoured by
+  # train_dagger.py, evaluate_policy.py and plot_expert_trajectories.py, but NOT by
+  # test/evaluate_scaling.py, which reads tolerances from the system config only.
+  # A policy trained under an override and then scored with evaluate_scaling.py is
+  # judged by a different success criterion than it was trained for. When several
+  # policies are being compared, put the tolerances in the shared system config and
+  # leave this key out -- see docs/experiment_plan.md.
   initial_position_min_goal_distance: 0.05
   initial_position_radius_bounds: [0.05, 3.0]
   tolerance_overrides:

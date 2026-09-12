@@ -1,12 +1,12 @@
- Container csvil-csvil-run-cf9f027dab71 Creating 
- Container csvil-csvil-run-cf9f027dab71 Created 
+ Container csvil-csvil-run-3f97be9e9a37 Creating 
+ Container csvil-csvil-run-3f97be9e9a37 Created 
 checkpoint: outputs/train_dagger_multi_robot/deepset_n02/mlp_dagger_checkpoint.pt
 encoder: deepset | policy: mlp | trained on 2 robots | device: cpu
-  eval_fleet= 2  success=0.920  collision=0.080  timeout=0.000  mean_steps=112.7  min_pair_dist=2.831  (9.52s)
-  eval_fleet= 4  success=0.800  collision=0.200  timeout=0.000  mean_steps=106.9  min_pair_dist=1.894  (27.41s)
-  eval_fleet= 6  success=0.720  collision=0.280  timeout=0.000  mean_steps=99.8  min_pair_dist=1.517  (32.19s)
-  eval_fleet= 8  success=0.580  collision=0.420  timeout=0.000  mean_steps=91.1  min_pair_dist=1.386  (45.11s)
-  eval_fleet=16  success=0.180  collision=0.820  timeout=0.000  mean_steps=40.9  min_pair_dist=1.207  (55.25s)
-  eval_fleet=32  success=0.020  collision=0.980  timeout=0.000  mean_steps=15.7  min_pair_dist=1.173  (84.27s)
+  eval_fleet= 2  success=0.920  collision=0.080  timeout=0.000  mean_steps=123.1  pos_err=0.122  head_err=0.184  min_pair_dist=2.814  action=0.51ms  (5.06s)
+  eval_fleet= 4  success=0.720  collision=0.260  timeout=0.020  mean_steps=114.3  pos_err=0.402  head_err=0.406  min_pair_dist=1.706  action=0.62ms  (6.77s)
+  eval_fleet= 6  success=0.640  collision=0.340  timeout=0.020  mean_steps=105.0  pos_err=0.436  head_err=0.477  min_pair_dist=1.363  action=0.95ms  (11.49s)
+  eval_fleet= 8  success=0.560  collision=0.400  timeout=0.040  mean_steps=102.8  pos_err=0.578  head_err=0.565  min_pair_dist=1.230  action=1.15ms  (15.63s)
+  eval_fleet=16  success=0.180  collision=0.820  timeout=0.000  mean_steps=42.6  pos_err=1.298  head_err=1.182  min_pair_dist=1.011  action=1.67ms  (12.86s)
+  eval_fleet=32  success=0.040  collision=0.940  timeout=0.020  mean_steps=29.0  pos_err=1.457  head_err=1.367  min_pair_dist=0.975  action=3.71ms  (26.33s)
 
 wrote outputs/study/deepset_n02.csv

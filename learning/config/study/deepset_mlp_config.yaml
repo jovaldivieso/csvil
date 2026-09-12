@@ -8,9 +8,7 @@
 model:
   policy_type: mlp
   observation_horizon: 2        # number of past observation steps to consider
-  prediction_horizon: 1        # single-step: a deterministic MSE-trained MLP regresses to the
-                               # conditional mean, so multi-step chunks average over distinct
-                               # avoidance manoeuvres. Use the flow policy for horizon > 1.
+  prediction_horizon: 1
   hidden_dims: [256, 256, 256]
 
   encoder: deepset

@@ -1,12 +1,12 @@
- Container csvil-csvil-run-5198f36f300f Creating 
- Container csvil-csvil-run-5198f36f300f Created 
+ Container csvil-csvil-run-1e7050e6762e Creating 
+ Container csvil-csvil-run-1e7050e6762e Created 
 checkpoint: outputs/train_dagger_multi_robot/gnn_n08/mlp_dagger_checkpoint.pt
 encoder: gnn | policy: mlp | trained on 8 robots | device: cpu
-  eval_fleet= 2  success=0.940  collision=0.060  timeout=0.000  mean_steps=118.0  min_pair_dist=2.820  (19.26s)
-  eval_fleet= 4  success=0.780  collision=0.220  timeout=0.000  mean_steps=105.0  min_pair_dist=1.865  (16.57s)
-  eval_fleet= 6  success=0.620  collision=0.380  timeout=0.000  mean_steps=94.6  min_pair_dist=1.481  (17.23s)
-  eval_fleet= 8  success=0.540  collision=0.460  timeout=0.000  mean_steps=86.8  min_pair_dist=1.364  (19.55s)
-  eval_fleet=16  success=0.180  collision=0.820  timeout=0.000  mean_steps=40.2  min_pair_dist=1.212  (19.97s)
-  eval_fleet=32  success=0.020  collision=0.980  timeout=0.000  mean_steps=17.2  min_pair_dist=1.174  (36.82s)
+  eval_fleet= 2  success=0.920  collision=0.060  timeout=0.020  mean_steps=118.9  min_pair_dist=2.806  (14.62s)
+  eval_fleet= 4  success=0.780  collision=0.180  timeout=0.040  mean_steps=128.1  min_pair_dist=1.721  (16.48s)
+  eval_fleet= 6  success=0.560  collision=0.320  timeout=0.120  mean_steps=118.9  min_pair_dist=1.339  (19.89s)
+  eval_fleet= 8  success=0.500  collision=0.360  timeout=0.140  mean_steps=118.9  min_pair_dist=1.251  (24.69s)
+  eval_fleet=16  success=0.060  collision=0.820  timeout=0.120  mean_steps=55.6  min_pair_dist=1.011  (24.45s)
+  eval_fleet=32  success=0.000  collision=0.960  timeout=0.040  mean_steps=27.6  min_pair_dist=0.980  (27.64s)
 
 wrote outputs/study/gnn_n08.csv

@@ -19,6 +19,11 @@
 #
 # so encoder changes go in the templates and layout changes in that script.
 #
+# Runs are named <encoder>_<policy>_n<NN> and land in a directory of that name.
+# Checkpoints from before the policy axis existed are named <encoder>_n<NN>; eval
+# falls back to that older directory for mlp runs, so the existing study results can
+# be reproduced without renaming anything.
+#
 # Evaluation is one code path over a table of scenarios; a scenario is just a set
 # of configs plus its rollout defaults, so adding one is a row in the SCENARIO_*
 # tables below.
@@ -38,6 +43,25 @@ set -uo pipefail
 MODE="${1:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-8}"
 read -r -a ENCODERS <<< "${ENCODERS:-deepset transformer gnn}"
+# Policy variants to run, as labelled in VARIANTS in
+# learning/config/study/generate_study_policy_configs.py: mlp, flow, mlp_h8, flow_h1.
+# The grid is the cross product with ENCODERS, so keep one of the two axes short
+# unless you mean it. Study 1's 2x2 is POLICIES="mlp flow_h1 mlp_h8 flow"
+# with ENCODERS="deepset".
+read -r -a POLICIES <<< "${POLICIES:-mlp}"
+# Training seeds. One run per (encoder, policy, fleet, seed); a single seed is an
+# anecdote, so any claim that two cells differ needs at least three.
+read -r -a SEEDS <<< "${SEEDS:-0}"
+
+# Optimizer steps per DAgger round. Left unset, each round trains for
+# TARGET_EPOCHS epochs over whatever it aggregated -- which means a weaker policy,
+# whose episodes end earlier and so collect fewer frames, is also trained less, and
+# the two effects become inseparable. Setting MAX_TRAIN_STEPS caps every round at
+# the same number of steps for every cell. For the cap to actually bind, keep
+# TARGET_EPOCHS high enough that the uncapped figure always exceeds it; the
+# 'optimizer_steps=' line in each log says what was used.
+TARGET_EPOCHS="${TARGET_EPOCHS:-10}"
+MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-}"
 TRAIN_FLEET_SIZES=(8 6 4 2)
 
 # Trajectories per DAgger round, inversely proportional to the fleet size: each
@@ -82,6 +106,13 @@ docker_run() {
     csvil "$@"
 }
 
+# A variant label is not a policy type -- mlp_h8 is an mlp, flow_h1 is a flow -- and
+# train_dagger.py names its checkpoint <policy_type>_dagger_checkpoint.pt. Read the
+# type out of the generated config instead of assuming the label is it.
+policy_type_of() {
+  grep -m1 -E '^[[:space:]]*policy_type:' "$1" | awk '{print $2}'
+}
+
 await_slot() {
   while (( $(jobs -rp | wc -l) >= MAX_PARALLEL )); do wait -n; done
 }
@@ -115,14 +146,15 @@ merge_csvs() {
 }
 
 train_one() {
-  local encoder="$1" fleet_size="$2"
+  local encoder="$1" policy="$2" fleet_size="$3" seed="$4"
   local padded; padded="$(printf %02d "$fleet_size")"
-  local name="${encoder}_n${padded}"
-  local policy_config="learning/config/study/${encoder}_mlp_n${padded}_config.yaml"
+  local name="${encoder}_${policy}_n${padded}_s${seed}"
+  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}_config.yaml"
 
   # The per-fleet configs are generated, so a missing one means the generator has
-  # not been run (or not for this fleet size) -- say so here rather than letting
-  # train_dagger.py fail on the path a few seconds into the container.
+  # not been run (or not for this fleet size, or not for this policy family) -- say
+  # so here rather than letting train_dagger.py fail on the path a few seconds into
+  # the container.
   if [[ ! -f "$policy_config" ]]; then
     echo "[skip] train ${name}: no policy config at ${policy_config};" \
          "run python learning/config/study/generate_study_policy_configs.py"
@@ -137,7 +169,9 @@ train_one() {
     --dagger-iterations 3 \
     --trajectories-per-iteration "${TRAJECTORIES[$fleet_size]}" \
     --steps-per-trajectory 200 \
-    --target-epochs-per-round 10 \
+    --target-epochs-per-round "$TARGET_EPOCHS" \
+    ${MAX_TRAIN_STEPS:+--max-train-steps "$MAX_TRAIN_STEPS"} \
+    --seed "$seed" \
     --action-noise-std 0.03 \
     --expert-mix-beta-start 0.5 \
     --expert-mix-beta-decay-rate 0.25 \
@@ -159,10 +193,23 @@ scenario_configs() {
 }
 
 eval_one() {
-  local scenario="$1" encoder="$2" fleet_size="$3"
+  local scenario="$1" encoder="$2" policy="$3" fleet_size="$4" seed="$5"
   local padded; padded="$(printf %02d "$fleet_size")"
-  local name="${encoder}_n${padded}"
-  local checkpoint="outputs/train_dagger_multi_robot/${name}/mlp_dagger_checkpoint.pt"
+  local name="${encoder}_${policy}_n${padded}_s${seed}"
+  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}_config.yaml"
+  local policy_type="mlp"
+  [[ -f "$policy_config" ]] && policy_type="$(policy_type_of "$policy_config")"
+  local checkpoint="outputs/train_dagger_multi_robot/${name}/${policy_type}_dagger_checkpoint.pt"
+
+  # Fall back to the pre-policy-axis layout so checkpoints trained before this
+  # script grew a POLICIES axis stay evaluable under their original names.
+  if [[ ! -f "$checkpoint" && "$policy" == "mlp" && "$seed" == "0" ]]; then
+    local legacy="outputs/train_dagger_multi_robot/${encoder}_n${padded}/mlp_dagger_checkpoint.pt"
+    if [[ -f "$legacy" ]]; then
+      checkpoint="$legacy"
+      name="${encoder}_n${padded}"
+    fi
+  fi
   local log="logs/${scenario}_${name}.log"
 
   if [[ ! -f "$checkpoint" ]]; then
@@ -185,6 +232,7 @@ eval_one() {
     --steps "$STEPS" \
     --action-noise-std "$NOISE" \
     --seed-start 50000 \
+    --train-seed "$seed" \
     ${SCENARIO_FLAGS[$scenario]} \
     --output-csv "$out_csv" \
     > "$log" 2>&1
@@ -211,11 +259,17 @@ case "$MODE" in
       mapfile -t TRAIN_FLEET_SIZES < <(printf '%s\n' "${requested[@]}" | sort -rn)
     fi
 
-    echo "training fleets: ${TRAIN_FLEET_SIZES[*]} | encoders: ${ENCODERS[*]}"
+    echo "training fleets: ${TRAIN_FLEET_SIZES[*]} | encoders: ${ENCODERS[*]}" \
+         "| policies: ${POLICIES[*]} | seeds: ${SEEDS[*]}" \
+         "| target_epochs=${TARGET_EPOCHS} max_train_steps=${MAX_TRAIN_STEPS:-unset}"
     for fleet_size in "${TRAIN_FLEET_SIZES[@]}"; do
       for encoder in "${ENCODERS[@]}"; do
-        await_slot
-        train_one "$encoder" "$fleet_size" &
+        for policy in "${POLICIES[@]}"; do
+          for seed in "${SEEDS[@]}"; do
+            await_slot
+            train_one "$encoder" "$policy" "$fleet_size" "$seed" &
+          done
+        done
       done
     done
     wait
@@ -233,20 +287,29 @@ case "$MODE" in
     NOISE="${EVAL_NOISE:-0.0}"
     mkdir -p "${SCENARIO_OUTDIR[$scenario]}"
 
-    echo "scenario=${scenario} episodes=${EPISODES} steps=${STEPS} action_noise=${NOISE}"
+    echo "scenario=${scenario} episodes=${EPISODES} steps=${STEPS} action_noise=${NOISE}" \
+         "| encoders: ${ENCODERS[*]} | policies: ${POLICIES[*]}"
     for encoder in "${ENCODERS[@]}"; do
-      for fleet_size in 2 4 6 8; do
-        await_slot
-        eval_one "$scenario" "$encoder" "$fleet_size" &
+      for policy in "${POLICIES[@]}"; do
+        for seed in "${SEEDS[@]}"; do
+          for fleet_size in 2 4 6 8; do
+            await_slot
+            eval_one "$scenario" "$encoder" "$policy" "$fleet_size" "$seed" &
+          done
+        done
       done
     done
     wait
-    merge_csvs "${SCENARIO_MERGED[$scenario]}" "${SCENARIO_OUTDIR[$scenario]}"/*_n??.csv
+    # Both patterns: seeded runs and the pre-seed-axis checkpoints. Anything that
+    # matches neither is not a per-policy result file and must not be merged in.
+    merge_csvs "${SCENARIO_MERGED[$scenario]}" \
+      "${SCENARIO_OUTDIR[$scenario]}"/*_n??.csv "${SCENARIO_OUTDIR[$scenario]}"/*_n??_s*.csv
     ;;
 
   *)
     echo "usage: $0 train [fleet ...] | eval [${!SCENARIO_TEMPLATE[*]}]" >&2
-    echo "       fleet sizes: ${!TRAJECTORIES[*]}   (MAX_PARALLEL=${MAX_PARALLEL}, ENCODERS=\"${ENCODERS[*]}\")" >&2
+    echo "       fleet sizes: ${!TRAJECTORIES[*]}   (MAX_PARALLEL=${MAX_PARALLEL}," \
+         "ENCODERS=\"${ENCODERS[*]}\", POLICIES=\"${POLICIES[*]}\", SEEDS=\"${SEEDS[*]}\")" >&2
     exit 1
     ;;
 esac

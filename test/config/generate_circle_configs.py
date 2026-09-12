@@ -44,6 +44,8 @@ _spec = importlib.util.spec_from_file_location(
 _fleet = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_fleet)
 Q_BLOCK, _FlowListDumper, format_q_diag = _fleet.Q_BLOCK, _fleet._FlowListDumper, _fleet.format_q_diag
+first_robot_template = _fleet.first_robot_template
+TASK_TOLERANCES, INITIAL_STATE_SAMPLING = _fleet.TASK_TOLERANCES, _fleet.INITIAL_STATE_SAMPLING
 
 TEMPLATE_PATH = PROJECT_ROOT / "test/config/multi_unicycle2_casadi_config.yaml"
 OUTPUT_DIR = PROJECT_ROOT / "test/config/study/circle"
@@ -81,7 +83,7 @@ def build_config(template: dict, num_robots: int) -> tuple[dict, float]:
             f"Fleet size {num_robots} is odd; the antipode of a start is then not "
             "another robot's start, which is the property this scenario is for."
         )
-    robot_template = template["robots"][0]
+    robot_template = first_robot_template(template)
     d_safe = float(template["d_safe"])
     radius = ring_radius(num_robots, d_safe)
 
@@ -96,6 +98,11 @@ def build_config(template: dict, num_robots: int) -> tuple[dict, float]:
         start, goal = robot_endpoints(num_robots, radius, robot_idx)
         robot_config = copy.deepcopy(base_robot_config)
         robot_config["randomize_goal"] = False
+        # deepcopy: INITIAL_STATE_SAMPLING holds a list, and sharing that one object
+        # across robots makes yaml.dump emit &anchor/*alias references instead of
+        # writing the bounds out at every entry.
+        robot_config.update(copy.deepcopy(INITIAL_STATE_SAMPLING))
+        robot_config.update(TASK_TOLERANCES)
         robot_config["goal"] = goal
         robot_config["start"] = start
         robots.append({"system": robot_template["system"], "config": robot_config})

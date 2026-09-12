@@ -80,6 +80,12 @@ MAX_PARALLEL=$(nproc) ./run_study.sh train        # all 12 runs
 ENCODERS="deepset" ./run_study.sh train 8         # one encoder, one fleet size
 ```
 
+`POLICIES` selects the policy variants, as labelled in `VARIANTS` in
+[`generate_study_policy_configs.py`](../learning/config/study/generate_study_policy_configs.py):
+`mlp` (h=1), `flow` (h=8), `mlp_h8` and `flow_h1`. It defaults to `mlp`, the
+encoder-scaling baseline, and crosses with `ENCODERS`. Study 1's 2x2 is
+`ENCODERS="deepset" POLICIES="mlp flow_h1 mlp_h8 flow"`.
+
 Extra arguments to `train` restrict the fleet sizes; with none it trains every
 encoder on every size. Sizes run largest-first, because the biggest fleet dominates
 wall clock and must not queue behind cheap runs. Progress goes to
@@ -126,7 +132,11 @@ python test/evaluate_scaling.py \
 ```
 
 Columns: `success_rate`, `collision_rate`, `timeout_rate`, `mean_steps`,
-`mean_goal_error_l2`, `mean_min_pair_distance`.
+`mean_goal_position_error`, `mean_goal_heading_error`, `mean_min_pair_distance`,
+plus the four convergence tolerances the row was scored under (`pos_tol`,
+`theta_tol`, `vel_tol`, `omega_tol`), so a result is self-describing.
+Position and heading error are reported separately, and the heading residual is
+wrapped to [-pi, pi] — see [systems/goal_metrics.py](../systems/goal_metrics.py).
 
 Plot the merged CSV with [`test/plot_study_results.py`](../test/plot_study_results.py):
 

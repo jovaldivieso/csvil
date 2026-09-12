@@ -65,10 +65,21 @@ METRIC_LABELS = {
     "collision_rate": "Collision rate",
     "timeout_rate": "Timeout rate",
     "mean_steps": "Mean steps",
-    "mean_goal_error_l2": "Mean goal error (L2)",
+    "mean_goal_position_error": "Mean goal position error (m)",
+    "mean_goal_heading_error": "Mean goal heading error (rad)",
     "mean_min_pair_distance": "Mean min pair distance",
+    "mean_action_ms": "Mean policy call (ms/step)",
+    "mean_action_ms_per_robot": "Mean policy call (ms/step/robot)",
 }
 RATE_METRICS = {"success_rate", "collision_rate", "timeout_rate"}
+
+
+def display_path(path: Path) -> str:
+    """Repo-relative when possible; a relative --output-dir is not under PROJECT_ROOT."""
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def load_rows(results_path: Path) -> list[dict[str, str]]:
@@ -183,7 +194,7 @@ def plot_matrix(rows, metric: str, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
-    print(f"wrote {output_path.relative_to(PROJECT_ROOT)}")
+    print(f"wrote {display_path(output_path)}")
 
 
 def plot_by_fleet(rows, output_path: Path) -> None:
@@ -249,7 +260,7 @@ def plot_by_fleet(rows, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
-    print(f"wrote {output_path.relative_to(PROJECT_ROOT)}")
+    print(f"wrote {display_path(output_path)}")
 
 
 def plot_by_fleet_facets(rows, output_path: Path) -> None:
@@ -321,7 +332,7 @@ def plot_by_fleet_facets(rows, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
-    print(f"wrote {output_path.relative_to(PROJECT_ROOT)}")
+    print(f"wrote {display_path(output_path)}")
 
 
 def main() -> None:

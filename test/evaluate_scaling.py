@@ -36,7 +36,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from core.config import load_and_validate_system_config
 from core.factory import DynamicsFactory
 from learning.dagger import (
-    apply_execution_noise, build_decentralized_joint_action,
+    ObservationHistoryBuffer, apply_execution_noise, build_decentralized_joint_action,
     evaluation_seed_specs, sample_initial_state,
 )
 from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
@@ -44,15 +44,24 @@ from learning.models.flow_policy import FlowPolicy
 from learning.models.mlp_policy import MLPPolicy
 from learning.models.policy import ActionPolicy
 from systems.dynamics import DynamicsProtocol
+from systems.goal_metrics import fleet_goal_errors
 from systems.seed_utils import (
     action_noise_rng_for_rollout, default_action_noise_seed_for_config,
 )
 
+# Convergence tolerances are written into every row so a result is self-describing:
+# they define what "success" means, and a silent change to them moves success_rate
+# without moving anything about the policy. unicycle2's four; a system that uses a
+# single 'error_tolerance' instead leaves these blank.
+TOLERANCE_FIELDS = ("pos_tol", "theta_tol", "vel_tol", "omega_tol")
+
 CSV_FIELDS = (
-    "checkpoint", "encoder_type", "policy_type", "train_fleet_size", "eval_fleet_size",
-    "config", "episodes", "steps", "action_noise_std", "success_rate",
-    "collision_rate", "timeout_rate", "mean_steps", "mean_goal_error_l2",
-    "mean_min_pair_distance", "wall_time_s",
+    "checkpoint", "encoder_type", "policy_type", "train_seed", "train_fleet_size", "eval_fleet_size",
+    "config", "episodes", "steps", "action_noise_std", *TOLERANCE_FIELDS,
+    "success_rate",
+    "collision_rate", "timeout_rate", "mean_steps", "mean_goal_position_error",
+    "mean_goal_heading_error", "mean_min_pair_distance",
+    "mean_action_ms", "mean_action_ms_per_robot", "wall_time_s",
 )
 
 
@@ -69,12 +78,20 @@ def load_policy(checkpoint_path: str, device: torch.device) -> tuple[ActionPolic
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         raise ValueError(f"'{checkpoint_path}' is not a train_dagger.py metadata checkpoint.")
 
+    # Observation history widens each neighbour's feature vector and the ego block,
+    # so the encoder cannot be rebuilt without it. Older checkpoints predate the key.
+    raw_horizon = checkpoint.get("observation_horizon", 1)
+    observation_horizon = 1 if raw_horizon is None else int(raw_horizon)
+    if observation_horizon <= 0:
+        raise ValueError("Checkpoint 'observation_horizon' must be positive.")
+
     encoder_kwargs_raw = checkpoint.get("encoder_kwargs") or {}
     encoder = EncoderFactory.create(
         encoder_type=str(checkpoint.get("encoder_type", DEFAULT_ENCODER_TYPE)),
         state_dim=int(checkpoint["state_dim"]),
         neighbor_feature_dim=int(checkpoint.get("neighbor_feature_dim", 2)),
         neighbor_slots=int(checkpoint["neighbor_slots"]),
+        observation_horizon=observation_horizon,
         **(dict(encoder_kwargs_raw) if isinstance(encoder_kwargs_raw, Mapping) else {}),
     )
 
@@ -94,6 +111,7 @@ def load_policy(checkpoint_path: str, device: torch.device) -> tuple[ActionPolic
         raise ValueError(f"Unsupported policy type '{policy_type}'.")
 
     policy.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint["observation_horizon"] = observation_horizon
     return policy.to(device).eval(), checkpoint
 
 
@@ -105,6 +123,12 @@ def min_pair_distance(simulator: DynamicsProtocol, state: np.ndarray) -> float:
     distances = np.linalg.norm(positions[:, None] - positions[None, :], axis=-1)
     np.fill_diagonal(distances, np.inf)
     return float(distances.min())
+
+
+def tolerance_columns(simulator: DynamicsProtocol) -> dict[str, float | str]:
+    """The fleet's convergence tolerances, read off robot 0 (fleets are homogeneous)."""
+    robot_simulator = simulator.simulators[0]
+    return {name: getattr(robot_simulator, name, "") for name in TOLERANCE_FIELDS}
 
 
 def config_start_state(raw_config: Mapping[str, Any]) -> np.ndarray:
@@ -136,6 +160,7 @@ def evaluate_fleet(
     action_noise_std: float,
     action_noise_seed: int,
     fixed_initial_state: np.ndarray | None = None,
+    observation_horizon: int = 1,
 ) -> dict[str, float]:
     """Roll the policy out over seeded episodes and summarize the outcomes.
 
@@ -144,8 +169,13 @@ def evaluate_fleet(
     is fully deterministic and one episode is the whole result.
     """
     successes = collisions = 0
+    # One entry per control step: the wall time of the policy call that produced that
+    # step's joint action. Kept separate from wall_time_s, which also covers the
+    # simulator, the collision checks and the observation construction.
+    action_times_ms: list[float] = []
     steps_taken: list[int] = []
-    goal_errors: list[float] = []
+    position_errors: list[float] = []
+    heading_errors: list[float] = []
     min_distances: list[float] = []
 
     for seed_spec in evaluation_seed_specs(simulator, episodes, seed_start):
@@ -154,6 +184,11 @@ def evaluate_fleet(
         else:
             state = simulator.reset(sample_initial_state(simulator, seed_spec))
         goal_state = simulator.goal_state.copy()
+        # Fresh per episode: history must not leak across rollouts.
+        history_buffer = (
+            ObservationHistoryBuffer(observation_horizon, int(simulator.num_robots))
+            if observation_horizon > 1 else None
+        )
         noise_rng = action_noise_rng_for_rollout(action_noise_seed, seed_spec=seed_spec)
         episode_min_distance = min_pair_distance(simulator, state)
         reached_goal = collided = False
@@ -161,7 +196,18 @@ def evaluate_fleet(
 
         for step in range(1, steps + 1):
             observation = simulator.observe(state, validate=False)
-            action = build_decentralized_joint_action(simulator, policy, observation, device)
+            # CUDA launches are async, so the timer would measure queueing rather than
+            # compute without a sync on either side.
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            action_start = time.perf_counter()
+            action = build_decentralized_joint_action(
+                simulator, policy, observation, device,
+                observation_horizon=observation_horizon, history_buffer=history_buffer,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            action_times_ms.append((time.perf_counter() - action_start) * 1000.0)
             state = simulator.step(
                 state,
                 apply_execution_noise(simulator, action, action_noise_std, noise_rng),
@@ -179,7 +225,11 @@ def evaluate_fleet(
         successes += int(reached_goal)
         collisions += int(collided)
         steps_taken.append(rollout_steps)
-        goal_errors.append(float(np.linalg.norm(np.asarray(state) - goal_state)))
+        # Split by coordinate geometry: a raw L2 over the state vector scores a
+        # correct-but-wrapped heading as an error of 2*pi. See systems/goal_metrics.py.
+        position_error, heading_error = fleet_goal_errors(simulator, state, goal_state)
+        position_errors.append(position_error)
+        heading_errors.append(heading_error)
         min_distances.append(episode_min_distance)
 
     return {
@@ -187,8 +237,16 @@ def evaluate_fleet(
         "collision_rate": collisions / episodes,
         "timeout_rate": (episodes - successes - collisions) / episodes,
         "mean_steps": float(np.mean(steps_taken)),
-        "mean_goal_error_l2": float(np.mean(goal_errors)),
+        "mean_goal_position_error": float(np.mean(position_errors)),
+        "mean_goal_heading_error": float(np.mean(heading_errors)),
         "mean_min_pair_distance": float(np.mean(min_distances)),
+        # The fleet is one batched forward pass, so this is the latency of a whole
+        # control step, not of a single robot deciding on its own hardware. The
+        # per-robot figure divides that batch cost evenly and therefore understates
+        # true decentralized latency -- use it to compare policies, not to size a
+        # real controller.
+        "mean_action_ms": float(np.mean(action_times_ms)),
+        "mean_action_ms_per_robot": float(np.mean(action_times_ms)) / float(simulator.num_robots),
     }
 
 
@@ -207,6 +265,11 @@ def main() -> None:
             "start every episode from the per-robot 'start' in the config instead of "
             "sampling one, for deterministic scenarios such as the antipodal-circle swap"
         ),
+    )
+    parser.add_argument(
+        "--train-seed", default="",
+        help="training seed of this checkpoint, copied into the CSV so results can be "
+             "grouped by seed without parsing the checkpoint path",
     )
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--device", default=None, help="cpu, cuda, mps; autodetected when omitted")
@@ -261,17 +324,20 @@ def main() -> None:
                 action_noise_std=args.action_noise_std,
                 action_noise_seed=default_action_noise_seed_for_config(config),
                 fixed_initial_state=fixed_start,
+                observation_horizon=int(checkpoint.get("observation_horizon", 1)),
             )
             row = {
                 "checkpoint": args.checkpoint,
                 "encoder_type": checkpoint.get("encoder_type"),
                 "policy_type": checkpoint.get("policy_type"),
+                "train_seed": args.train_seed,
                 "train_fleet_size": train_fleet_size,
                 "eval_fleet_size": int(simulator.num_robots),
                 "config": config_path,
                 "episodes": episodes,
                 "steps": args.steps,
                 "action_noise_std": args.action_noise_std,
+                **tolerance_columns(simulator),
                 "wall_time_s": round(time.perf_counter() - start_time, 2),
                 **{key: round(value, 6) for key, value in metrics.items()},
             }
@@ -281,7 +347,10 @@ def main() -> None:
                 f"  eval_fleet={row['eval_fleet_size']:>2}  "
                 f"success={metrics['success_rate']:.3f}  collision={metrics['collision_rate']:.3f}  "
                 f"timeout={metrics['timeout_rate']:.3f}  mean_steps={metrics['mean_steps']:.1f}  "
-                f"min_pair_dist={metrics['mean_min_pair_distance']:.3f}  ({row['wall_time_s']}s)"
+                f"pos_err={metrics['mean_goal_position_error']:.3f}  "
+                f"head_err={metrics['mean_goal_heading_error']:.3f}  "
+                f"min_pair_dist={metrics['mean_min_pair_distance']:.3f}  "
+                f"action={metrics['mean_action_ms']:.2f}ms  ({row['wall_time_s']}s)"
             )
 
     print(f"\nwrote {args.output_csv}")

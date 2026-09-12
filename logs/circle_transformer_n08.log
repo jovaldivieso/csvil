@@ -1,12 +1,12 @@
- Container csvil-csvil-run-f19bad57c48a Creating 
- Container csvil-csvil-run-f19bad57c48a Created 
+ Container csvil-csvil-run-c5b3c41fd178 Creating 
+ Container csvil-csvil-run-c5b3c41fd178 Created 
 checkpoint: outputs/train_dagger_multi_robot/transformer_n08/mlp_dagger_checkpoint.pt
 encoder: transformer | policy: mlp | trained on 8 robots | device: cpu
-  eval_fleet= 2  success=0.000  collision=1.000  timeout=0.000  mean_steps=35.0  min_pair_dist=1.141  (0.06s)
-  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=33.0  min_pair_dist=1.080  (0.08s)
-  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=29.0  min_pair_dist=1.155  (0.13s)
-  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=25.0  min_pair_dist=1.189  (0.1s)
-  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=27.0  min_pair_dist=1.161  (0.24s)
-  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=42.0  min_pair_dist=1.192  (1.25s)
+  eval_fleet= 2  success=0.000  collision=1.000  timeout=0.000  mean_steps=52.0  min_pair_dist=1.159  (0.09s)
+  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=62.0  min_pair_dist=1.186  (0.16s)
+  eval_fleet= 6  success=1.000  collision=0.000  timeout=0.000  mean_steps=176.0  min_pair_dist=1.521  (0.66s)
+  eval_fleet= 8  success=1.000  collision=0.000  timeout=0.000  mean_steps=187.0  min_pair_dist=1.338  (0.95s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=65.0  min_pair_dist=1.196  (0.68s)
+  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=393.0  min_pair_dist=1.192  (13.98s)
 
 wrote outputs/study/circle/transformer_n08.csv

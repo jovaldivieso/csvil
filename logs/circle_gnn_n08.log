@@ -1,12 +1,13 @@
- Container csvil-csvil-run-59375bbaaf38 Creating 
- Container csvil-csvil-run-59375bbaaf38 Created 
+time="2026-09-11T16:23:56+02:00" level=warning msg="Found orphan containers ([csvil-csvil-run-671330792374]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container csvil-csvil-run-0ba0a46264ea Creating 
+ Container csvil-csvil-run-0ba0a46264ea Created 
 checkpoint: outputs/train_dagger_multi_robot/gnn_n08/mlp_dagger_checkpoint.pt
 encoder: gnn | policy: mlp | trained on 8 robots | device: cpu
-  eval_fleet= 2  success=0.000  collision=1.000  timeout=0.000  mean_steps=39.0  min_pair_dist=1.123  (0.03s)
-  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=36.0  min_pair_dist=1.164  (0.04s)
-  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=29.0  min_pair_dist=1.188  (0.04s)
-  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=26.0  min_pair_dist=1.136  (0.06s)
-  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=27.0  min_pair_dist=1.169  (0.12s)
-  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=42.0  min_pair_dist=1.185  (0.98s)
+  eval_fleet= 2  success=1.000  collision=0.000  timeout=0.000  mean_steps=227.0  min_pair_dist=2.771  (0.31s)
+  eval_fleet= 4  success=1.000  collision=0.000  timeout=0.000  mean_steps=172.0  min_pair_dist=2.285  (0.56s)
+  eval_fleet= 6  success=1.000  collision=0.000  timeout=0.000  mean_steps=170.0  min_pair_dist=1.671  (0.3s)
+  eval_fleet= 8  success=1.000  collision=0.000  timeout=0.000  mean_steps=165.0  min_pair_dist=1.308  (0.69s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=27.0  min_pair_dist=1.173  (0.14s)
+  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=86.0  min_pair_dist=1.200  (1.42s)
 
 wrote outputs/study/circle/gnn_n08.csv

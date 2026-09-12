@@ -44,8 +44,48 @@ REFERENCE_FLEET_SIZE = 2
 # spread out until they rarely see one another.
 GOAL_BOX_HALF_WIDTHS_PER_D_SAFE = 2.5
 
+# Convergence tolerances for the generated study scenarios, shared by the random
+# fleets and the circle rings. These belong to the *task*, not to a policy:
+# success_rate is only comparable across policies if every one of them is judged by
+# the same criterion, and the scenario config is the file they all share. So the
+# study policy configs carry no `tolerance_overrides` -- there is exactly one source,
+# and it is here.
+#
+# unicycle2.is_done() requires all four simultaneously: within pos_tol of the goal
+# position, within theta_tol of the goal heading (wrapped), and nearly stopped
+# (|v| < vel_tol and |omega| < omega_tol). Absent from a config, each falls back to
+# the simulator default of 0.05, which is a 22x stricter heading criterion -- that
+# silent fallback is why these keys are injected explicitly rather than inherited
+# from the canonical template.
+TASK_TOLERANCES = {
+    "pos_tol": 0.1,
+    "theta_tol": 1.1,
+    "vel_tol": 0.05,
+    "omega_tol": 0.05,
+}
+
+# Per-robot initial-state sampling bounds, used by the simulator's random reset.
+INITIAL_STATE_SAMPLING = {
+    "initial_position_min_goal_distance": 0.05,
+    "initial_position_radius_bounds": [0.05, 3.0],
+}
+
 # Seeds drawn per config to prove the fleet is actually placeable.
 SAMPLING_CHECK_EPISODES = 20
+
+
+def first_robot_template(template: dict) -> dict:
+    """The per-robot entry of a template, in either 'robots' form.
+
+    core/config.py accepts both the homogeneous-fleet shorthand
+    ({num_robots, system, config}) and the long list form, and the canonical
+    template has since switched to the shorthand. Indexing ["robots"][0] therefore
+    raises KeyError on it, which is what silently froze these generated configs.
+    """
+    robots = template["robots"]
+    if isinstance(robots, list):
+        return robots[0]
+    return {"system": robots["system"], "config": robots["config"]}
 
 
 def goal_half_width(num_robots: int, d_safe: float) -> float:
@@ -89,7 +129,7 @@ def assert_fleet_is_placeable(config: dict, num_robots: int) -> float:
 
 
 def build_config(template: dict, num_robots: int) -> dict:
-    robot_template = template["robots"][0]
+    robot_template = first_robot_template(template)
     half_width = goal_half_width(num_robots, template["d_safe"])
 
     robot_config = {
@@ -98,6 +138,8 @@ def build_config(template: dict, num_robots: int) -> dict:
         if key != "goal"  # goals are randomized per episode
     }
     robot_config["randomize_goal"] = True
+    robot_config.update(INITIAL_STATE_SAMPLING)
+    robot_config.update(TASK_TOLERANCES)
     robot_config["goal_position_bounds"] = [-half_width, half_width]
 
     config = {

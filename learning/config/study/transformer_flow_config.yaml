@@ -1,0 +1,25 @@
+# Encoder-scaling study: transformer flow baseline.
+# [template-only] run_study.sh does not train from this file: it trains from the
+# [template-only] per-fleet-size configs that generate_study_policy_configs.py derives
+# [template-only] from it, which is also where the 'training' section (tolerances and
+# [template-only] the ring initial_states/goal_states) is added.
+# Identical to the deepset/gnn flow study configs except for the neighbour encoder,
+# and to transformer_mlp_config.yaml except for the policy head.
+# Context width is 128 in all three.
+model:
+  policy_type: flow
+
+  flow:
+    num_inference_steps: 10     # Euler integration steps for ODE sampling
+
+  observation_horizon: 2        # number of past observation steps to consider
+  prediction_horizon: 1
+  hidden_dims: [256, 256, 256]
+
+  encoder: transformer
+
+  transformer:
+    hidden_dim: 128        # -> context width 128
+    num_heads: 4
+    num_layers: 1
+    dropout: 0.1
