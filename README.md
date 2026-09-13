@@ -95,10 +95,12 @@ csvil/
 │   ├── dagger/
 │   │   ├── __init__.py        # Public DAgger helper API
 │   │   ├── beta_controller.py # Expert-mixing schedules and adaptive controller
+│   │   ├── dagger_config.py   # DaggerConfig dataclass (resolved training/eval settings)
+│   │   ├── dagger_trainer.py  # DaggerTrainer: setup, aggregation, training, eval, checkpointing
 │   │   ├── metrics.py         # DAgger evaluation metrics
 │   │   ├── rollouts.py        # Collection, evaluation, and action execution
 │   │   └── utils.py           # Seeding, step resolution, config overrides, and metric logging
-│   ├── train_dagger.py        # Object-oriented MLP / flow / safeflow DAgger trainer and CLI
+│   ├── train_dagger.py        # CLI plumbing/orchestration: parses args, builds DaggerConfig, runs DaggerTrainer
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
 │   ├── casadi_planner.py      # CasADi planner implementation (expert)
@@ -459,8 +461,8 @@ Use this as a compact quick reference for current entrypoint flags.
 - `learning/train_dagger.py`
   - required args: `--experiment-name`, `--system`, `--expert-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
-  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--round-seeds`, `--restart-round-seed`/`--no-restart-round-seed`, `--initial-states`, `--goal-states`, `--workspace-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`
-  - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--policy-config`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
+  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--round-seeds`, `--restart-round-seed`/`--no-restart-round-seed`, `--initial-states`, `--goal-states`, `--workspace-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`, `--expert-mix-beta-recovery`, `--expert-mix-beta-recovery-increment`
+  - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--eval-tolerance-overrides`, `--batch-size`, `--learning-rate`, `--policy-config`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 
 Every flag above also accepts `--help` for its full description, e.g.
 `python learning/train_dagger.py --help`.

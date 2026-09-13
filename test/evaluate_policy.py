@@ -395,7 +395,7 @@ def rollout_policy(
     action_noise_std: float = 0.0,
     action_noise_rng: np.random.Generator | None = None,
     observation_horizon: int = 1,
-) -> tuple[np.ndarray, bool, int, bool, list[float]]:
+) -> tuple[np.ndarray, bool, int, bool, bool, list[float]]:
     """
     Rolls out the neural policy from a given initial state.
 
@@ -404,6 +404,11 @@ def rollout_policy(
         reached_goal: whether simulator reached goal state
         steps_taken: number of executed simulation steps
         collided: whether robots collided during the rollout
+        solve_failed: whether the policy's own forward pass raised
+            (e.g. a SafeFlow projector solve failure) instead of the
+            rollout ending in a collision or running out of steps --
+            distinct from both, so callers can report it as its own
+            failure mode instead of folding it into "timeout"
         solve_times: one wall-clock duration (seconds) per step, for the
             single batched decentralized call that produces the whole
             fleet's joint action (all robots at once, not per-robot)
@@ -420,9 +425,9 @@ def rollout_policy(
             "Policy rollout starts in collision "
             f"({summary})."
         )
-        return np.asarray(trajectory), False, 0, True, solve_times
+        return np.asarray(trajectory), False, 0, True, False, solve_times
     if simulator.should_terminate_rollout(state):
-        return np.asarray(trajectory), True, 0, False, solve_times
+        return np.asarray(trajectory), True, 0, False, False, solve_times
 
     for step in range(1, num_steps + 1):
         observation = simulator.observe(state)
@@ -440,11 +445,14 @@ def rollout_policy(
             )
         except PlannerSolveError as exc:
             # No expert running alongside a policy-only rollout to fall back
-            # to -- treat like any other rollout-ending failure (a
-            # collision) rather than crashing the whole evaluation run over
-            # one solver hiccup with no safe trajectory yet to lean on.
+            # to -- end the rollout rather than crashing the whole
+            # evaluation run over one solver hiccup with no safe trajectory
+            # yet to lean on. Reported as its own solve_failed outcome
+            # (never collided=True), so a caller doesn't misclassify a
+            # solver hiccup as either a collision or (via collided=False,
+            # reached_goal=False) a timeout.
             print(f"Policy rollout solve failed (step={step}): {exc}")
-            break
+            return np.asarray(trajectory), False, len(trajectory) - 1, False, True, solve_times
         _synchronize_device(device)
         solve_times.append(time.perf_counter() - solve_start)
 
@@ -468,9 +476,9 @@ def rollout_policy(
             break
 
         if simulator.should_terminate_rollout(state):
-            return np.asarray(trajectory), True, step, collided, solve_times
+            return np.asarray(trajectory), True, step, collided, False, solve_times
 
-    return np.asarray(trajectory), False, len(trajectory) - 1, collided, solve_times
+    return np.asarray(trajectory), False, len(trajectory) - 1, collided, False, solve_times
 
 
 def _load_checkpoint_policy_components(
@@ -492,15 +500,7 @@ def _load_checkpoint_policy_components(
     Returns (checkpoint, state_dict, obs_encoder, action_dim, hidden_dims,
     prediction_horizon, observation_horizon).
     """
-    # This checkpoint format was never "weights only" -- save_checkpoints
-    # (learning/train_dagger.py) always mixes plain Python metadata
-    # (encoder_kwargs, obs_feature_names, action_scale, ...) in alongside the
-    # actual tensors, which PyTorch >=2.6's weights_only=True default (aimed
-    # at untrusted, internet-sourced files) was never going to accept. These
-    # are locally-generated checkpoints from this same codebase's own
-    # training run, not third-party files, so there's nothing to defend
-    # against here that weights_only=True is designed to catch.
-    checkpoint = torch.load(model_dir, map_location=device, weights_only=False)
+    checkpoint = torch.load(model_dir, map_location=device, weights_only=True)
     if not (isinstance(checkpoint, dict) and "model_state_dict" in checkpoint):
         raise ValueError(
             f"'{policy_type}' models require a metadata checkpoint to infer the prediction_horizon "
@@ -733,7 +733,7 @@ def run_evaluation(
             action_noise_rng=expert_action_noise_rng,
         )
 
-        policy_trajectory, reached_goal, steps_taken, policy_collided, policy_solve_times = rollout_policy(
+        policy_trajectory, reached_goal, steps_taken, policy_collided, policy_solve_failed, policy_solve_times = rollout_policy(
             simulator=simulator,
             policy=policy,
             device=device,
@@ -775,6 +775,7 @@ def run_evaluation(
                 "initial_state": initial_state,
                 "policy_reached_goal": reached_goal,
                 "policy_collided": policy_collided,
+                "policy_solve_failed": policy_solve_failed,
                 "expert_collided": expert_collided,
                 "policy_steps": max(len(policy_trajectory) - 1, 0),
                 "expert_steps": max(len(expert_trajectory) - 1, 0),
@@ -856,14 +857,21 @@ def run_evaluation(
         np.mean([metric["expert_collided"] for metric in per_seed_metrics])
         if total_runs > 0 else 0.0
     )
-    # A run that neither reached the goal nor collided ran out of steps --
-    # tracked separately since "timed out while still avoiding" and
-    # "collided outright" are different (and not equally bad) failure
-    # modes that success_rate alone can't distinguish.
+    # A run that neither reached the goal nor collided nor hit a solve
+    # failure ran out of steps -- tracked separately since "timed out while
+    # still avoiding", "collided outright", and "the policy's own forward
+    # pass raised" are different (and not equally bad) failure modes that
+    # success_rate alone can't distinguish.
+    policy_solve_failure_rate = (
+        np.mean([metric["policy_solve_failed"] for metric in per_seed_metrics])
+        if total_runs > 0 else 0.0
+    )
     policy_timeout_rate = (
         np.mean(
             [
-                (not metric["policy_reached_goal"]) and (not metric["policy_collided"])
+                (not metric["policy_reached_goal"])
+                and (not metric["policy_collided"])
+                and (not metric["policy_solve_failed"])
                 for metric in per_seed_metrics
             ]
         )
@@ -871,6 +879,7 @@ def run_evaluation(
     )
     print(f"policy_collision_rate: {policy_collision_rate:.4f}")
     print(f"policy_timeout_rate: {policy_timeout_rate:.4f}")
+    print(f"policy_solve_failure_rate: {policy_solve_failure_rate:.4f}")
     print(f"expert_collision_rate: {expert_collision_rate:.4f}")
     print(f"mean_policy_steps: {mean_policy_steps:.3f}")
     print(f"mean_expert_steps: {mean_expert_steps:.3f}")
@@ -961,6 +970,7 @@ def run_evaluation(
         "success_rate": success_rate,
         "policy_collision_rate": float(policy_collision_rate),
         "policy_timeout_rate": float(policy_timeout_rate),
+        "policy_solve_failure_rate": float(policy_solve_failure_rate),
         "expert_collision_rate": float(expert_collision_rate),
         "mean_policy_steps": mean_policy_steps,
         "mean_expert_steps": mean_expert_steps,

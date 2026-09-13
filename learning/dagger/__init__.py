@@ -1,4 +1,6 @@
 from .beta_controller import ExpertMixBetaController, scheduled_expert_mix_beta
+from .dagger_config import DaggerConfig
+from .dagger_trainer import DaggerTrainer
 from .metrics import DaggerEvalMetrics
 from .rollouts import (
     apply_execution_noise,
@@ -20,7 +22,9 @@ from .utils import (
 )
 
 __all__ = [
+    "DaggerConfig",
     "DaggerEvalMetrics",
+    "DaggerTrainer",
     "ExpertMixBetaController",
     "scheduled_expert_mix_beta",
     "apply_config_overrides",

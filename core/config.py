@@ -24,6 +24,12 @@ class PlannerConfig:
     r_weight_per_robot: tuple[tuple[float, ...], ...] = ()
     terminal_cost_multiplier: float = 10.0
     collision_slack_penalty_weight: float = 10000.0
+    # Defaults mirror CasadiTrajectoryProjector's own hardcoded fallbacks
+    # (planning/casadi_projector.py) exactly, so a config that omits these
+    # behaves identically to before they were configurable.
+    terminal_velocity_weight: float = 1.0
+    fallback_terminal_velocity_tol: float = 1e-2
+    max_consecutive_fallbacks: int = 5
 
 
 @dataclass(frozen=True)
@@ -287,6 +293,9 @@ def _allowed_system_config_keys(system_name: str) -> set[str]:
         "R_diag",
         "terminal_cost_multiplier",
         "collision_slack_penalty_weight",
+        "terminal_velocity_weight",
+        "fallback_terminal_velocity_tol",
+        "max_consecutive_fallbacks",
         "initial_state_seed",
         "action_noise_seed",
         "done_hold_steps",
@@ -357,6 +366,9 @@ def _allowed_multi_robot_keys() -> set[str]:
         "R_weight_per_robot",
         "terminal_cost_multiplier",
         "collision_slack_penalty_weight",
+        "terminal_velocity_weight",
+        "fallback_terminal_velocity_tol",
+        "max_consecutive_fallbacks",
         "environment",
         "db_lacam",
     }
@@ -657,6 +669,9 @@ def _validate_planner(
         r_weight_per_robot=r_weight_per_robot,
         terminal_cost_multiplier=_float(config, "terminal_cost_multiplier", 10.0),
         collision_slack_penalty_weight=_float(config, "collision_slack_penalty_weight", 10000.0),
+        terminal_velocity_weight=_float(config, "terminal_velocity_weight", 1.0),
+        fallback_terminal_velocity_tol=_float(config, "fallback_terminal_velocity_tol", 1e-2),
+        max_consecutive_fallbacks=_int(config, "max_consecutive_fallbacks", 5),
     )
 
     if planner.horizon <= 0:
@@ -665,6 +680,12 @@ def _validate_planner(
         raise ConfigurationError("'terminal_cost_multiplier' must be positive.")
     if planner.collision_slack_penalty_weight <= 0:
         raise ConfigurationError("'collision_slack_penalty_weight' must be positive.")
+    if planner.terminal_velocity_weight <= 0:
+        raise ConfigurationError("'terminal_velocity_weight' must be positive.")
+    if planner.fallback_terminal_velocity_tol < 0:
+        raise ConfigurationError("'fallback_terminal_velocity_tol' must be non-negative.")
+    if planner.max_consecutive_fallbacks <= 0:
+        raise ConfigurationError("'max_consecutive_fallbacks' must be positive.")
     return planner
 
 def load_and_validate_system_config(system_name: str, config_path: str | Path) -> dict[str, Any]:
@@ -862,6 +883,9 @@ def validate_system_config(
                 "R_diag": list(planner_cfg.r_diag),
                 "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
                 "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
+                "terminal_velocity_weight": planner_cfg.terminal_velocity_weight,
+                "fallback_terminal_velocity_tol": planner_cfg.fallback_terminal_velocity_tol,
+                "max_consecutive_fallbacks": planner_cfg.max_consecutive_fallbacks,
             }
         )
         if len(planner_cfg.r_weight_per_robot) > 0:
@@ -1064,6 +1088,9 @@ def validate_system_config(
             "R_diag": list(planner_cfg.r_diag),
             "terminal_cost_multiplier": planner_cfg.terminal_cost_multiplier,
             "collision_slack_penalty_weight": planner_cfg.collision_slack_penalty_weight,
+            "terminal_velocity_weight": planner_cfg.terminal_velocity_weight,
+            "fallback_terminal_velocity_tol": planner_cfg.fallback_terminal_velocity_tol,
+            "max_consecutive_fallbacks": planner_cfg.max_consecutive_fallbacks,
         }
     )
 

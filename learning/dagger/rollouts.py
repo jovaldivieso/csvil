@@ -388,6 +388,25 @@ def collect_dagger_rollouts(
             if hasattr(expert_planner, "reset"):
                 expert_planner.reset()
 
+            # A Phase 2 (beta < 1.0) attempt is the only case where
+            # choose_action below will actually call policy_action_fn.
+            # That callable closes over its own history_buffer/recurrent
+            # state (see train_dagger.py's action_fn/reset_policy_state),
+            # which policy_reset_fn only clears once at episode start --
+            # otherwise it still holds frames from the discarded path past
+            # this candidate (or a previous failed attempt at it), so the
+            # first query here would see a rolling window that jumps
+            # straight from s_candidate_index to a "future" it hasn't
+            # reached yet. Reset it and replay the real, already-visited
+            # prefix (observation-only, actions discarded) so the window
+            # is exactly what it would have been had this candidate state
+            # been reached for the first time.
+            if policy_action_fn is not None and beta < 1.0:
+                if policy_reset_fn is not None:
+                    policy_reset_fn()
+                for prefix_state in visited_states[:candidate_index]:
+                    policy_action_fn(simulator.observe(prefix_state))
+
             def choose_action(observation: np.ndarray, expert_action: np.ndarray) -> tuple[np.ndarray, bool]:
                 # beta >= 1.0 (the default) short-circuits to the original
                 # deterministic, expert-only recovery exactly -- no RNG draw,

@@ -733,6 +733,69 @@ class BacktrackRecoveryEscalationTests(unittest.TestCase):
         self.assertEqual(policy_calls, [])
         self.assertEqual(writer.frames[0]["action"], [1.0])
 
+    def test_phase_two_resets_and_replays_history_before_querying_the_policy(self) -> None:
+        """Regression guard: a Phase 2 (beta_recovery < 1.0) attempt must not
+        let policy_action_fn's own history_buffer/recurrent state carry over
+        stale frames from the discarded path past the candidate -- it must be
+        reset and rebuilt from the real, already-visited prefix first.
+        """
+        simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
+        # Two safe forward steps (0.0 -> 0.1 -> 0.3) establish a real,
+        # 2-state prefix (visited_states[:2] = [0.0, 0.1]) before the third
+        # planner call's [100.0] is flagged unsafe and triggers backtrack to
+        # candidate_index=2 (s_0.3, the most recent state). Its own repeated
+        # [0.8] both proves Phase 1 expert-only recoverable and (again, since
+        # complete_from_candidate always re-solves from scratch) resolves the
+        # Phase 2 attempt.
+        planner = _SequencedPlanner(actions=[[0.1], [0.2], [100.0], [0.8]])
+        policy_calls: list[list[float]] = []
+        reset_calls = 0
+
+        def fake_policy(observation: np.ndarray) -> np.ndarray:
+            policy_calls.append(np.asarray(observation).copy().tolist())
+            return np.array([0.8])
+
+        def fake_policy_reset() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+
+        writer = _FakeDatasetWriter()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            metrics = collect_dagger_rollouts(
+                simulator=simulator,
+                expert_planner=planner,
+                dataset_writer=writer,
+                trajectories_per_iteration=1,
+                steps_per_trajectory=3,
+                action_noise_std=0.0,
+                action_noise_seed=0,
+                initial_state_seed=0,
+                expert_mixing_beta=1.0,
+                policy_action_fn=fake_policy,
+                policy_reset_fn=fake_policy_reset,
+                frame_builder=_frame_builder,
+                initial_states=[[0.0]],
+                goal_states=None,
+                beta_recovery=0.5,
+                beta_recovery_increment=1.0,
+            )
+
+        self.assertEqual(metrics.num_episodes, 1)
+        self.assertEqual(metrics.success_rate, 1.0)
+        self.assertIn("Recovery from s_2 succeeded at beta_recovery=0.500", stdout.getvalue())
+        # One reset at episode start (unconditional) plus exactly one more
+        # for the single Phase 2 attempt -- not zero (which would mean the
+        # stale-history bug is back) and not more (which would mean it's
+        # being reset redundantly per policy query instead of once per
+        # attempt).
+        self.assertEqual(reset_calls, 2)
+        # The replay must cover exactly the true prefix before the
+        # candidate (s_0.0, s_0.1), in order, before the "live" query at the
+        # candidate state itself (s_0.3) -- not the stale frames a forward
+        # pass continuing past s_0.3 would have produced.
+        np.testing.assert_allclose(policy_calls, [[0.0], [0.1], [0.3]])
+
 
 class EvaluatePolicyRolloutsTorchSeedingTests(unittest.TestCase):
     """A flow/safeflow policy's inference draws from an unseeded torch.randn
