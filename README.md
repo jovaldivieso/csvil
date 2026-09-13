@@ -1,4 +1,4 @@
-# Controller Synthesis via Imitation Learning
+# Multi-Robot Controller Synthesis via Imitation Learning
 
 This repository distils a computationally expensive motion planner into a faster neural policy for online control. It supports single robots and homogeneous fleets through the same fleet-first simulator interface, with CasADi as the current expert planner and optional db-LaCAM and future planner backends.
 
@@ -75,45 +75,58 @@ csvil/
 │   ├── config_loaders.py     # YAML and policy/encoder configuration helpers
 │   ├── config/
 │   │   ├── default_policy_config.yaml           # Used when --policy-config is omitted (MLP, no DAgger schedule)
+│   │   ├── gnn_encoder_mlp_policyhead_config.yaml
+│   │   ├── transformer_encoder_mlp_policyhead_config.yaml
 │   │   ├── multi_unicycle2_casadi_flow_config.yaml
-│   │   └── multi_unicycle2_casadi_mlp_config.yaml
+│   │   ├── multi_unicycle2_casadi_mlp_config.yaml
+│   │   ├── multi_double_integrator_casadi_flow_config.yaml
+│   │   ├── multi_double_integrator_casadi_mlp_config.yaml
+│   │   └── unicycle2_casadi_mlp_config.yaml
 │   ├── models/
 │   │   ├── deepset_encoder.py  # Permutation-invariant neighbor-set encoder
-│   │   ├── flow_policy.py      # Conditional flow-matching action policy used for BC/DAgger
 │   │   ├── encoder.py          # Shared interface and factory
+│   │   ├── gnn_encoder.py      # Message-passing (GNN) neighbor-set encoder
+│   │   ├── transformer_encoder.py  # Attention-based neighbor-set encoder
+│   │   ├── flow_policy.py      # Conditional flow-matching action policy used for BC/DAgger
+│   │   ├── safe_flow_policy.py # Flow policy + CasADi safety projection at inference (SafeFlowMPC)
 │   │   ├── mlp_policy.py       # MLP action policy
 │   │   └── policy.py           # Shared interface and factory
-│   ├── data_utils.py           # Stateless policy batch formatting and action chunks
+│   ├── data_utils.py           # Policy batch formatting, observation/action-window caching
 │   ├── dagger/
 │   │   ├── __init__.py        # Public DAgger helper API
 │   │   ├── beta_controller.py # Expert-mixing schedules and adaptive controller
-│   │   ├── feature_cache.py   # Observation schema and feature packing utilities
+│   │   ├── dagger_config.py   # DaggerConfig dataclass (resolved training/eval settings)
+│   │   ├── dagger_trainer.py  # DaggerTrainer: setup, aggregation, training, eval, checkpointing
 │   │   ├── metrics.py         # DAgger evaluation metrics
 │   │   ├── rollouts.py        # Collection, evaluation, and action execution
 │   │   └── utils.py           # Seeding, step resolution, config overrides, and metric logging
-│   ├── train_dagger.py        # Object-oriented MLP / flow DAgger trainer and CLI
+│   ├── train_dagger.py        # CLI plumbing/orchestration: parses args, builds DaggerConfig, runs DaggerTrainer
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
-│   ├── casadi_planner.py      # CasADi planner implementation
+│   ├── casadi_planner.py      # CasADi planner implementation (expert)
+│   ├── casadi_projector.py    # Per-robot CasADi safety projection for SafeFlowMPC
 │   └── dblacam_planner.py     # db-LaCAM planner implementation
 ├── systems/
 │   ├── dynamics.py            # Base simulator protocol and validation
+│   ├── single_integrator.py   # Example simulator subclass (holonomic, first-order)
 │   ├── double_integrator.py   # Example simulator subclass (holonomic)
+│   ├── unicycle1.py           # Example simulator subclass (non-holonomic, first-order)
+│   ├── unicycle2.py           # Example simulator subclass (non-holonomic)
+│   ├── collision_checker.py   # Pairwise fleet collision detection helper
 │   ├── initial_state_utils.py # Shared initial/goal-state parsing and normalization
 │   ├── multi_robot.py         # Fleet composition wrapper over per-robot simulators
-│   ├── unicycle2.py           # Example simulator subclass (non-holonomic)
 │   └── seed_utils.py          # Seed defaults and deterministic rollout seeding
 ├── outputs/
 │   ├── plots/                 # Evaluation and expert-rollout plots/videos
 │   ├── train/                 # LeRobot training outputs
-│   ├── train_dagger/          # Single-robot DAgger checkpoints (MLP or flow)
-│   └── train_dagger_multi_robot/  # Multi-robot DAgger checkpoints (MLP or flow)
+│   ├── train_dagger/          # Single-robot DAgger checkpoints (MLP, flow, or safeflow)
+│   └── train_dagger_multi_robot/  # Multi-robot DAgger checkpoints (MLP, flow, or safeflow)
 └── test/
     ├── config/
     │   ├── multi_unicycle2_casadi_config.yaml       # Canonical example (used throughout this README)
     │   ├── multi_double_integrator_casadi_config.yaml
     │   └── multi_robot_dblacam_config.yaml          # Long-form robots: list example (distinct per-robot `start` states)
-    ├── evaluate_policy.py        # CLI for rollout/evaluation across policy families
+    ├── evaluate_policy.py           # CLI for rollout/evaluation across policy families
     ├── plot_expert_trajectories.py  # Canonical single/multi-robot expert analysis CLI (plots + optional MP4)
     └── test_simulator_contracts.py  # Schema consistency tests
 ```
@@ -140,7 +153,9 @@ Available planners are:
 Each planner and corresponding dynamics use a YAML configuration file in
 `test/config/`. These "expert configs" hold only solver/dynamics
 parameters — time step, MPC horizon, cost weights, collision radii, and
-system-specific limits (e.g. `max_accel`, `max_omega`). They intentionally do
+system-specific limits (e.g. `max_accel` for double_integrator,
+`max_linear_accel`/`max_angular_accel`/`max_linear_vel`/`max_angular_vel` for
+unicycle2). They intentionally do
 **not** define a goal, random initial-state sampling bounds, or convergence
 tolerances any more: those are experiment-specific and now live in the policy
 config's `training:` block (see below), so the same expert config is reused,
@@ -155,9 +170,10 @@ robots:
   system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 2.0
+    max_angular_accel: 5.0
+    max_linear_vel: 2.0
+    max_angular_vel: 2.0
 ```
 
 This expands into `num_robots` identical entries before validation, so nothing
@@ -179,13 +195,34 @@ to catch malformed keys and shape mismatches early. Planner-specific keys includ
 - `terminal_cost_multiplier`
 - `collision_slack_penalty_weight` (positive scalar penalty for collision slack in soft pairwise avoidance)
 
-Every system still *accepts* `goal`, `randomize_goal`, initial-position sampling
-bounds (`initial_position_radius_bounds`, `initial_position_min_goal_distance`),
-and its own convergence tolerances (`error_tolerance`, or for `unicycle2`:
-`pos_tol`, `theta_tol`, `vel_tol`, `omega_tol`; `error_tolerance` is rejected for
-`unicycle2`) directly in the expert config, defaulting sensibly when omitted —
-but the recommended pattern is to leave them out and set them per-experiment
-instead, in the policy config's `training:` block, described next.
+Every system still *accepts* `goal`, `randomize_goal`, a shared random-sampling
+region (`workspace_bounds`, default `[-1.0, 1.0]` per coordinate — widen this to
+match the scale of your scenarios), and its own convergence tolerances
+(`error_tolerance`, or for `unicycle2`: `pos_tol`, `theta_tol`, `vel_tol`,
+`omega_tol`; `error_tolerance` is rejected for `unicycle2`) directly in the
+expert config, defaulting sensibly when omitted — but the recommended pattern
+is to leave them out and set them per-experiment instead, in the policy
+config's `training:` block, described next.
+
+Both random goals and random initial positions are drawn independently and
+uniformly from `workspace_bounds` (the same square for both, per robot). For
+`multi_robot`, sampling happens in two rejection-sampled stages using the
+fleet's `d_safe`, each *sequential* rather than joint: first every robot's
+goal is drawn one robot at a time, each redrawn on its own (up to a retry
+limit) until it clears `d_safe` against only the goals already accepted for
+earlier robots, not the whole set at once; then every robot's initial
+position is drawn the same way, redrawing only that robot until it clears
+`d_safe` against every already-accepted initial position *and* every robot's
+goal (including its own). Sequential rejection keeps the search space per
+attempt constant instead of shrinking combinatorially with fleet size (a
+joint draw over all N goals/positions at once becomes vanishingly likely to
+succeed well before N reaches double digits at realistic
+`d_safe`/`workspace_bounds` densities). Fixed (non-randomized) goals are
+committed before any randomized one is drawn, so an unlucky randomized
+neighbor never gets blamed on — or blocks resampling of — a goal that can't
+itself move. A single-robot system used standalone has no fleet to reject
+against, so its own `random_initial_state`/`randomize_goal_for_reset` are a
+plain uniform draw with no minimum-distance guarantee.
 
 Simulator and planner creation is centralized through `DynamicsFactory` and
 `PlannerFactory` in `core/factory.py`.
@@ -215,8 +252,7 @@ training:
   # and convergence tolerances for this experiment. Applies to both DAgger data
   # collection every round and in-loop evaluation; never to the supervised
   # training step itself, which has no simulator in the loop.
-  initial_position_min_goal_distance: 0.05
-  initial_position_radius_bounds: [0.05, 3.0]
+  workspace_bounds: [-3.0, 3.0]
   tolerance_overrides:
     pos_tol: 0.2
     theta_tol: 1.1
@@ -292,7 +328,34 @@ python test/evaluate_policy.py \
   --tolerance-overrides '{"pos_tol": 0.2, "theta_tol": 1.1, "vel_tol": 0.05, "omega_tol": 0.05}'
 ```
 
-`--policy-type` supports `mlp` and `flow`. `--initial-states`/`--goal-states` are
+`--policy-type` supports `mlp`, `flow`, and `safeflow` (flow matching with a
+CasADi safety projection at inference time; SafeFlowMPC, Oelerich et al.,
+2026) -- a `flow`-trained checkpoint can generally be evaluated as either.
+For a system with velocity states, `safeflow`'s projector pulls terminal
+velocity/angular-velocity toward zero as a soft cost (`terminal_velocity_weight`),
+not a hard constraint: a hard equality is only satisfiable when the horizon
+leaves no margin beyond the system's own worst-case braking distance for
+anything else sharing that horizon (tracking the flow policy's own proposal,
+collision avoidance), which in practice made the projector spend the whole
+horizon braking and never actually progress. This interchangeability also
+assumes the checkpoint's saved observation schema includes
+`observation.state_mask`: a checkpoint trained before that field existed
+saved a smaller `state_dim` than `resolve_checkpoint_observation_dimensions`
+now expects and is rejected outright (for either policy type, not just
+`safeflow`) -- retrain against the current schema rather than trying to
+evaluate such a checkpoint. For a multi-robot fleet specifically (more than
+one robot, so each has neighbors to forecast), `SafeFlowMPCPolicy`
+construction additionally rejects (`ValueError`) any checkpoint whose
+`model.observation_horizon` is `1` -- a neighbor's velocity can only be
+estimated by differencing two consecutive observation frames -- and any
+system with no velocity state (e.g. `single_integrator`, `unicycle1`), since
+neither can support the decentralized neighbor-velocity forecast SafeFlow's
+multi-robot coordination needs. `learning/config/multi_double_integrator_casadi_flow_config.yaml`
+sets `observation_horizon: 1` and is therefore a `flow`-only config for
+multi-robot use -- it cannot also be evaluated as `safeflow` without
+retraining at `observation_horizon >= 2`. A single robot (no neighbors) is
+unaffected by either check.
+`--initial-states`/`--goal-states` are
 optional (omit them for randomly seeded rollouts); pass them to check
 performance on a specific scenario, e.g. the same swap/crossing cases used
 during training. `--tolerance-overrides` reproduces whatever convergence
@@ -398,8 +461,8 @@ Use this as a compact quick reference for current entrypoint flags.
 - `learning/train_dagger.py`
   - required args: `--experiment-name`, `--system`, `--expert-config`
   - optional dataset args: `--repo-id`, `--dataset-root` (omit both for fresh DAgger mode without offline dataset pretraining)
-  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--round-seeds`, `--restart-round-seed`/`--no-restart-round-seed`, `--initial-states`, `--goal-states`, `--initial-position-min-goal-distance`, `--initial-position-radius-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`
-  - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--batch-size`, `--learning-rate`, `--policy-config`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
+  - optional DAgger args: `--planner`, `--dagger-iterations`, `--trajectories-per-iteration`, `--steps-per-trajectory`, `--action-noise-std`, `--training-curriculum`, `--round-seeds`, `--restart-round-seed`/`--no-restart-round-seed`, `--initial-states`, `--goal-states`, `--workspace-bounds`, `--tolerance-overrides`, `--expert-mix-beta-start`, `--expert-mix-beta-end`, `--expert-mix-beta-decay-rate`, `--expert-mix-decay-after-eval-success`, `--adaptive-beta-recovery`/`--no-adaptive-beta-recovery`, `--expert-mix-beta-recovery`, `--expert-mix-beta-recovery-increment`
+  - optional training/eval args: `--target-epochs-per-round`, `--eval-episodes`, `--eval-steps`, `--eval-seed-start`, `--eval-action-noise-std`, `--eval-tolerance-overrides`, `--batch-size`, `--learning-rate`, `--policy-config`, `--checkpoint-dir`, `--seed`, `--max-train-steps`
 
 Every flag above also accepts `--help` for its full description, e.g.
 `python learning/train_dagger.py --help`.
@@ -463,3 +526,15 @@ lerobot-dataset-viz \
 - Brainstorming: Add composable observer/noise models so training and evaluation can sweep partial observability and sensor corruption systematically (beyond current execution-time action-noise injection).
 - Brainstorming: Extend the planner stack to support OMPL as an additional backend. The expected integration path is straightforward: add an OMPL planner implementation that inherits from `planning/planner.py` and register it through `PlannerFactory`.
 - Brainstorming: Add a safety module similar to GLAS-style barrier-function shielding.
+
+## References
+
+- Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, Matt Le. (2023). Flow Matching for Generative Modeling. https://doi.org/10.48550/arXiv.2210.02747
+- Thies Oelerich, Gerald Ebmer, Christian Hartl-Nesic, Andreas Kugi. (2026). SafeFlowMPC: Predictive and Safe Trajectory Planning for Robot Manipulators with Learning-based Policies. https://doi.org/10.48550/arXiv.2602.12794
+- Benjamin Rivière, Wolfgang Hönig, Yisong Yue, Soon-Jo Chung. (2020). GLAS: Global-to-Local Safe Autonomy Synthesis for Multi-Robot Motion Planning with End-to-End Learning. https://doi.org/10.1109/LRA.2020.2994035
+- Stéphane Ross, Geoffrey J. Gordon, J. Andrew Bagnell. (2011). A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning. https://doi.org/10.48550/arXiv.1011.0686
+- Manzil Zaheer, Satwik Kottur, Siamak Ravanbhakhsh, Barnabás Póczos, Ruslan Salakhutdinov, Alexander J. Smola. (2017). Deep Sets. https://doi.org/10.48550/arXiv.1703.06114
+
+## License
+
+This project is licensed under the MIT License, see the LICENSE file for details.

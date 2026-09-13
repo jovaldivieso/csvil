@@ -58,10 +58,12 @@ class DynamicsProtocol(Protocol):
     nx: int
     nu: int
     obs_dim: int
-    max_action: float
+    max_action: float | np.ndarray
     is_euclidean: bool
+    randomize_goal: bool
     angular_state_indices: tuple[int, ...]
     position_indices: tuple[int, ...]
+    velocity_state_indices: tuple[int, ...]
     num_robots: int
     simulators: list["DynamicsProtocol"]
     robot_state_slices: list[slice]
@@ -161,24 +163,12 @@ class DynamicsSimulator(ABC):
         self.obs_dim = getattr(self, "obs_dim", self.nx)
         self.max_action = None
 
-    def sample_planar_start_offset(
+    def sample_workspace_position(
         self,
         rng: np.random.Generator,
-        radius_bounds: tuple[float, float],
-        min_goal_distance: float,
+        bounds: tuple[float, float],
     ) -> np.ndarray:
-        radius_min, radius_max = radius_bounds
-        effective_radius_min = max(radius_min, min_goal_distance)
-        if radius_max <= effective_radius_min:
-            raise ValueError(
-                "Initial-state sampling requires the maximum initial radius to exceed the minimum goal distance."
-            )
-
-        # Sample uniformly with respect to planar area on the annulus, not uniformly in radius.
-        radius_sq = rng.uniform(effective_radius_min**2, radius_max**2)
-        radius = float(np.sqrt(radius_sq))
-        angle = rng.uniform(0.0, 2.0 * np.pi)
-        return np.array([radius * np.cos(angle), radius * np.sin(angle)], dtype=float)
+        return rng.uniform(low=bounds[0], high=bounds[1], size=2)
 
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         del rng
@@ -234,6 +224,27 @@ class DynamicsSimulator(ABC):
     def position_indices(self) -> tuple[int, ...]:
         """State coordinate indices representing spatial position (for collision detection, etc.)."""
         return (0, 1)
+
+    @property
+    def velocity_state_indices(self) -> tuple[int, ...]:
+        """State indices for this system's own proprioceptive (linear, angular) speed, if any.
+
+        Empty for kinematic/first-order systems with no velocity state (e.g.
+        single_integrator, unicycle1) -- their own instantaneous motion
+        between two observed frames can't be recovered from state alone.
+
+        A velocity-having system (subclassing DynamicsSimulator or
+        implementing DynamicsProtocol structurally) MUST override this to
+        return its actual velocity indices: CasadiTrajectoryProjector uses
+        an empty result here as license to skip the terminal-velocity cost
+        entirely (correct only for systems that genuinely have
+        no velocity state -- see its own construction-time comment), and
+        SafeFlowMPCPolicy uses it to decide whether a multi-robot fleet's
+        neighbor velocities can be estimated at all. A velocity-having
+        system that silently inherits this default would be treated as
+        first-order by both, not merely imprecisely -- unsafely.
+        """
+        return ()
 
     @property
     def num_robots(self) -> int:
@@ -346,9 +357,11 @@ class DynamicsSimulator(ABC):
         frame = self.format_dataset_frame(obs, np.zeros(int(self.nu), dtype=np.float32))[0]
         environment_state = np.asarray(frame["observation.environment_state"], dtype=np.float32).reshape(-1)
         state = np.asarray(frame["observation.state"], dtype=np.float32).reshape(-1)
+        state_mask = np.asarray(frame["observation.state_mask"], dtype=np.float32).reshape(-1)
         return {
             "observation.environment_state": environment_state,
             "observation.state": state,
+            "observation.state_mask": state_mask,
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
         }

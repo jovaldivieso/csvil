@@ -81,15 +81,23 @@ class DeepSetEncoder(ObservationEncoder):
     def forward(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
         environment_state = observation_dict.get("observation.environment_state")
         state = observation_dict.get("observation.state")
+        state_mask = observation_dict.get("observation.state_mask")
         raw_neighbors = observation_dict.get("observation.neighbor_state")
         raw_mask = observation_dict.get("observation.neighbor_mask")
-        if environment_state is None or state is None or raw_neighbors is None or raw_mask is None:
+        if (
+            environment_state is None
+            or state is None
+            or state_mask is None
+            or raw_neighbors is None
+            or raw_mask is None
+        ):
             raise ValueError(
-                "observation_dict must contain canonical environment, state, neighbor state, and mask keys."
+                "observation_dict must contain canonical environment, state, state mask, neighbor state, "
+                "and neighbor mask keys."
             )
         if environment_state.ndim != 2 or state.ndim != 2:
             raise ValueError("Environment and state tensors must have shape (B, D).")
-        ego_obs = torch.cat([environment_state, state], dim=-1)
+        ego_obs = torch.cat([environment_state, state, state_mask], dim=-1)
         if ego_obs.ndim != 2 or ego_obs.shape[1] != self.ego_dim:
             raise ValueError(
                 f"Canonical ego features must concatenate to shape (B, {self.ego_dim}), "

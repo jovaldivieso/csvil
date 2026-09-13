@@ -191,11 +191,24 @@ class CasadiPlanner(Planner):
         if self.d_safe < 0:
             raise ValueError("'d_safe' must be non-negative.")
 
+        # d_safe is the soft planning buffer (relaxable below via slack);
+        # d_collision is the hard physical floor beneath it that must never
+        # be crossed regardless of slack.
+        self.d_collision = float(config.get("d_collision", getattr(self.sim, "d_collision", self.d_safe)))
+        if self.d_collision < 0:
+            raise ValueError("'d_collision' must be non-negative.")
+        if self.d_collision > self.d_safe:
+            raise ValueError(
+                "'d_collision' must not exceed 'd_safe': d_safe is the soft planning buffer "
+                "distance and d_collision is the hard physical floor beneath it."
+            )
+
         # State variables for open-loop planning
         self.cached_plan = None
         self.step_idx = 0
         self.last_X_sol = None
         self.last_U_sol = None
+        self._prev_lam_g: np.ndarray | None = None
 
         # Cost matrices depending on system state
         q_diag = config.get("Q_diag", [10.0] * self.sim.nx)
@@ -234,11 +247,22 @@ class CasadiPlanner(Planner):
         # Add single vectorized constraint: X[:, 1:] == X_next
         self.opti.subject_to(self.X[:, 1:] == X_next)
 
-        # Vectorized actuator limits over all horizon steps.
+        # Vectorized actuator limits over all horizon steps. max_action may
+        # be a per-action-dimension array (e.g. unicycle2's independent
+        # [a_v, a_omega] bounds) rather than one scalar shared by every
+        # component -- broadcast a scalar to match, but repeat an array
+        # bound across the horizon explicitly: vec() flattens column-major,
+        # so comparing against the bare (nu,) array would misalign it
+        # against the flattened (nu*N,) actions instead of repeating
+        # per-column like a (nu, N) comparison would.
         for sub_sim, action_slice in zip(self.sub_simulators, self.robot_action_slices):
-            robot_max_action = float(getattr(sub_sim, "max_action", self.sim.max_action))
-            self.opti.subject_to(ca.vec(self.U[action_slice, :]) >= -robot_max_action)
-            self.opti.subject_to(ca.vec(self.U[action_slice, :]) <= robot_max_action)
+            action_dim = action_slice.stop - action_slice.start
+            robot_max_action = np.broadcast_to(
+                np.asarray(getattr(sub_sim, "max_action", self.sim.max_action), dtype=float).reshape(-1, 1),
+                (action_dim, self.N),
+            )
+            self.opti.subject_to(ca.vec(self.U[action_slice, :]) >= ca.vec(-robot_max_action))
+            self.opti.subject_to(ca.vec(self.U[action_slice, :]) <= ca.vec(robot_max_action))
 
         # Vectorized optional per-robot state bounds over steps 1..N.
         for sub_sim, state_slice in zip(self.sub_simulators, self.robot_state_slices):
@@ -349,16 +373,26 @@ class CasadiPlanner(Planner):
                 self.opti.subject_to(
                     squared_distance + collision_slack[pair_idx, :-1] >= self.d_safe ** 2
                 )
+                # Hard floor beneath the soft d_safe buffer: collision_slack
+                # is unbounded above, so the soft term alone never actually
+                # guarantees separation. d_collision (<= d_safe, enforced in
+                # __init__) is the real physical contact threshold, so it
+                # stays a hard constraint regardless of slack -- this also
+                # keeps the expert's own demonstrations, which the policy
+                # imitates, from ever encoding an actual collision as
+                # "solved".
+                self.opti.subject_to(squared_distance >= self.d_collision ** 2)
 
                 # Terminal constraint
                 squared_distance_terminal = ca.DM(0.0)
                 for idx_i, idx_j in zip(pos_indices_i, pos_indices_j):
                     diff = self.X[int(idx_i), self.N] - self.X[int(idx_j), self.N]
                     squared_distance_terminal = squared_distance_terminal + diff ** 2
-                
+
                 self.opti.subject_to(
                     squared_distance_terminal + collision_slack[pair_idx, self.N] >= self.d_safe ** 2
                 )
+                self.opti.subject_to(squared_distance_terminal >= self.d_collision ** 2)
 
             cost += self.collision_slack_penalty_weight * ca.sum2(ca.sum1(collision_slack))
 
@@ -386,15 +420,43 @@ class CasadiPlanner(Planner):
         self.opti.minimize(cost)
         self.opti.subject_to(self.X[:, 0] == self.x0_param)
 
-        opts = {"ipopt.print_level": 0, "print_time": 0, "ipopt.sb": "yes"}
+        # In "mpc" mode this same Opti problem is re-solved every real-world
+        # timestep with only slightly perturbed parameters (receding
+        # horizon), so dual-warm-starting the multipliers in __call__ is far
+        # more effective than a cold start every time -- the primal side
+        # already gets a warm shifted guess below, but the bare
+        # warm_start_init_point=yes without also tuning the bound-push/frac
+        # options and mu_init barely helps, since IPOPT still pushes
+        # iterates away from bounds and restarts the barrier parameter high
+        # by default.
+        opts = {
+            "ipopt.print_level": 0,
+            "print_time": 0,
+            "ipopt.sb": "yes",
+            "ipopt.warm_start_init_point": "yes",
+            "ipopt.warm_start_bound_push": 1e-9,
+            "ipopt.warm_start_bound_frac": 1e-9,
+            "ipopt.warm_start_slack_bound_push": 1e-9,
+            "ipopt.warm_start_slack_bound_frac": 1e-9,
+            "ipopt.warm_start_mult_bound_push": 1e-9,
+            "ipopt.mu_init": 1e-6,
+        }
         self.opti.solver("ipopt", opts)
 
     def reset(self) -> None:
         """Signals the start of a new episode."""
         self.last_X_sol = None
         self.last_U_sol = None
+        self._prev_lam_g = None
         self.opti.set_initial(self.X, 0.0)
         self.opti.set_initial(self.U, 0.0)
+        # set_initial(..., lam_g, ...) is sticky on the Opti object -- clearing
+        # only the Python-side _prev_lam_g cache above stops *this* code from
+        # re-applying it, but whatever value __call__ last handed Opti stays
+        # active internally until something overwrites it. Without this, the
+        # new episode's first solve would still warm-start from the previous
+        # (unrelated) episode's final dual multipliers.
+        self.opti.set_initial(self.opti.lam_g, 0.0)
         if self.mode == "open_loop":
             self.cached_plan = None
             self.step_idx = 0
@@ -410,17 +472,39 @@ class CasadiPlanner(Planner):
                 shifted_U = np.hstack([self.last_U_sol[:, 1:], self.last_U_sol[:, -1:]])
                 self.opti.set_initial(self.X, shifted_X)
                 self.opti.set_initial(self.U, shifted_U)
+            if self._prev_lam_g is not None:
+                self.opti.set_initial(self.opti.lam_g, self._prev_lam_g)
 
             try:
                 sol = self.opti.solve()
-                self.last_X_sol = sol.value(self.X)
-                self.last_U_sol = sol.value(self.U)
-                return self.last_U_sol[:, 0]
-            except RuntimeError as exc:
-                raise PlannerSolveError(
-                    "CasADi planner solve failed in MPC mode. "
-                    f"Current state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
-                ) from exc
+            except RuntimeError:
+                # The shifted warm start occasionally leaves IPOPT stuck at a
+                # locally infeasible point for the hard, non-convex
+                # d_collision keep-out constraint -- e.g. once execution
+                # noise (or, during DAgger aggregation, a still-untrained
+                # policy's actions) has pushed the actual state, often at
+                # near-saturated velocity, away from what the previous solve
+                # predicted. This was never a failure mode when collision
+                # avoidance was purely soft (slack always gave the solver a
+                # way out); now that d_collision is a hard floor, a cold
+                # restart -- confirmed empirically to resolve states that
+                # fail from their warm start -- recovers far more reliably
+                # than declaring the state unsolvable outright.
+                self.opti.set_initial(self.X, 0.0)
+                self.opti.set_initial(self.U, 0.0)
+                self.opti.set_initial(self.opti.lam_g, 0.0)
+                try:
+                    sol = self.opti.solve()
+                except RuntimeError as exc:
+                    raise PlannerSolveError(
+                        "CasADi planner solve failed in MPC mode (both warm-started and "
+                        "cold-restarted)."
+                    ) from exc
+
+            self.last_X_sol = sol.value(self.X)
+            self.last_U_sol = sol.value(self.U)
+            self._prev_lam_g = sol.value(self.opti.lam_g)
+            return self.last_U_sol[:, 0]
 
         elif self.mode == "open_loop":
             # Plan once on the first step
@@ -434,8 +518,7 @@ class CasadiPlanner(Planner):
                     self.cached_plan = sol.value(self.U)
                 except RuntimeError as exc:
                     raise PlannerSolveError(
-                        "CasADi planner solve failed in open-loop mode. "
-                        f"Initial state estimate: {x0.tolist()}, goal: {self.sim.goal_state.tolist()}."
+                        "CasADi planner solve failed in open-loop mode."
                     ) from exc
 
             # Iterate through the cached plan

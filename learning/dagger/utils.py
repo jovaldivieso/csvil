@@ -105,6 +105,42 @@ def print_rollout_metrics(label: str, prefix: str, metrics: DaggerEvalMetrics) -
         f"{prefix}_min_steps={metrics.min_steps} {prefix}_max_steps={metrics.max_steps} "
         f"episodes={metrics.num_episodes}"
     )
+    # Only evaluate_policy_rollouts populates this split (curriculum
+    # initial_states/goal_states vs simulator RNG fallback); other
+    # DaggerEvalMetrics producers (e.g. aggregation's own success
+    # accounting) leave both counts at 0, so there's nothing worth a second
+    # line for them.
+    if metrics.config_num_episodes > 0 or metrics.random_num_episodes > 0:
+        config_rate = (
+            100.0 * metrics.config_successes / metrics.config_num_episodes
+            if metrics.config_num_episodes > 0
+            else None
+        )
+        random_rate = (
+            100.0 * metrics.random_successes / metrics.random_num_episodes
+            if metrics.random_num_episodes > 0
+            else None
+        )
+        config_display = (
+            f"{metrics.config_successes}/{metrics.config_num_episodes} ({config_rate:.1f}%)"
+            if config_rate is not None
+            else "n/a (0 episodes)"
+        )
+        random_display = (
+            f"{metrics.random_successes}/{metrics.random_num_episodes} ({random_rate:.1f}%)"
+            if random_rate is not None
+            else "n/a (0 episodes)"
+        )
+        print(
+            f"  {prefix}_success_by_source: config={config_display} random={random_display}"
+        )
+    total_failures = metrics.collision_failures + metrics.timeout_failures + metrics.solve_failures
+    if total_failures > 0:
+        print(
+            f"  {prefix}_failure_breakdown: collision={metrics.collision_failures} "
+            f"timeout={metrics.timeout_failures} solve_failure={metrics.solve_failures} "
+            f"(of {total_failures} failures)"
+        )
 
 
 def evaluation_seed_specs(

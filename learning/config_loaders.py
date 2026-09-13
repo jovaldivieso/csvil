@@ -21,6 +21,8 @@ DEFAULT_DAGGER_TRAINING_CONFIG: dict[str, object] = {
     "expert_mix_beta_decay_rate": None,
     "expert_mix_decay_after_eval_success": None,
     "adaptive_beta_recovery": False,
+    "expert_mix_beta_recovery": 1.0,
+    "expert_mix_beta_recovery_increment": 1.0,
     "target_epochs_per_round": [30.0],
     "eval_episodes": 10,
     "eval_steps": None,
@@ -35,9 +37,9 @@ DEFAULT_DAGGER_TRAINING_CONFIG: dict[str, object] = {
     "restart_round_seed": False,
     "initial_states": None,
     "goal_states": None,
-    "initial_position_min_goal_distance": None,
-    "initial_position_radius_bounds": None,
+    "workspace_bounds": None,
     "tolerance_overrides": None,
+    "eval_tolerance_overrides": None,
 }
 
 
@@ -85,7 +87,7 @@ def load_dagger_training_config(policy_config_path: Path | None) -> dict[str, ob
 def load_mlp_hidden_dims(policy_config_path: Path) -> tuple[int, ...]:
    
     policy_type = load_policy_type(policy_config_path)
-    if policy_type == "flow":
+    if policy_type in {"flow", "safeflow"}:
         raw_config = _cached_yaml_config(policy_config_path)
         model_section = raw_config.get("model", raw_config)
         hidden_dims_raw = model_section.get("hidden_dims") if isinstance(model_section, Mapping) else None
@@ -105,8 +107,8 @@ def load_policy_type(policy_config_path: Path | None) -> str:
     if not isinstance(model_section, Mapping):
         raise ValueError("Model config 'model' section must be a mapping.")
     policy_type_raw = model_section.get("policy_type", "mlp")
-    if not isinstance(policy_type_raw, str) or policy_type_raw.strip().lower() not in {"mlp", "flow"}:
-        raise ValueError("'model.policy_type' must be one of {'mlp', 'flow'}.")
+    if not isinstance(policy_type_raw, str) or policy_type_raw.strip().lower() not in {"mlp", "flow", "safeflow"}:
+        raise ValueError("'model.policy_type' must be one of {'mlp', 'flow', 'safeflow'}.")
     return policy_type_raw.strip().lower()
 
 

@@ -238,15 +238,11 @@ def rollout_trajectory(
             print(
                 "Skipping trajectory due to planner failure "
                 f"(rollout={rollout_label}, source={initial_state_source}, seed={seed_value}, "
-                f"action_noise_std={action_noise_std:.6f})."
-            )
-            print(
-                "Planner failure context: "
+                f"action_noise_std={action_noise_std:.6f}): {exc} "
                 f"initial_state={np.array2string(np.asarray(initial_state), precision=6)}, "
                 f"current_state={np.array2string(np.asarray(state), precision=6)}, "
                 f"goal_state={np.array2string(np.asarray(simulator.goal_state), precision=6)}"
             )
-            print(f"Underlying solver error: {exc}")
             planner_failed = True
             break
 
