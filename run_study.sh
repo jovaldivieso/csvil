@@ -62,6 +62,12 @@ read -r -a SEEDS <<< "${SEEDS:-0}"
 # 'optimizer_steps=' line in each log says what was used.
 TARGET_EPOCHS="${TARGET_EPOCHS:-10}"
 MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-}"
+
+# Success rate the policy must reach before expert-mixing beta starts decaying. At 0
+# the schedule decays regardless, so a policy that is still bad begins driving its
+# own aggregation rollouts and feeds itself poor states. Raise it for a policy family
+# that learns slowly.
+BETA_DECAY_AFTER="${BETA_DECAY_AFTER:-0.0}"
 TRAIN_FLEET_SIZES=(8 6 4 2)
 
 # Trajectories per DAgger round, inversely proportional to the fleet size: each
@@ -180,7 +186,7 @@ train_one() {
     --action-noise-std 0.03 \
     --expert-mix-beta-start 0.5 \
     --expert-mix-beta-decay-rate 0.25 \
-    --expert-mix-decay-after-eval-success 0.0 \
+    --expert-mix-decay-after-eval-success "$BETA_DECAY_AFTER" \
     --eval-episodes 20 \
     > "logs/${name}.log" 2>&1
   # Capture before anything else runs: a $(...) ahead of $? would reset it.
