@@ -20,27 +20,43 @@ in the image, and `*_NUM_THREADS=1` so parallel jobs don't oversubscribe the cor
 
 ## Training
 
+### Study 1
+
+The DAgger schedule and model settings live in the four generated
+`learning/config/study/deepset_<variant>_n04_study1_config.yaml` files, so the command
+passes only the run identity:
+
 ```bash
-MAX_PARALLEL=$(nproc) ENCODERS="..." POLICIES="..." SEEDS="..." \
-TARGET_EPOCHS=400 MAX_TRAIN_STEPS=40000 BETA_DECAY_AFTER=0.5 \
-./run_study.sh train <fleet sizes>
+MAX_PARALLEL=12 SCHEDULE_FROM_CONFIG=1 CONFIG_SUFFIX=_study1 \
+ENCODERS="deepset" POLICIES="mlp mlp_h10 flow_h1 flow_h10" SEEDS="0 1 2" \
+./run_study.sh train 4
 ```
 
-| Study | `ENCODERS` | `POLICIES` | `SEEDS` | fleet sizes |
-|---|---|---|---|---|
-| 1 | `deepset` | `mlp flow_h1 mlp_h8 flow` | `0 1 2` | `4` |
-| 2 (flow) | `deepset transformer gnn` | `flow` | `0` | `2 4 6 8` |
+Variants are `mlp` and `flow_h1` (predict one action), `mlp_h10` and `flow_h10`
+(predict a 10-step chunk). Every cell trains 5 DAgger rounds of 200 trajectories x 250
+steps for 40 epochs, with 3 flow inference steps and sum pooling. Regenerate the
+configs with `python learning/config/study/generate_study_policy_configs.py` after
+changing `STUDY1_*` in that script.
 
-Policy variants are `mlp` and `flow_h1` (predict one action), `mlp_h8` and `flow`
-(predict an 8-step chunk). Study 2's `deepset_flow_n04_s0` is study 1's run; copy it
-rather than retrain it.
+`workspace_bounds` and the tolerance overrides in these configs apply to training and
+its in-loop evaluation only; `eval_study1.sh` scores against the scenario configs.
+
+### Study 2
+
+```bash
+MAX_PARALLEL=$(nproc) ENCODERS="deepset transformer gnn" POLICIES="flow" SEEDS="0" \
+TARGET_EPOCHS=400 MAX_TRAIN_STEPS=40000 BETA_DECAY_AFTER=0.5 \
+./run_study.sh train 2 4 6 8
+```
+
+`MAX_TRAIN_STEPS` gives every DAgger round the same number of gradient steps in every
+run — `grep optimizer_steps logs/*.log` should read 40000.
 
 Runs are named `<encoder>_<variant>_n<NN>_s<seed>` and land in
-`outputs/train_dagger_multi_robot/`; move them to `outputs/study1/models/` or
-`outputs/study2/models/` when done. `MAX_TRAIN_STEPS` gives every DAgger round the same
-number of gradient steps in every run — `grep optimizer_steps logs/*.log` should read
-40000. Expected single-core time per run: about 2 h at N=2, 3.5 h at N=4, 14 h at N=6
-and 38 h at N=8.
+`outputs/train_dagger_multi_robot/`; move them to a study's `models/` directory when
+done. Keep retrained study-1 runs out of `outputs/study1/models/`, which holds the
+original runs under partly identical names, and point the evaluation at them with
+`MODELS=<dir>`.
 
 ## Evaluation
 

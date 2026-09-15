@@ -43,11 +43,12 @@ set -uo pipefail
 MODE="${1:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-8}"
 read -r -a ENCODERS <<< "${ENCODERS:-deepset transformer gnn}"
-# Policy variants to run, as labelled in VARIANTS in
-# learning/config/study/generate_study_policy_configs.py: mlp, flow, mlp_h8, flow_h1.
-# The grid is the cross product with ENCODERS, so keep one of the two axes short
-# unless you mean it. Study 1's 2x2 is POLICIES="mlp flow_h1 mlp_h8 flow"
-# with ENCODERS="deepset".
+# Policy variants to run. Study 2 uses the VARIANTS labels in
+# learning/config/study/generate_study_policy_configs.py (mlp, flow). The grid is the
+# cross product with ENCODERS, so keep one of the two axes short unless you mean it.
+# Study 1's 2x2 uses STUDY1_VARIANTS, whose schedule lives in the config:
+#   SCHEDULE_FROM_CONFIG=1 CONFIG_SUFFIX=_study1 ENCODERS="deepset" \
+#   POLICIES="mlp mlp_h10 flow_h1 flow_h10" SEEDS="0 1 2" ./run_study.sh train 4
 read -r -a POLICIES <<< "${POLICIES:-mlp}"
 # Training seeds. One run per (encoder, policy, fleet, seed); a single seed is an
 # anecdote, so any claim that two cells differ needs at least three.
@@ -68,6 +69,15 @@ MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-}"
 # own aggregation rollouts and feeds itself poor states. Raise it for a policy family
 # that learns slowly.
 BETA_DECAY_AFTER="${BETA_DECAY_AFTER:-0.0}"
+
+# Suffix before '_config.yaml' in the policy config name, e.g. CONFIG_SUFFIX=_study1
+# picks deepset_mlp_n04_study1_config.yaml.
+CONFIG_SUFFIX="${CONFIG_SUFFIX:-}"
+# SCHEDULE_FROM_CONFIG=1 passes only the run identity to train_dagger.py, so the DAgger
+# schedule comes from the policy config's 'training' section. Every schedule flag below
+# would otherwise override that section, which is why the default (0) keeps passing
+# them: study 2's configs have no schedule of their own.
+SCHEDULE_FROM_CONFIG="${SCHEDULE_FROM_CONFIG:-0}"
 TRAIN_FLEET_SIZES=(8 6 4 2)
 
 # Trajectories per DAgger round, inversely proportional to the fleet size: each
@@ -127,7 +137,7 @@ docker_run() {
     csvil "$@"
 }
 
-# A variant label is not a policy type -- mlp_h8 is an mlp, flow_h1 is a flow -- and
+# A variant label is not a policy type -- mlp_h10 is an mlp, flow_h1 is a flow -- and
 # train_dagger.py names its checkpoint <policy_type>_dagger_checkpoint.pt. Read the
 # type out of the generated config instead of assuming the label is it.
 policy_type_of() {
@@ -170,7 +180,7 @@ train_one() {
   local encoder="$1" policy="$2" fleet_size="$3" seed="$4"
   local padded; padded="$(printf %02d "$fleet_size")"
   local name="${encoder}_${policy}_n${padded}_s${seed}"
-  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}_config.yaml"
+  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}${CONFIG_SUFFIX}_config.yaml"
 
   # The per-fleet configs are generated, so a missing one means the generator has
   # not been run (or not for this fleet size, or not for this policy family) -- say
@@ -182,22 +192,29 @@ train_one() {
     return
   fi
 
+  local schedule=()
+  if [[ "$SCHEDULE_FROM_CONFIG" != "1" ]]; then
+    schedule=(
+      --dagger-iterations 3
+      --trajectories-per-iteration "${TRAJECTORIES[$fleet_size]}"
+      --steps-per-trajectory 200
+      --target-epochs-per-round "$TARGET_EPOCHS"
+      ${MAX_TRAIN_STEPS:+--max-train-steps "$MAX_TRAIN_STEPS"}
+      --action-noise-std 0.03
+      --expert-mix-beta-start 0.5
+      --expert-mix-beta-decay-rate 0.25
+      --expert-mix-decay-after-eval-success "$BETA_DECAY_AFTER"
+      --eval-episodes 20
+    )
+  fi
+
   docker_run python learning/train_dagger.py \
     --experiment-name "$name" \
     --system multi_robot \
     --expert-config "test/config/study/unicycle2_fleet_${padded}.yaml" \
     --policy-config "$policy_config" \
-    --dagger-iterations 3 \
-    --trajectories-per-iteration "${TRAJECTORIES[$fleet_size]}" \
-    --steps-per-trajectory 200 \
-    --target-epochs-per-round "$TARGET_EPOCHS" \
-    ${MAX_TRAIN_STEPS:+--max-train-steps "$MAX_TRAIN_STEPS"} \
     --seed "$seed" \
-    --action-noise-std 0.03 \
-    --expert-mix-beta-start 0.5 \
-    --expert-mix-beta-decay-rate 0.25 \
-    --expert-mix-decay-after-eval-success "$BETA_DECAY_AFTER" \
-    --eval-episodes 20 \
+    "${schedule[@]}" \
     > "logs/${name}.log" 2>&1
   # Capture before anything else runs: a $(...) ahead of $? would reset it.
   local status=$?
@@ -220,7 +237,7 @@ eval_one() {
   local scenario="$1" encoder="$2" policy="$3" fleet_size="$4" seed="$5"
   local padded; padded="$(printf %02d "$fleet_size")"
   local name="${encoder}_${policy}_n${padded}_s${seed}"
-  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}_config.yaml"
+  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}${CONFIG_SUFFIX}_config.yaml"
   local policy_type="mlp"
   [[ -f "$policy_config" ]] && policy_type="$(policy_type_of "$policy_config")"
   local checkpoint="${MODEL_ROOT}/${name}/${policy_type}_dagger_checkpoint.pt"
@@ -285,7 +302,8 @@ case "$MODE" in
 
     echo "training fleets: ${TRAIN_FLEET_SIZES[*]} | encoders: ${ENCODERS[*]}" \
          "| policies: ${POLICIES[*]} | seeds: ${SEEDS[*]}" \
-         "| target_epochs=${TARGET_EPOCHS} max_train_steps=${MAX_TRAIN_STEPS:-unset}"
+         "| target_epochs=${TARGET_EPOCHS} max_train_steps=${MAX_TRAIN_STEPS:-unset}" \
+         "| config_suffix='${CONFIG_SUFFIX}' schedule_from_config=${SCHEDULE_FROM_CONFIG}"
     for fleet_size in "${TRAIN_FLEET_SIZES[@]}"; do
       for encoder in "${ENCODERS[@]}"; do
         for policy in "${POLICIES[@]}"; do

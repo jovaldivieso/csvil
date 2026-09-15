@@ -4,7 +4,7 @@
 # and targets the antipode, which is the start of robot i+8.
 # Deterministic: fixed 'start' and 'goal', randomize_goal false.
 # Closest starting pair 1.800 (d_safe=1.2); 4.00 visible neighbours at t=0;
-# needs >= 93 steps even in a straight line.
+# needs >= 185 steps even in a straight line.
 dt: 0.05
 d_safe: 1.2
 d_collision: 1.0
@@ -36,12 +36,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -51,12 +50,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -66,12 +64,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -81,12 +78,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -96,12 +92,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -111,12 +106,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -126,12 +120,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -141,12 +134,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -156,12 +148,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -171,12 +162,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -186,12 +176,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -201,12 +190,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -216,12 +204,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -231,12 +218,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -246,12 +232,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05
@@ -261,12 +246,11 @@ robots:
 - system: unicycle2
   config:
     dt: 0.05
-    max_accel: 2.0
-    max_omega: 2.0
-    max_speed: 2.0
+    max_linear_accel: 3.0
+    max_angular_accel: 15.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
     randomize_goal: false
-    initial_position_min_goal_distance: 0.05
-    initial_position_radius_bounds: [0.05, 3.0]
     pos_tol: 0.1
     theta_tol: 1.1
     vel_tol: 0.05

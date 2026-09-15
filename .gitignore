@@ -25,3 +25,6 @@ test/*.mp4
 
 outputs/
 logs/
+# Bytecode caches in any directory
+__pycache__/
+*.pyc

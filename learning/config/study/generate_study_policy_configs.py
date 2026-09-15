@@ -51,25 +51,66 @@ CONFIG_DIR = Path(__file__).resolve().parent
 FLEET_CONFIG_TEMPLATE = "test/config/study/unicycle2_fleet_%02d.yaml"
 ENCODERS = ("deepset", "transformer", "gnn")
 
-# Policy variants, each emitted as <encoder>_<label>_n<NN>_config.yaml. A variant is
-# a template (the policy head) plus a prediction horizon, because those two are the
-# axes of study 1's 2x2 and holding everything else fixed is what makes its cells
-# comparable. The horizon lives here rather than in the templates so a template
-# cannot silently disagree with the label it is generated under.
-#
-#   mlp / flow    the study-2 encoder grid, each head at its natural horizon
-#   mlp_h8        study 1 cell C: the mode-averaging failure this study tests for
-#   flow_h1       study 1 cell B: flow held at the MLP's horizon
+# Study-2 policy variants, each emitted as <encoder>_<label>_n<NN>_config.yaml: a
+# template (the policy head) plus a prediction horizon, each head at its natural
+# horizon. The horizon lives here rather than in the templates so a template cannot
+# silently disagree with the label it is generated under. Study 1's cells are
+# STUDY1_VARIANTS below, emitted as separate *_study1 files.
 VARIANTS = {
     "mlp": ("mlp", 1, "single-step regression"),
     "flow": ("flow", 8, "action chunk; the generative head's intended setting"),
-    "mlp_h8": ("mlp", 8, "study 1 cell C: MSE regression averages over distinct manoeuvres"),
-    "flow_h1": ("flow", 1, "study 1 cell B: flow at the MLP's horizon"),
 }
 FLEET_SIZES = (2, 4, 6, 8)
 
 # Mirrors TRAJECTORIES in run_study.sh: episodes collected per DAgger round.
 TRAJECTORIES_PER_ROUND = {2: 150, 4: 100, 6: 75, 8: 50}
+# Study 1 retrain: its 2x2 at one fleet size, with the DAgger schedule written into
+# the config's training section rather than passed on the command line. train_dagger.py
+# reads that section as defaults, so the launch command passes only the run identity
+# (--experiment-name/--system/--expert-config/--policy-config/--seed); any other flag
+# would silently override the schedule below. Emitted as separate *_study1 files so
+# study 2's configs and run_study.sh's command-line schedule stay untouched.
+STUDY1_ENCODER = "deepset"
+STUDY1_FLEET_SIZE = 4
+STUDY1_TRAJECTORIES_PER_ROUND = 200
+STUDY1_DAGGER_ITERATIONS = 5
+# Chunked cells predict 10 actions (learning/config/multi_unicycle2_casadi_flow_config.yaml);
+# the single-step cells stay at 1, so the 2x2 contrast is preserved.
+STUDY1_CHUNK_HORIZON = 10
+STUDY1_VARIANTS = {
+    "mlp": ("mlp", 1, "single-step regression"),
+    f"mlp_h{STUDY1_CHUNK_HORIZON}": ("mlp", STUDY1_CHUNK_HORIZON, "MSE regression over an action chunk"),
+    "flow_h1": ("flow", 1, "flow at the MLP's horizon"),
+    f"flow_h{STUDY1_CHUNK_HORIZON}": ("flow", STUDY1_CHUNK_HORIZON, "action chunk; the generative head's intended setting"),
+}
+# The DAgger schedule of learning/config/multi_unicycle2_casadi_flow_config.yaml,
+# minus its 2-robot initial/goal states (study 1 trains at 4 robots and uses the
+# ring layouts generated below instead).
+STUDY1_WORKSPACE_HALF_WIDTH = 3.0
+# Model settings that also follow the example config. The study templates keep
+# 10 steps and mean pooling for study 2, so these are rewritten per generated file.
+STUDY1_MODEL_OVERRIDES = {
+    "num_inference_steps": ("3", "Euler integration steps for ODE sampling"),
+    "pool_type": ("sum", "options: sum, max, mean"),
+}
+STUDY1_TRAINING = {
+    "dagger_iterations": STUDY1_DAGGER_ITERATIONS,
+    "trajectories_per_iteration": [STUDY1_TRAJECTORIES_PER_ROUND] * STUDY1_DAGGER_ITERATIONS,
+    "steps_per_trajectory": 250,
+    "target_epochs_per_round": [40] * STUDY1_DAGGER_ITERATIONS,
+    "action_noise_std": 0.03,
+    "expert_mix_beta_start": 0.5,
+    "expert_mix_beta_decay_rate": 0.25,
+    "expert_mix_decay_after_eval_success": 0.5,
+    "expert_mix_beta_recovery": 0.75,
+    "expert_mix_beta_recovery_increment": 0.25,
+    "eval_episodes": 200,
+    "workspace_bounds": [-STUDY1_WORKSPACE_HALF_WIDTH, STUDY1_WORKSPACE_HALF_WIDTH],
+    "tolerance_overrides": {"pos_tol": 0.1, "theta_tol": 0.78, "vel_tol": 0.1, "omega_tol": 0.1},
+    "eval_tolerance_overrides": {"pos_tol": 0.2, "theta_tol": 1.1, "vel_tol": 0.5, "omega_tol": 0.5},
+    "training_curriculum": ["config"] * STUDY1_DAGGER_ITERATIONS,
+}
+
 # Share of each round spent on the ring layouts. A third leaves the majority of
 # the data on the randomized-goal distribution the policies are evaluated on
 # first, while still exposing every round to the hard crossing case.
@@ -80,7 +121,7 @@ RING_FRACTION = 1.0 / 3.0
 # evaluation layout the policies are scored on.
 NOMINAL_RADIUS = 3.0
 # Remaining radii are drawn from this range, whose upper end is lowered per fleet
-# to the goal box (``goal_position_bounds``) so the ring stays inside the region
+# to the workspace box (``workspace_bounds``) so the ring stays inside the region
 # the randomized rollouts sample. Smaller rings crowd the centre; larger ones make
 # the crossing longer and the approach faster.
 RADIUS_RANGE = (2.0, 4.0)
@@ -387,7 +428,7 @@ def main() -> None:
         fleet_path = PROJECT_ROOT / (FLEET_CONFIG_TEMPLATE % num_robots)
         fleet_config = yaml.safe_load(fleet_path.read_text())
         d_safe = float(fleet_config["d_safe"])
-        goal_box = float(fleet_config["robots"][0]["config"]["goal_position_bounds"][1])
+        goal_box = float(fleet_config["robots"][0]["config"]["workspace_bounds"][1])
         max_radius = min(RADIUS_RANGE[1], goal_box)
 
         count = round(TRAJECTORIES_PER_ROUND[num_robots] * RING_FRACTION)
@@ -429,6 +470,88 @@ def main() -> None:
             )
             out_path.write_text(text)
             print(f"wrote {out_path.relative_to(PROJECT_ROOT)}  ({count} ring rollouts)")
+
+    write_study1_configs()
+
+
+def format_training_value(value: object) -> str:
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{key}: {item}" for key, item in value.items()) + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(str(item) for item in value) + "]"
+    return str(value)
+
+
+def apply_study1_model_overrides(body: str, head: str) -> str:
+    """Rewrite the model keys study 1 takes from the example config."""
+    lines = []
+    found = set()
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        key = stripped.split(":", 1)[0]
+        if key in STUDY1_MODEL_OVERRIDES and ":" in stripped:
+            value, note = STUDY1_MODEL_OVERRIDES[key]
+            indent = line[: len(line) - len(stripped)]
+            lines.append(f"{indent}{key}: {value}        # {note}")
+            found.add(key)
+            continue
+        lines.append(line)
+    expected = {"pool_type"} | ({"num_inference_steps"} if head == "flow" else set())
+    if found != expected:
+        raise ValueError(f"{head} template: rewrote {sorted(found)}, expected {sorted(expected)}.")
+    return "\n".join(lines) + "\n"
+
+
+def write_study1_configs() -> None:
+    """One config per study-1 variant, carrying the retrain's full DAgger schedule."""
+    num_robots = STUDY1_FLEET_SIZE
+    fleet_path = PROJECT_ROOT / (FLEET_CONFIG_TEMPLATE % num_robots)
+    fleet_config = yaml.safe_load(fleet_path.read_text())
+    d_safe = float(fleet_config["d_safe"])
+    goal_box = float(fleet_config["robots"][0]["config"]["workspace_bounds"][1])
+    # Explicit starts are not checked against workspace_bounds, so cap the rings at
+    # the training arena here -- a ring outside it would be a layout the randomized
+    # rollouts never produce.
+    max_radius = min(RADIUS_RANGE[1], goal_box, STUDY1_WORKSPACE_HALF_WIDTH)
+
+    # Resized to this schedule's round: with the study-2 list (a third of 100) the
+    # ring share would halve to a sixth of 200, and the ring exposure would no longer
+    # match the rest of the study.
+    count = round(STUDY1_TRAJECTORIES_PER_ROUND * RING_FRACTION)
+    initial_states, goal_states, kind_counts = build_rollouts(num_robots, count, max_radius, d_safe)
+    closest = validate(num_robots, initial_states, goal_states, d_safe)
+    schedule = "".join(
+        f"  {key}: {format_training_value(value)}\n" for key, value in STUDY1_TRAINING.items()
+    )
+
+    for label, (head, prediction_horizon, horizon_note) in STUDY1_VARIANTS.items():
+        template_path = CONFIG_DIR / f"{STUDY1_ENCODER}_{head}_config.yaml"
+        out_path = CONFIG_DIR / f"{STUDY1_ENCODER}_{label}_n{num_robots:02d}_study1_config.yaml"
+        text = (
+            f"# Study 1 retrain: {STUDY1_ENCODER} {label} policy, {num_robots} robots.\n"
+            f"# Generated by learning/config/study/generate_study_policy_configs.py from\n"
+            f"# {template_path.name} -- do not edit by hand; edit the template or the script.\n"
+            f"#\n"
+            f"# {count} of the {STUDY1_TRAJECTORIES_PER_ROUND} episodes per DAgger round "
+            f"({RING_FRACTION:.0%}) start from the ring layouts below;\n"
+            f"# the rest fall back to the expert config's randomized goals. Closest starting\n"
+            f"# pair {closest:.3f} (d_safe={d_safe}).\n"
+            + apply_study1_model_overrides(
+                template_body(template_path.read_text(), prediction_horizon, horizon_note), head
+            )
+            + "\ntraining:\n"
+            + "  # Study 1 DAgger schedule. train_dagger.py reads this section as defaults, so\n"
+            + "  # launch with only --experiment-name/--system/--expert-config/--policy-config/\n"
+            + "  # --seed; any other flag on the command line overrides the value here.\n"
+            + schedule
+            + "  # workspace_bounds and the tolerance overrides apply to training and its\n"
+            + "  # in-loop eval only: test/evaluate_scaling.py scores against the scenario\n"
+            + "  # config, so post-training numbers use that arena and those tolerances.\n"
+            + format_rollouts("initial_states", initial_states)
+            + format_rollouts("goal_states", goal_states)
+        )
+        out_path.write_text(text)
+        print(f"wrote {out_path.relative_to(PROJECT_ROOT)}  ({count} ring rollouts, study 1 schedule)")
 
 
 if __name__ == "__main__":

@@ -43,7 +43,9 @@ GRID = "#e3e2de"
 # pair passes the categorical checks against this surface (CVD dE 24.7 protan,
 # 33.6 normal, contrast >= 3:1).
 HEAD_COLORS = {"mlp": "#2a78d6", "flow": "#eb6834"}
-HORIZON_DASH = {1: (None, None), 8: (5, 2)}
+# 8 is the first study-1 run's chunk, 10 the retrain's; both stay so old and new
+# result files plot side by side without one being drawn as the other.
+HORIZON_DASH = {1: (None, None), 8: (5, 2), 10: (2, 2)}
 
 # Mirrors VARIANTS in learning/config/study/generate_study_policy_configs.py.
 VARIANTS = {
@@ -51,6 +53,9 @@ VARIANTS = {
     "flow_h1": ("flow", 1),
     "mlp_h8": ("mlp", 8),
     "flow": ("flow", 8),
+    # Retrain (STUDY1_VARIANTS): chunked cells at horizon 10.
+    "mlp_h10": ("mlp", 10),
+    "flow_h10": ("flow", 10),
 }
 SCENARIO_TITLES = {"random": "Random goals", "circle": "Antipodal ring"}
 
