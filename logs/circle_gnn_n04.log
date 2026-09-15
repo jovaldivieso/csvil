@@ -1,13 +1,13 @@
-time="2026-09-11T16:23:54+02:00" level=warning msg="Found orphan containers ([csvil-csvil-run-78d0d1c33717]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
- Container csvil-csvil-run-d6eb966c83a2 Creating 
- Container csvil-csvil-run-d6eb966c83a2 Created 
-checkpoint: outputs/train_dagger_multi_robot/gnn_n04/mlp_dagger_checkpoint.pt
+ Container csvil-csvil-run-67fe14a80e63 Creating 
+ Container csvil-csvil-run-67fe14a80e63 Created 
+checkpoint: outputs/study2/models/gnn_n04/mlp_dagger_checkpoint.pt
 encoder: gnn | policy: mlp | trained on 4 robots | device: cpu
-  eval_fleet= 2  success=1.000  collision=0.000  timeout=0.000  mean_steps=152.0  min_pair_dist=1.531  (0.14s)
-  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=40.0  min_pair_dist=1.198  (0.05s)
-  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=33.0  min_pair_dist=1.161  (0.07s)
-  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=28.0  min_pair_dist=1.178  (0.18s)
-  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=30.0  min_pair_dist=1.198  (0.16s)
-  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=54.0  min_pair_dist=1.196  (1.43s)
+  note: --use-config-start with no action noise is deterministic for this policy; collapsing 50 identical episodes to 1
+  eval_fleet= 2  success=1.000  collision=0.000  timeout=0.000  mean_steps=114.0  pos_err=0.077  head_err=0.185  min_pair_dist=1.531  action=0.52ms  (0.09s)
+  eval_fleet= 4  success=1.000  collision=0.000  timeout=0.000  mean_steps=126.0  pos_err=0.042  head_err=0.112  min_pair_dist=1.183  action=5.65ms  (1.42s)
+  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=38.0  pos_err=3.556  head_err=0.313  min_pair_dist=0.988  action=1.36ms  (0.12s)
+  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=32.0  pos_err=4.154  head_err=0.417  min_pair_dist=0.994  action=1.34ms  (0.13s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=36.0  pos_err=7.073  head_err=0.008  min_pair_dist=0.977  action=1.22ms  (0.16s)
+  eval_fleet=32  success=0.000  collision=0.000  timeout=1.000  mean_steps=400.0  pos_err=9.313  head_err=0.413  min_pair_dist=1.180  action=3.94ms  (9.08s)
 
-wrote outputs/study/circle/gnn_n04.csv
+wrote outputs/study2/eval/circle/gnn_n04.csv

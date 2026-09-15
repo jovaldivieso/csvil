@@ -1,12 +1,13 @@
- Container csvil-csvil-run-f3062363132d Creating 
- Container csvil-csvil-run-f3062363132d Created 
-checkpoint: outputs/train_dagger_multi_robot/transformer_n02/mlp_dagger_checkpoint.pt
+ Container csvil-csvil-run-52da5805a65e Creating 
+ Container csvil-csvil-run-52da5805a65e Created 
+checkpoint: outputs/study2/models/transformer_n02/mlp_dagger_checkpoint.pt
 encoder: transformer | policy: mlp | trained on 2 robots | device: cpu
-  eval_fleet= 2  success=1.000  collision=0.000  timeout=0.000  mean_steps=136.0  min_pair_dist=1.233  (0.26s)
-  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=35.0  min_pair_dist=1.146  (0.09s)
-  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=33.0  min_pair_dist=1.141  (0.11s)
-  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=28.0  min_pair_dist=1.193  (0.13s)
-  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=28.0  min_pair_dist=1.180  (0.3s)
-  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=56.0  min_pair_dist=1.185  (2.44s)
+  note: --use-config-start with no action noise is deterministic for this policy; collapsing 50 identical episodes to 1
+  eval_fleet= 2  success=1.000  collision=0.000  timeout=0.000  mean_steps=116.0  pos_err=0.072  head_err=0.121  min_pair_dist=1.233  action=0.78ms  (0.13s)
+  eval_fleet= 4  success=0.000  collision=1.000  timeout=0.000  mean_steps=37.0  pos_err=3.527  head_err=0.240  min_pair_dist=0.968  action=0.82ms  (0.05s)
+  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=35.0  pos_err=3.844  head_err=0.029  min_pair_dist=0.977  action=0.98ms  (0.07s)
+  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=32.0  pos_err=4.120  head_err=0.097  min_pair_dist=0.943  action=1.17ms  (0.08s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=35.0  pos_err=7.086  head_err=0.240  min_pair_dist=0.971  action=2.35ms  (0.21s)
+  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=66.0  pos_err=13.940  head_err=0.361  min_pair_dist=0.994  action=15.44ms  (2.37s)
 
-wrote outputs/study/circle/transformer_n02.csv
+wrote outputs/study2/eval/circle/transformer_n02.csv

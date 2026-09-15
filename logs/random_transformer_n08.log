@@ -1,12 +1,12 @@
- Container csvil-csvil-run-ad18571f087e Creating 
- Container csvil-csvil-run-ad18571f087e Created 
-checkpoint: outputs/train_dagger_multi_robot/transformer_n08/mlp_dagger_checkpoint.pt
+ Container csvil-csvil-run-30ba0ed46b5d Creating 
+ Container csvil-csvil-run-30ba0ed46b5d Created 
+checkpoint: outputs/study2/models/transformer_n08/mlp_dagger_checkpoint.pt
 encoder: transformer | policy: mlp | trained on 8 robots | device: cpu
-  eval_fleet= 2  success=0.920  collision=0.060  timeout=0.020  mean_steps=124.7  min_pair_dist=2.824  (16.05s)
-  eval_fleet= 4  success=0.700  collision=0.260  timeout=0.040  mean_steps=118.4  min_pair_dist=1.697  (22.41s)
-  eval_fleet= 6  success=0.500  collision=0.300  timeout=0.200  mean_steps=127.5  min_pair_dist=1.382  (53.26s)
-  eval_fleet= 8  success=0.420  collision=0.400  timeout=0.180  mean_steps=112.6  min_pair_dist=1.232  (60.34s)
-  eval_fleet=16  success=0.100  collision=0.800  timeout=0.100  mean_steps=55.0  min_pair_dist=1.010  (69.9s)
-  eval_fleet=32  success=0.000  collision=0.960  timeout=0.040  mean_steps=28.4  min_pair_dist=0.975  (119.61s)
+  eval_fleet= 2  success=0.940  collision=0.060  timeout=0.000  mean_steps=109.4  pos_err=0.121  head_err=0.148  min_pair_dist=2.831  action=1.92ms  (15.38s)
+  eval_fleet= 4  success=0.700  collision=0.260  timeout=0.040  mean_steps=102.1  pos_err=0.393  head_err=0.377  min_pair_dist=1.698  action=2.29ms  (20.1s)
+  eval_fleet= 6  success=0.620  collision=0.300  timeout=0.080  mean_steps=112.4  pos_err=0.439  head_err=0.436  min_pair_dist=1.383  action=2.75ms  (30.32s)
+  eval_fleet= 8  success=0.540  collision=0.400  timeout=0.060  mean_steps=101.7  pos_err=0.579  head_err=0.562  min_pair_dist=1.232  action=3.24ms  (35.9s)
+  eval_fleet=16  success=0.180  collision=0.800  timeout=0.020  mean_steps=50.8  pos_err=1.212  head_err=1.076  min_pair_dist=1.010  action=6.29ms  (42.54s)
+  eval_fleet=32  success=0.000  collision=0.960  timeout=0.040  mean_steps=28.4  pos_err=1.499  head_err=1.319  min_pair_dist=0.975  action=20.71ms  (77.95s)
 
-wrote outputs/study/transformer_n08.csv
+wrote outputs/study2/eval/transformer_n08.csv

@@ -1,12 +1,13 @@
- Container csvil-csvil-run-e8210991258a Creating 
- Container csvil-csvil-run-e8210991258a Created 
-checkpoint: outputs/train_dagger_multi_robot/deepset_n04/mlp_dagger_checkpoint.pt
+ Container csvil-csvil-run-433d8fd66c7d Creating 
+ Container csvil-csvil-run-433d8fd66c7d Created 
+checkpoint: outputs/study2/models/deepset_n04/mlp_dagger_checkpoint.pt
 encoder: deepset | policy: mlp | trained on 4 robots | device: cpu
-  eval_fleet= 2  success=0.000  collision=1.000  timeout=0.000  mean_steps=43.0  min_pair_dist=1.200  (0.07s)
-  eval_fleet= 4  success=1.000  collision=0.000  timeout=0.000  mean_steps=163.0  min_pair_dist=1.284  (0.33s)
-  eval_fleet= 6  success=0.000  collision=1.000  timeout=0.000  mean_steps=40.0  min_pair_dist=1.191  (0.13s)
-  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=30.0  min_pair_dist=1.172  (0.12s)
-  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=28.0  min_pair_dist=1.185  (0.25s)
-  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=43.0  min_pair_dist=1.186  (1.13s)
+  note: --use-config-start with no action noise is deterministic for this policy; collapsing 50 identical episodes to 1
+  eval_fleet= 2  success=1.000  collision=0.000  timeout=0.000  mean_steps=169.0  pos_err=0.009  head_err=0.010  min_pair_dist=1.193  action=2.00ms  (0.56s)
+  eval_fleet= 4  success=1.000  collision=0.000  timeout=0.000  mean_steps=153.0  pos_err=0.004  head_err=0.014  min_pair_dist=1.284  action=2.02ms  (0.63s)
+  eval_fleet= 6  success=1.000  collision=0.000  timeout=0.000  mean_steps=149.0  pos_err=0.005  head_err=0.021  min_pair_dist=1.143  action=2.08ms  (0.78s)
+  eval_fleet= 8  success=0.000  collision=1.000  timeout=0.000  mean_steps=33.0  pos_err=4.199  head_err=0.312  min_pair_dist=0.998  action=1.27ms  (0.13s)
+  eval_fleet=16  success=0.000  collision=1.000  timeout=0.000  mean_steps=34.0  pos_err=7.062  head_err=0.230  min_pair_dist=0.971  action=1.38ms  (0.18s)
+  eval_fleet=32  success=0.000  collision=1.000  timeout=0.000  mean_steps=53.0  pos_err=14.234  head_err=0.162  min_pair_dist=0.999  action=4.22ms  (1.11s)
 
-wrote outputs/study/circle/deepset_n04.csv
+wrote outputs/study2/eval/circle/deepset_n04.csv

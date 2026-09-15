@@ -65,7 +65,8 @@ csvil/
 ├── run_study.sh               # Encoder-scaling study driver (train / eval / circle)
 ├── compose.yaml               # Docker services for csvil and optional db-lacam
 ├── docs/
-│   └── encoder_scaling_study.md  # Encoder-scaling study: training, evaluation, plots
+│   ├── experiment_plan.md     # Studies 1 and 2: design, decisions, results
+│   └── evaluation.md          # How to train, evaluate and plot both studies
 ├── requirements.txt           # Python dependencies installed in the csvil image
 ├── docker/
 │   ├── Dockerfile             # Main csvil runtime image
@@ -218,14 +219,8 @@ training:
   # and convergence tolerances for this experiment. Applies to both DAgger data
   # collection every round and in-loop evaluation; never to the supervised
   # training step itself, which has no simulator in the loop.
-  #
-  # Caution for benchmark studies: `tolerance_overrides` is honoured by
-  # train_dagger.py, evaluate_policy.py and plot_expert_trajectories.py, but NOT by
-  # test/evaluate_scaling.py, which reads tolerances from the system config only.
-  # A policy trained under an override and then scored with evaluate_scaling.py is
-  # judged by a different success criterion than it was trained for. When several
-  # policies are being compared, put the tolerances in the shared system config and
-  # leave this key out -- see docs/experiment_plan.md.
+  # test/evaluate_scaling.py ignores tolerance_overrides and scores with the system
+  # config's tolerances, so keep tolerances there when comparing policies.
   initial_position_min_goal_distance: 0.05
   initial_position_radius_bounds: [0.05, 3.0]
   tolerance_overrides:
@@ -260,10 +255,9 @@ a specific scenario without touching any config file.
 
 ## Pipeline Tutorial
 
-For the multi-encoder comparison (deepset / transformer / GNN across fleet sizes,
-trained on a remote machine and evaluated on held-out fleet sizes plus an
-antipodal-circle scenario), see
-[docs/encoder_scaling_study.md](docs/encoder_scaling_study.md).
+For the two studies (policy head and horizon; neighbour encoders across fleet sizes),
+see [docs/experiment_plan.md](docs/experiment_plan.md) for the design and results and
+[docs/evaluation.md](docs/evaluation.md) for how to run them.
 
 The primary workflow is decentralized DAgger for a homogeneous multi-robot
 `unicycle2` fleet. Each robot runs the shared policy from its ego observation

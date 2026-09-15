@@ -1,12 +1,12 @@
- Container csvil-csvil-run-c6e60baf4f92 Creating 
- Container csvil-csvil-run-c6e60baf4f92 Created 
-checkpoint: outputs/train_dagger_multi_robot/gnn_n02/mlp_dagger_checkpoint.pt
+ Container csvil-csvil-run-014990873c26 Creating 
+ Container csvil-csvil-run-014990873c26 Created 
+checkpoint: outputs/study2/models/gnn_n02/mlp_dagger_checkpoint.pt
 encoder: gnn | policy: mlp | trained on 2 robots | device: cpu
-  eval_fleet= 2  success=0.960  collision=0.040  timeout=0.000  mean_steps=121.8  min_pair_dist=2.803  (25.84s)
-  eval_fleet= 4  success=0.760  collision=0.220  timeout=0.020  mean_steps=114.0  min_pair_dist=1.736  (29.63s)
-  eval_fleet= 6  success=0.680  collision=0.300  timeout=0.020  mean_steps=110.2  min_pair_dist=1.362  (28.6s)
-  eval_fleet= 8  success=0.580  collision=0.420  timeout=0.000  mean_steps=94.8  min_pair_dist=1.236  (22.45s)
-  eval_fleet=16  success=0.160  collision=0.840  timeout=0.000  mean_steps=41.9  min_pair_dist=0.998  (16.63s)
-  eval_fleet=32  success=0.020  collision=0.960  timeout=0.020  mean_steps=25.1  min_pair_dist=0.976  (32.54s)
+  eval_fleet= 2  success=0.960  collision=0.040  timeout=0.000  mean_steps=106.3  pos_err=0.088  head_err=0.115  min_pair_dist=2.808  action=1.97ms  (16.41s)
+  eval_fleet= 4  success=0.760  collision=0.220  timeout=0.020  mean_steps=99.5  pos_err=0.364  head_err=0.389  min_pair_dist=1.736  action=2.07ms  (19.75s)
+  eval_fleet= 6  success=0.680  collision=0.300  timeout=0.020  mean_steps=101.8  pos_err=0.420  head_err=0.420  min_pair_dist=1.363  action=1.82ms  (21.35s)
+  eval_fleet= 8  success=0.580  collision=0.420  timeout=0.000  mean_steps=84.2  pos_err=0.575  head_err=0.581  min_pair_dist=1.236  action=2.14ms  (24.08s)
+  eval_fleet=16  success=0.160  collision=0.840  timeout=0.000  mean_steps=39.5  pos_err=1.274  head_err=1.196  min_pair_dist=0.998  action=2.95ms  (24.84s)
+  eval_fleet=32  success=0.020  collision=0.960  timeout=0.020  mean_steps=24.6  pos_err=1.515  head_err=1.417  min_pair_dist=0.976  action=6.02ms  (48.74s)
 
-wrote outputs/study/gnn_n02.csv
+wrote outputs/study2/eval/gnn_n02.csv

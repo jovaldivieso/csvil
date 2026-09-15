@@ -40,8 +40,8 @@ from matplotlib.colors import LinearSegmentedColormap
 PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-DEFAULT_RESULTS = PROJECT_ROOT / "outputs/study/encoder_scaling.csv"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/plots/random"
+DEFAULT_RESULTS = PROJECT_ROOT / "outputs/study2/eval/random/encoder_scaling.csv"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/study2/plots/random"
 
 ENCODER_ORDER = ("deepset", "transformer", "gnn")
 ENCODER_LABELS = {"deepset": "DeepSet", "transformer": "Transformer", "gnn": "GNN"}
@@ -111,7 +111,17 @@ def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float,
     return (max(0.0, center - margin), min(1.0, center + margin))
 
 
-def plot_matrix(rows, metric: str, output_path: Path) -> None:
+def titled(label: str, title: str) -> str:
+    """Prefix a figure title with what it shows, e.g. 'flow · antipodal ring'.
+
+    Titles describe rather than conclude: the same functions now plot two policies
+    and two scenarios, and a conclusion that held for the first MLP data (encoders
+    identical, training fleet size irrelevant) is false for flow on the ring.
+    """
+    return f"{label} — {title}" if label else title
+
+
+def plot_matrix(rows, metric: str, output_path: Path, label: str = "") -> None:
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
     eval_sizes = sorted({int(r["eval_fleet_size"]) for r in rows})
     values = {
@@ -185,7 +195,7 @@ def plot_matrix(rows, metric: str, output_path: Path) -> None:
     episodes = int(rows[0]["episodes"])
     # Titles sit above the panel row; panel titles own the band just under them.
     fig.suptitle(
-        f"{METRIC_LABELS.get(metric, metric)} by training and evaluation fleet size",
+        titled(label, f"{METRIC_LABELS.get(metric, metric)} by training and evaluation fleet size"),
         fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.10)
     fig.text(0.02, 1.045,
              f"{episodes} episodes per cell; outlined cells are in-distribution (trained and evaluated on the same fleet size)",
@@ -197,7 +207,7 @@ def plot_matrix(rows, metric: str, output_path: Path) -> None:
     print(f"wrote {display_path(output_path)}")
 
 
-def plot_by_fleet(rows, output_path: Path) -> None:
+def plot_by_fleet(rows, output_path: Path, label: str = "") -> None:
     """Success rate against evaluation fleet size, pooled over training fleet size.
 
     Pooling is what makes the comparison readable: per cell there are only 50
@@ -251,7 +261,7 @@ def plot_by_fleet(rows, output_path: Path) -> None:
     ax.tick_params(colors=TEXT_SECONDARY, length=0)
     ax.legend(frameon=False, fontsize=10, labelcolor=TEXT_SECONDARY, loc="upper right")
 
-    fig.suptitle("Success rate collapses with fleet size, identically for all three encoders",
+    fig.suptitle(titled(label, "Success rate by evaluation fleet size"),
                  fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.06)
     fig.text(0.02, 1.0,
              f"Pooled over all training fleet sizes ({total_per_point} episodes per point); bars are 95% Wilson intervals",
@@ -263,7 +273,7 @@ def plot_by_fleet(rows, output_path: Path) -> None:
     print(f"wrote {display_path(output_path)}")
 
 
-def plot_by_fleet_facets(rows, output_path: Path) -> None:
+def plot_by_fleet_facets(rows, output_path: Path, label: str = "") -> None:
     """One panel per training fleet size -- the un-pooled view of plot_by_fleet.
 
     Each point is a single matrix cell, so the intervals are the honest per-cell
@@ -320,7 +330,7 @@ def plot_by_fleet_facets(rows, output_path: Path) -> None:
     axes[0].set_ylabel("Success rate", fontsize=10, color=TEXT_SECONDARY)
 
     episodes = int(rows[0]["episodes"])
-    fig.suptitle("Training fleet size changes nothing: the same collapse in every panel",
+    fig.suptitle(titled(label, "Success rate by evaluation fleet size, per training fleet size"),
                  fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.14)
     fig.text(0.02, 1.07,
              f"One point per matrix cell ({episodes} episodes); bars are 95% Wilson intervals",
@@ -342,13 +352,31 @@ def main() -> None:
     parser.add_argument("--metric", default="success_rate", choices=sorted(METRIC_LABELS))
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--format", default="pdf", choices=["pdf", "png"])
+    parser.add_argument(
+        "--policy", choices=["mlp", "flow"], default=None,
+        help="plot only this policy's rows; required when the results hold more than one",
+    )
+    parser.add_argument("--label", default="", help="scenario name shown in the titles, e.g. 'antipodal ring'")
     args = parser.parse_args()
 
     rows = load_rows(args.results)
+    # Every series is keyed by encoder alone, so a file holding both policies would
+    # silently merge each encoder's mlp and flow rows into one line.
+    policies = sorted({row.get("policy_type") or "mlp" for row in rows})
+    if args.policy is None and len(policies) > 1:
+        raise SystemExit(f"{args.results} holds policies {policies}; pass --policy to pick one")
+    prefix = "encoder_study"
+    if args.policy is not None:
+        rows = [row for row in rows if (row.get("policy_type") or "mlp") == args.policy]
+        if not rows:
+            raise SystemExit(f"no {args.policy} rows in {args.results}")
+        prefix = f"encoder_study_{args.policy}"
+
+    label = " · ".join(part for part in (args.policy, args.label) if part)
     plot_matrix(rows, args.metric,
-                args.output_dir / f"encoder_study_{args.metric}_matrix.{args.format}")
-    plot_by_fleet(rows, args.output_dir / f"encoder_study_by_fleet.{args.format}")
-    plot_by_fleet_facets(rows, args.output_dir / f"encoder_study_by_fleet_facets.{args.format}")
+                args.output_dir / f"{prefix}_{args.metric}_matrix.{args.format}", label)
+    plot_by_fleet(rows, args.output_dir / f"{prefix}_by_fleet.{args.format}", label)
+    plot_by_fleet_facets(rows, args.output_dir / f"{prefix}_by_fleet_facets.{args.format}", label)
 
 
 if __name__ == "__main__":

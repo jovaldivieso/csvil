@@ -86,20 +86,30 @@ EVAL_FLEET_SIZES=(02 04 06 08 16 32)
 #
 # circle needs 400 steps because its 32-robot ring is >=184 steps just to cross in
 # a straight line -- the 200 that suits the random configs would score it a timeout
-# before it could finish. It is also deterministic, so one episode is the whole
-# result; raise EVAL_NOISE and EVAL_EPISODES together to sample robustness around
-# the nominal swap instead.
+# before it could finish. The layout is fixed, so evaluate_scaling.py collapses a
+# deterministic policy (the MLP) to one episode; flow samples its actions and keeps
+# all 50.
 declare -A SCENARIO_TEMPLATE=(
   [random]="test/config/study/unicycle2_fleet_%s.yaml"
   [circle]="test/config/study/circle/unicycle2_circle_%s.yaml"
 )
 declare -A SCENARIO_FLAGS=(    [random]=""    [circle]="--use-config-start" )
-declare -A SCENARIO_EPISODES=( [random]=50    [circle]=1 )
+declare -A SCENARIO_EPISODES=( [random]=50    [circle]=50 )
 declare -A SCENARIO_STEPS=(    [random]=200   [circle]=400 )
-declare -A SCENARIO_OUTDIR=(   [random]="outputs/study" [circle]="outputs/study/circle" )
+# Where eval reads checkpoints and writes results (study 2 layout by default).
+MODEL_ROOT="${MODEL_ROOT:-outputs/study2/models}"
+EVAL_ROOT="${EVAL_ROOT:-outputs/study2/eval}"
+
+# Success criterion for eval: vel_tol = omega_tol = EVAL_VEL_TOL, pos_tol = EVAL_POS_TOL.
+# Set both to empty to score with the tolerances in the scenario configs instead.
+EVAL_VEL_TOL="${EVAL_VEL_TOL-0.1}"
+EVAL_POS_TOL="${EVAL_POS_TOL-0.2}"
+EVAL_TOL_DIR=""
+
+declare -A SCENARIO_OUTDIR=(   [random]="${EVAL_ROOT}/random" [circle]="${EVAL_ROOT}/circle" )
 declare -A SCENARIO_MERGED=(
-  [random]="outputs/study/encoder_scaling.csv"
-  [circle]="outputs/study/circle/circle_scaling.csv"
+  [random]="${EVAL_ROOT}/random/encoder_scaling.csv"
+  [circle]="${EVAL_ROOT}/circle/encoder_scaling.csv"
 )
 
 # -u/HOME/USER: without -u the container writes root-owned files into the bind mount,
@@ -197,9 +207,12 @@ train_one() {
 # Build the config list for a scenario. The paths cannot be a single brace
 # expansion held in a variable -- brace expansion does not happen on expansion.
 scenario_configs() {
-  local template="${SCENARIO_TEMPLATE[$1]}" size
+  local template="${SCENARIO_TEMPLATE[$1]}" size path
   for size in "${EVAL_FLEET_SIZES[@]}"; do
-    printf "${template}\n" "$size"
+    path="$(printf "${template}" "$size")"
+    # Under a criterion override, use the derived copy written before the job loop.
+    [[ -n "$EVAL_TOL_DIR" ]] && path="${EVAL_TOL_DIR}/$(basename "$path")"
+    printf "%s\n" "$path"
   done
 }
 
@@ -210,12 +223,12 @@ eval_one() {
   local policy_config="learning/config/study/${encoder}_${policy}_n${padded}_config.yaml"
   local policy_type="mlp"
   [[ -f "$policy_config" ]] && policy_type="$(policy_type_of "$policy_config")"
-  local checkpoint="outputs/train_dagger_multi_robot/${name}/${policy_type}_dagger_checkpoint.pt"
+  local checkpoint="${MODEL_ROOT}/${name}/${policy_type}_dagger_checkpoint.pt"
 
   # Fall back to the pre-policy-axis layout so checkpoints trained before this
   # script grew a POLICIES axis stay evaluable under their original names.
   if [[ ! -f "$checkpoint" && "$policy" == "mlp" && "$seed" == "0" ]]; then
-    local legacy="outputs/train_dagger_multi_robot/${encoder}_n${padded}/mlp_dagger_checkpoint.pt"
+    local legacy="${MODEL_ROOT}/${encoder}_n${padded}/mlp_dagger_checkpoint.pt"
     if [[ -f "$legacy" ]]; then
       checkpoint="$legacy"
       name="${encoder}_n${padded}"
@@ -297,6 +310,23 @@ case "$MODE" in
     STEPS="${EVAL_STEPS:-${SCENARIO_STEPS[$scenario]}}"
     NOISE="${EVAL_NOISE:-0.0}"
     mkdir -p "${SCENARIO_OUTDIR[$scenario]}"
+
+    # Derived configs for a criterion override, written once here rather than inside
+    # each job so parallel jobs cannot race on the same file.
+    if [[ -n "${EVAL_VEL_TOL}${EVAL_POS_TOL}" ]]; then
+      EVAL_TOL_DIR="${SCENARIO_OUTDIR[$scenario]}/configs"
+      mkdir -p "$EVAL_TOL_DIR"
+      sed_args=()
+      [[ -n "$EVAL_VEL_TOL" ]] && sed_args+=(
+        -e "s/^\( *\)vel_tol: .*/\1vel_tol: ${EVAL_VEL_TOL}/"
+        -e "s/^\( *\)omega_tol: .*/\1omega_tol: ${EVAL_VEL_TOL}/")
+      [[ -n "$EVAL_POS_TOL" ]] && sed_args+=(-e "s/^\( *\)pos_tol: .*/\1pos_tol: ${EVAL_POS_TOL}/")
+      for size in "${EVAL_FLEET_SIZES[@]}"; do
+        src="$(printf "${SCENARIO_TEMPLATE[$scenario]}" "$size")"
+        sed "${sed_args[@]}" "$src" > "${EVAL_TOL_DIR}/$(basename "$src")"
+      done
+      echo "criterion override: vel/omega=${EVAL_VEL_TOL:-unchanged} pos=${EVAL_POS_TOL:-unchanged}"
+    fi
 
     echo "scenario=${scenario} episodes=${EPISODES} steps=${STEPS} action_noise=${NOISE}" \
          "| encoders: ${ENCODERS[*]} | policies: ${POLICIES[*]}"

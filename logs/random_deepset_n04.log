@@ -1,12 +1,12 @@
- Container csvil-csvil-run-589a747be1ce Creating 
- Container csvil-csvil-run-589a747be1ce Created 
-checkpoint: outputs/train_dagger_multi_robot/deepset_n04/mlp_dagger_checkpoint.pt
+ Container csvil-csvil-run-a720ab4f08c5 Creating 
+ Container csvil-csvil-run-a720ab4f08c5 Created 
+checkpoint: outputs/study2/models/deepset_n04/mlp_dagger_checkpoint.pt
 encoder: deepset | policy: mlp | trained on 4 robots | device: cpu
-  eval_fleet= 2  success=0.900  collision=0.060  timeout=0.040  mean_steps=130.2  pos_err=0.101  head_err=0.171  min_pair_dist=2.797  action=0.52ms  (5.45s)
-  eval_fleet= 4  success=0.740  collision=0.200  timeout=0.060  mean_steps=124.1  pos_err=0.316  head_err=0.319  min_pair_dist=1.715  action=0.65ms  (7.6s)
-  eval_fleet= 6  success=0.620  collision=0.300  timeout=0.080  mean_steps=116.0  pos_err=0.429  head_err=0.390  min_pair_dist=1.369  action=0.98ms  (13.05s)
-  eval_fleet= 8  success=0.620  collision=0.320  timeout=0.060  mean_steps=118.7  pos_err=0.432  head_err=0.415  min_pair_dist=1.268  action=1.17ms  (18.16s)
-  eval_fleet=16  success=0.120  collision=0.840  timeout=0.040  mean_steps=43.5  pos_err=1.302  head_err=1.186  min_pair_dist=1.007  action=1.66ms  (13.02s)
-  eval_fleet=32  success=0.040  collision=0.940  timeout=0.020  mean_steps=29.8  pos_err=1.484  head_err=1.341  min_pair_dist=0.974  action=3.51ms  (25.34s)
+  eval_fleet= 2  success=0.900  collision=0.060  timeout=0.040  mean_steps=114.0  pos_err=0.109  head_err=0.190  min_pair_dist=2.801  action=1.11ms  (10.36s)
+  eval_fleet= 4  success=0.780  collision=0.200  timeout=0.020  mean_steps=106.1  pos_err=0.319  head_err=0.327  min_pair_dist=1.715  action=1.35ms  (14.3s)
+  eval_fleet= 6  success=0.700  collision=0.300  timeout=0.000  mean_steps=102.7  pos_err=0.430  head_err=0.394  min_pair_dist=1.369  action=1.62ms  (19.71s)
+  eval_fleet= 8  success=0.660  collision=0.320  timeout=0.020  mean_steps=107.3  pos_err=0.433  head_err=0.418  min_pair_dist=1.269  action=1.80ms  (26.4s)
+  eval_fleet=16  success=0.140  collision=0.840  timeout=0.020  mean_steps=40.5  pos_err=1.302  head_err=1.186  min_pair_dist=1.007  action=2.76ms  (22.23s)
+  eval_fleet=32  success=0.040  collision=0.940  timeout=0.020  mean_steps=29.1  pos_err=1.484  head_err=1.341  min_pair_dist=0.974  action=5.74ms  (45.89s)
 
-wrote outputs/study/deepset_n04.csv
+wrote outputs/study2/eval/deepset_n04.csv

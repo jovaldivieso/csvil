@@ -13,7 +13,7 @@ Usage:
     python test/evaluate_scaling.py \
     --checkpoint outputs/train_dagger_multi_robot/deepset_n02/mlp_dagger_checkpoint.pt \
     --configs test/config/study/unicycle2_fleet_*.yaml \
-    --episodes 50 --steps 200 --output-csv outputs/study/deepset_n02.csv
+    --episodes 50 --steps 200 --output-csv outputs/study2/eval/random/deepset_n02.csv
 """
 
 from __future__ import annotations
@@ -178,7 +178,14 @@ def evaluate_fleet(
     heading_errors: list[float] = []
     min_distances: list[float] = []
 
-    for seed_spec in evaluation_seed_specs(simulator, episodes, seed_start):
+    for episode_index, seed_spec in enumerate(evaluation_seed_specs(simulator, episodes, seed_start)):
+        # Flow policies draw their action from noise (flow_policy.py:130), so without a
+        # seed here the same checkpoint scores differently on every run -- measured
+        # 0.54 / 0.52 / 0.46 across three identical runs, a spread as large as the
+        # effects this study is trying to detect. Seeding per episode keeps episodes
+        # different from one another while making the whole evaluation reproducible.
+        # Deterministic policies are unaffected.
+        torch.manual_seed(seed_start + episode_index)
         if fixed_initial_state is not None:
             state = simulator.reset(fixed_initial_state.copy())
         else:
@@ -300,10 +307,19 @@ def main() -> None:
             writer.writeheader()
 
         episodes = args.episodes
-        if args.use_config_start and args.action_noise_std == 0.0 and episodes > 1:
+        # A flow policy samples its action from noise at every step, so repeated
+        # rollouts differ even from a fixed start and averaging over draws is the
+        # whole point. Only a deterministic policy can be collapsed.
+        policy_is_deterministic = str(checkpoint.get("policy_type", "mlp")).lower() != "flow"
+        if (
+            args.use_config_start
+            and args.action_noise_std == 0.0
+            and episodes > 1
+            and policy_is_deterministic
+        ):
             print(
-                "  note: --use-config-start with no action noise is deterministic; "
-                f"collapsing {episodes} identical episodes to 1"
+                "  note: --use-config-start with no action noise is deterministic for "
+                f"this policy; collapsing {episodes} identical episodes to 1"
             )
             episodes = 1
 
