@@ -17,23 +17,13 @@ class DoubleIntegrator(DynamicsSimulator):
         # Determine if we should randomize the goal based on config
         self.randomize_goal = config.get("randomize_goal",
                                          "goal" not in config)
-        self.goal_position_bounds = tuple(
-            float(value) for value in config.get("goal_position_bounds", [-1.0, 1.0])
+        self.workspace_bounds = tuple(
+            float(value) for value in config.get("workspace_bounds", [-1.0, 1.0])
         )
         self.max_action = config.get("max_accel", 2.0)
         self.nx = 4
         self.nu = 2
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
-        self.initial_position_min_goal_distance = float(
-            config.get("initial_position_min_goal_distance", self.error_tolerance)
-        )
-        self.initial_position_radius_bounds = tuple(
-            float(value)
-            for value in config.get(
-                "initial_position_radius_bounds",
-                [self.initial_position_min_goal_distance, 1.0],
-            )
-        )
 
     def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
@@ -92,6 +82,11 @@ class DoubleIntegrator(DynamicsSimulator):
                 "shape": (2,),
                 "names": proprioception_names,
             },
+            # Companion mask for observation.state, mirroring
+            # observation.neighbor_mask: always 1.0 at collection time, so
+            # history-stacking's zero-padding for not-yet-collected frames is
+            # distinguishable from a genuine [vx=0, vy=0] reading.
+            "observation.state_mask": {"dtype": "float32", "shape": (1,), "names": ["state_mask"]},
             "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "action": {
@@ -102,12 +97,7 @@ class DoubleIntegrator(DynamicsSimulator):
         }
 
     def random_initial_state(self, rng: np.random.Generator) -> np.ndarray:
-        offset = self.sample_planar_start_offset(
-            rng,
-            radius_bounds=self.initial_position_radius_bounds,
-            min_goal_distance=self.initial_position_min_goal_distance,
-        )
-        start_pos = self.goal + offset
+        start_pos = self.sample_workspace_position(rng, self.workspace_bounds)
         return np.array([start_pos[0], start_pos[1], 0.0, 0.0])
 
     def invert_obs(self, obs: np.ndarray, validate: bool = True) -> np.ndarray:
@@ -119,11 +109,15 @@ class DoubleIntegrator(DynamicsSimulator):
     def goal_state(self) -> np.ndarray:
         return np.array([self.goal[0], self.goal[1], 0.0, 0.0])
 
+    @property
+    def velocity_state_indices(self) -> tuple[int, ...]:
+        return (2, 3)  # (vx, vy) -- state = [x, y, vx, vy]
+
     def randomize_goal_for_reset(self, rng: np.random.Generator) -> None:
         if self.randomize_goal:
             self.goal = rng.uniform(
-                low=self.goal_position_bounds[0],
-                high=self.goal_position_bounds[1],
+                low=self.workspace_bounds[0],
+                high=self.workspace_bounds[1],
                 size=self.goal.shape[0],
             )
 
@@ -134,6 +128,7 @@ class DoubleIntegrator(DynamicsSimulator):
         return [{
             "observation.environment_state": np.asarray(obs[:2], dtype=np.float32),
             "observation.state": np.asarray(obs[2:4], dtype=np.float32),
+            "observation.state_mask": np.array([1.0], dtype=np.float32),
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
             "action": np.asarray(action, dtype=np.float32),

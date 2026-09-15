@@ -66,9 +66,10 @@ class TransformerEncoder(ObservationEncoder):
     def forward(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
         environment_state = observation_dict["observation.environment_state"]
         state = observation_dict["observation.state"]
+        state_mask = observation_dict["observation.state_mask"]
         neighbor_state = observation_dict["observation.neighbor_state"]
         neighbor_mask = observation_dict["observation.neighbor_mask"]
-        ego_obs = torch.cat([environment_state, state], dim=-1)
+        ego_obs = torch.cat([environment_state, state, state_mask], dim=-1)
         batch_size = ego_obs.shape[0]
         neighbor_obs, neighbor_mask = self._split_neighbor_tensors(
             neighbor_state, neighbor_mask, self.neighbor_feature_dim, self.observation_horizon

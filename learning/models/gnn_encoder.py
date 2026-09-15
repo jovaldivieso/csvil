@@ -97,9 +97,10 @@ class GNNEncoder(ObservationEncoder):
     def forward(self, observation_dict: Mapping[str, torch.Tensor]) -> torch.Tensor:
         environment_state = observation_dict["observation.environment_state"]
         state = observation_dict["observation.state"]
+        state_mask = observation_dict["observation.state_mask"]
         raw_neighbors = observation_dict["observation.neighbor_state"]
         raw_mask = observation_dict["observation.neighbor_mask"]
-        ego_obs = torch.cat([environment_state, state], dim=-1)  # [batch_size, ego_dim]
+        ego_obs = torch.cat([environment_state, state, state_mask], dim=-1)  # [batch_size, ego_dim]
         neighbor_obs, neighbor_mask = self._split_neighbor_tensors(
             raw_neighbors, raw_mask, self.neighbor_feature_dim, self.observation_horizon
         )  # neighbor_obs: [B, K, neighbor_feature_dim] (one e_ij per slot, own history flattened in);

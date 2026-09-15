@@ -1,9 +1,13 @@
-# MLP architecture config for learning/train_dagger.py
+# Flow Policy architecture config for learning/train_dagger.py
 model:
-  policy_type: mlp              # options: mlp, flow, safeflow
+  policy_type: safeflow         # options: mlp, flow, safeflow
+
+  flow:
+    num_inference_steps: 3      # Euler integration steps for ODE sampling
+
   observation_horizon: 2        # number of past observation steps to consider
-  prediction_horizon: 1         # number of future action steps to predict, set to 1 for single-step prediction
-  hidden_dims: [256, 256, 256]  # Action prediction network hidden layers
+  prediction_horizon: 10        # number of future action steps to predict, set to 1 for single-step prediction
+  hidden_dims: [256, 256, 256]  # Velocity prediction network hidden layers
   
   encoder: deepset              # options: deepset, transformer, gnn
   
