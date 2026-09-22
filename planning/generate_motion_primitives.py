@@ -25,6 +25,7 @@ def main():
     path_to_config = os.path.join(
         "/workspace",
         "planning",
+        "dynobench",
         "models",
         args.config
     )
@@ -41,7 +42,7 @@ def main():
     # uses config directory as dynoplan's model directory:
     path_to_models = os.path.dirname(path_to_config) + os.sep
 
-    # Generates motion primitives.
+    # generates motion primitives:
     subprocess.run(
         [
             PATH_TO_EXE,
@@ -56,7 +57,7 @@ def main():
         stderr=subprocess.DEVNULL, 
     )
 
-    # Improves generated primitives.
+    # improves generated primitives:
     improved = f"{path_to_output}.im.bin"
     subprocess.run(
         [
@@ -73,7 +74,7 @@ def main():
         stderr=subprocess.DEVNULL,
     )
 
-    # Splits long primitives.
+    # splits long primitives:
     final = f"{improved}.sp.bin"
     subprocess.run(
         [
