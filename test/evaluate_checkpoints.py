@@ -221,13 +221,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--expert-config",
         type=str,
-        default="test/config/multi_unicycle2_casadi_config.yaml",
+        default="test/config/2_multi_unicycle2_casadi_config.yaml",
         help="path to the expert/system yaml (robot count, dynamics, collision radii, ...)",
     )
     parser.add_argument(
         "--eval-config",
         type=str,
-        default="learning/config/multi_unicycle2_casadi_flow_config.yaml",
+        default="learning/config/2_multi_unicycle2_casadi_flow_config.yaml",
         help=(
             "policy-training yaml to read eval_tolerance_overrides/initial_states/"
             "goal_states from, i.e. which scenarios to evaluate on -- not which "

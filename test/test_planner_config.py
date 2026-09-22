@@ -11,7 +11,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import ConfigurationError, validate_system_config
 
-CONFIG_PATH = os.path.join(PROJECT_ROOT, "test", "config", "multi_unicycle2_casadi_config.yaml")
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "test", "config", "2_multi_unicycle2_casadi_config.yaml")
 
 
 def _load_raw_config() -> dict:
