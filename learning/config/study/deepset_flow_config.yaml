@@ -1,5 +1,5 @@
 # Encoder-scaling study: DeepSet flow baseline.
-# [template-only] run_study.sh does not train from this file: it trains from the
+# [template-only] train.sh does not train from this file: it trains from the
 # [template-only] per-fleet-size configs that generate_study_policy_configs.py derives
 # [template-only] from it, which is also where the 'training' section (tolerances and
 # [template-only] the ring initial_states/goal_states) is added.

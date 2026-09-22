@@ -53,7 +53,8 @@ VARIANTS = {
     "flow_h1": ("flow", 1),
     "mlp_h8": ("mlp", 8),
     "flow": ("flow", 8),
-    # Retrain (STUDY1_VARIANTS): chunked cells at horizon 10.
+    # Retrain (STUDY1_VARIANTS): every label carries its horizon.
+    "mlp_h1": ("mlp", 1),
     "mlp_h10": ("mlp", 10),
     "flow_h10": ("flow", 10),
 }

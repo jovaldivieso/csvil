@@ -14,49 +14,64 @@ docker compose build csvil
 tmux new -s study
 ```
 
-`run_study.sh` runs each job in its own container with `-u $(id -u):$(id -g)` so files
+`train.sh` and `run_study.sh` run each job in its own container with `-u $(id -u):$(id -g)` so files
 stay host-owned, `HOME=/tmp` and `USER=csvil` because the host uid has no passwd entry
 in the image, and `*_NUM_THREADS=1` so parallel jobs don't oversubscribe the cores.
 
 ## Training
 
-### Study 1
-
-The DAgger schedule and model settings live in the four generated
-`learning/config/study/deepset_<variant>_n04_study1_config.yaml` files, so the command
-passes only the run identity:
+`train.sh` trains every policy config against every expert config, one Docker container
+per run:
 
 ```bash
-MAX_PARALLEL=12 SCHEDULE_FROM_CONFIG=1 CONFIG_SUFFIX=_study1 \
-ENCODERS="deepset" POLICIES="mlp mlp_h10 flow_h1 flow_h10" SEEDS="0 1 2" \
-./run_study.sh train 4
+./train.sh <experiment> <policy_dir|policy.yaml> <expert_dir|expert.yaml>
+#   env: SEEDS="0 1 2" (default "0"), MAX_PARALLEL=8
 ```
 
-Variants are `mlp` and `flow_h1` (predict one action), `mlp_h10` and `flow_h10`
-(predict a 10-step chunk). Every cell trains 5 DAgger rounds of 200 trajectories x 250
-steps for 40 epochs, with 3 flow inference steps and sum pooling. Regenerate the
-configs with `python learning/config/study/generate_study_policy_configs.py` after
-changing `STUDY1_*` in that script.
+Run `<policy>_<expert>_s<seed>` writes its checkpoints to
+`outputs/<experiment>/models/<run>/` and its log to `outputs/<experiment>/logs/<run>.log`.
+The script prints a summary at the end and exits non-zero if any run failed. Paths
+must be inside the repository, because the container mounts only the repository.
 
-`workspace_bounds` and the tolerance overrides in these configs apply to training and
-its in-loop evaluation only; `eval_study1.sh` scores against the scenario configs.
+The script passes `train_dagger.py` only the run identity (name, system, expert config,
+policy config, seed, checkpoint dir). Each run's model and full DAgger schedule live in
+its policy config.
 
-### Study 2
+**Study 2 (encoders).** The policy configs are generated, one directory per training
+fleet size:
+
+```
+learning/config/study/n{02,04,06,08}/{deepset,transformer,gnn}_{mlp,flow}.yaml
+```
+
+Each file holds ring start/goal layouts with one entry per robot. A config therefore
+only fits the expert config with the same number of robots, so train each directory
+with its own fleet size:
 
 ```bash
-MAX_PARALLEL=$(nproc) ENCODERS="deepset transformer gnn" POLICIES="flow" SEEDS="0" \
-TARGET_EPOCHS=400 MAX_TRAIN_STEPS=40000 BETA_DECAY_AFTER=0.5 \
-./run_study.sh train 2 4 6 8
+for n in 08 06 04 02; do
+  MAX_PARALLEL=$(nproc) ./train.sh study2 learning/config/study/n$n \
+    test/config/study/unicycle2_fleet_$n.yaml
+done
 ```
 
-`MAX_TRAIN_STEPS` gives every DAgger round the same number of gradient steps in every
-run — `grep optimizer_steps logs/*.log` should read 40000.
+Pass the expert config as a single file: `test/config/study/` also holds the 16- and
+32-robot evaluation configs, where the MPC expert is far too expensive to train with.
+A mismatched pair fails at the first rollout with "Rollout #0 has 4 entries, expected
+8".
 
-Runs are named `<encoder>_<variant>_n<NN>_s<seed>` and land in
-`outputs/train_dagger_multi_robot/`; move them to a study's `models/` directory when
-done. Keep retrained study-1 runs out of `outputs/study1/models/`, which holds the
-original runs under partly identical names, and point the evaluation at them with
-`MODELS=<dir>`.
+Variants are `mlp` (horizon 1) and `flow` (horizon 8). The schedule (`training_schedule`)
+is the same at every fleet size: 3 rounds of 100 trajectories x 200 steps, a third of
+them from ring layouts, and a fixed 40000 gradient steps per round. To change it, edit
+the constants in `learning/config/study/generate_study_policy_configs.py` and
+regenerate:
+
+```bash
+python3 learning/config/study/generate_study_policy_configs.py
+```
+
+To try a one-off setting without regenerating, call `train_dagger.py` directly and add
+the flag. A command-line flag overrides the config's value for that run only.
 
 ## Evaluation
 
@@ -96,7 +111,8 @@ colour is the policy head, dash is the horizon, the band spans the three seeds.
 
 ### Study 2
 
-Runs in Docker; reads `outputs/study2/models/`.
+Runs in Docker; reads `outputs/study2/models/`. It still expects the old run names
+(`<encoder>_<variant>_n<NN>_s<seed>`), so it does not pick up runs trained with `train.sh` yet.
 
 ```bash
 ENCODERS="deepset transformer gnn" POLICIES="mlp flow" ./run_study.sh eval

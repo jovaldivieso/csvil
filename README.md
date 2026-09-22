@@ -62,7 +62,8 @@ docker compose run --rm csvil hf auth login
 ```text
 csvil/
 ├── README.md                  # End-to-end usage and experiment recipes
-├── run_study.sh               # Encoder-scaling study driver (train / eval / circle)
+├── train.sh                   # Study training driver (policy configs x expert configs)
+├── run_study.sh               # Study evaluation driver (random / circle)
 ├── compose.yaml               # Docker services for csvil and optional db-lacam
 ├── docs/
 │   ├── experiment_plan.md     # Studies 1 and 2: design, decisions, results

@@ -1,25 +1,12 @@
 #!/usr/bin/env bash
-# Encoder-scaling study driver: 3 encoders x 4 training fleet sizes, then
-# every resulting policy evaluated on 6 fleet sizes.
+# Study evaluation driver: evaluates every checkpoint on 6 fleet sizes.
 #
-#   ./run_study.sh train [fleet ...]  # DAgger runs -> outputs/train_dagger_multi_robot/<name>/
-#   ./run_study.sh eval [scenario]    # 12 x 6 cells -> the scenario's merged CSV
+#   ./run_study.sh eval [scenario]    # every checkpoint x 6 fleet sizes -> merged CSV
 #
-# `train` with no argument trains every encoder on every fleet size (12 runs).
-# Pass fleet sizes to restrict it -- `./run_study.sh train 8` trains the three
-# encoders on 8 robots only. Restrict the encoders too with ENCODERS="deepset gnn".
+# Training lives in train.sh. NOTE: this eval still expects the old study-2 layout --
+# runs named <encoder>_<variant>_n<NN>_s<seed> under MODEL_ROOT -- so it does not find
+# runs trained with train.sh yet.
 #
-# There is one policy config per (encoder, fleet size) rather than per encoder,
-# because each one pins part of every DAgger round to hand-written antipodal-ring
-# initial states -- the training-time counterpart of the `circle` scenario below --
-# and those coordinates are per-robot. The 12 configs are generated from the three
-# encoder templates by
-#
-#   python learning/config/study/generate_study_policy_configs.py
-#
-# so encoder changes go in the templates and layout changes in that script.
-#
-# Runs are named <encoder>_<policy>_n<NN> and land in a directory of that name.
 # Checkpoints from before the policy axis existed are named <encoder>_n<NN>; eval
 # falls back to that older directory for mlp runs, so the existing study results can
 # be reproduced without renaming anything.
@@ -43,51 +30,10 @@ set -uo pipefail
 MODE="${1:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-8}"
 read -r -a ENCODERS <<< "${ENCODERS:-deepset transformer gnn}"
-# Policy variants to run. Study 2 uses the VARIANTS labels in
-# learning/config/study/generate_study_policy_configs.py (mlp, flow). The grid is the
-# cross product with ENCODERS, so keep one of the two axes short unless you mean it.
-# Study 1's 2x2 uses STUDY1_VARIANTS, whose schedule lives in the config:
-#   SCHEDULE_FROM_CONFIG=1 CONFIG_SUFFIX=_study1 ENCODERS="deepset" \
-#   POLICIES="mlp mlp_h10 flow_h1 flow_h10" SEEDS="0 1 2" ./run_study.sh train 4
+# Policy variant labels (the <variant> in run names), crossed with ENCODERS.
 read -r -a POLICIES <<< "${POLICIES:-mlp}"
-# Training seeds. One run per (encoder, policy, fleet, seed); a single seed is an
-# anecdote, so any claim that two cells differ needs at least three.
+# Training seeds of the runs to evaluate.
 read -r -a SEEDS <<< "${SEEDS:-0}"
-
-# Optimizer steps per DAgger round. Left unset, each round trains for
-# TARGET_EPOCHS epochs over whatever it aggregated -- which means a weaker policy,
-# whose episodes end earlier and so collect fewer frames, is also trained less, and
-# the two effects become inseparable. Setting MAX_TRAIN_STEPS caps every round at
-# the same number of steps for every cell. For the cap to actually bind, keep
-# TARGET_EPOCHS high enough that the uncapped figure always exceeds it; the
-# 'optimizer_steps=' line in each log says what was used.
-TARGET_EPOCHS="${TARGET_EPOCHS:-10}"
-MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-}"
-
-# Success rate the policy must reach before expert-mixing beta starts decaying. At 0
-# the schedule decays regardless, so a policy that is still bad begins driving its
-# own aggregation rollouts and feeds itself poor states. Raise it for a policy family
-# that learns slowly.
-BETA_DECAY_AFTER="${BETA_DECAY_AFTER:-0.0}"
-
-# Suffix before '_config.yaml' in the policy config name, e.g. CONFIG_SUFFIX=_study1
-# picks deepset_mlp_n04_study1_config.yaml.
-CONFIG_SUFFIX="${CONFIG_SUFFIX:-}"
-# SCHEDULE_FROM_CONFIG=1 passes only the run identity to train_dagger.py, so the DAgger
-# schedule comes from the policy config's 'training' section. Every schedule flag below
-# would otherwise override that section, which is why the default (0) keeps passing
-# them: study 2's configs have no schedule of their own.
-SCHEDULE_FROM_CONFIG="${SCHEDULE_FROM_CONFIG:-0}"
-TRAIN_FLEET_SIZES=(8 6 4 2)
-
-# Trajectories per DAgger round, inversely proportional to the fleet size: each
-# episode emits one LeRobot episode *per robot*, so this holds frames-per-round
-# (and therefore optimizer steps per round) constant at ~20k across fleet sizes.
-#
-# Mirrored by TRAJECTORIES_PER_ROUND in learning/config/study/generate_study_policy_configs.py,
-# which sizes each policy config's ring-layout list as a fixed share of the round.
-# Change one and re-run that script.
-declare -A TRAJECTORIES=([2]=150 [4]=100 [6]=75 [8]=50)
 
 EVAL_FLEET_SIZES=(02 04 06 08 16 32)
 
@@ -137,13 +83,6 @@ docker_run() {
     csvil "$@"
 }
 
-# A variant label is not a policy type -- mlp_h10 is an mlp, flow_h1 is a flow -- and
-# train_dagger.py names its checkpoint <policy_type>_dagger_checkpoint.pt. Read the
-# type out of the generated config instead of assuming the label is it.
-policy_type_of() {
-  grep -m1 -E '^[[:space:]]*policy_type:' "$1" | awk '{print $2}'
-}
-
 await_slot() {
   while (( $(jobs -rp | wc -l) >= MAX_PARALLEL )); do wait -n; done
 }
@@ -176,51 +115,6 @@ merge_csvs() {
   echo "Merged ${rows} result rows into ${merged}"
 }
 
-train_one() {
-  local encoder="$1" policy="$2" fleet_size="$3" seed="$4"
-  local padded; padded="$(printf %02d "$fleet_size")"
-  local name="${encoder}_${policy}_n${padded}_s${seed}"
-  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}${CONFIG_SUFFIX}_config.yaml"
-
-  # The per-fleet configs are generated, so a missing one means the generator has
-  # not been run (or not for this fleet size, or not for this policy family) -- say
-  # so here rather than letting train_dagger.py fail on the path a few seconds into
-  # the container.
-  if [[ ! -f "$policy_config" ]]; then
-    echo "[skip] train ${name}: no policy config at ${policy_config};" \
-         "run python learning/config/study/generate_study_policy_configs.py"
-    return
-  fi
-
-  local schedule=()
-  if [[ "$SCHEDULE_FROM_CONFIG" != "1" ]]; then
-    schedule=(
-      --dagger-iterations 3
-      --trajectories-per-iteration "${TRAJECTORIES[$fleet_size]}"
-      --steps-per-trajectory 200
-      --target-epochs-per-round "$TARGET_EPOCHS"
-      ${MAX_TRAIN_STEPS:+--max-train-steps "$MAX_TRAIN_STEPS"}
-      --action-noise-std 0.03
-      --expert-mix-beta-start 0.5
-      --expert-mix-beta-decay-rate 0.25
-      --expert-mix-decay-after-eval-success "$BETA_DECAY_AFTER"
-      --eval-episodes 20
-    )
-  fi
-
-  docker_run python learning/train_dagger.py \
-    --experiment-name "$name" \
-    --system multi_robot \
-    --expert-config "test/config/study/unicycle2_fleet_${padded}.yaml" \
-    --policy-config "$policy_config" \
-    --seed "$seed" \
-    "${schedule[@]}" \
-    > "logs/${name}.log" 2>&1
-  # Capture before anything else runs: a $(...) ahead of $? would reset it.
-  local status=$?
-  report_status "$status" "train ${name}" "logs/${name}.log"
-}
-
 # Build the config list for a scenario. The paths cannot be a single brace
 # expansion held in a variable -- brace expansion does not happen on expansion.
 scenario_configs() {
@@ -237,10 +131,11 @@ eval_one() {
   local scenario="$1" encoder="$2" policy="$3" fleet_size="$4" seed="$5"
   local padded; padded="$(printf %02d "$fleet_size")"
   local name="${encoder}_${policy}_n${padded}_s${seed}"
-  local policy_config="learning/config/study/${encoder}_${policy}_n${padded}${CONFIG_SUFFIX}_config.yaml"
-  local policy_type="mlp"
-  [[ -f "$policy_config" ]] && policy_type="$(policy_type_of "$policy_config")"
-  local checkpoint="${MODEL_ROOT}/${name}/${policy_type}_dagger_checkpoint.pt"
+  # train_dagger.py names the checkpoint <policy_type>_dagger_checkpoint.pt, and a
+  # variant label is not a policy type (mlp_h10 is an mlp), so take whichever exists.
+  local checkpoint
+  checkpoint="$(compgen -G "${MODEL_ROOT}/${name}/*_dagger_checkpoint.pt" | head -n1)"
+  [[ -n "$checkpoint" ]] || checkpoint="${MODEL_ROOT}/${name}/<policy_type>_dagger_checkpoint.pt"
 
   # Fall back to the pre-policy-axis layout so checkpoints trained before this
   # script grew a POLICIES axis stay evaluable under their original names.
@@ -284,40 +179,6 @@ eval_one() {
 mkdir -p logs
 
 case "$MODE" in
-  train)
-    # Any extra arguments restrict which fleet sizes to train.
-    if (( $# > 1 )); then
-      shift
-      requested=("$@")
-      for fleet_size in "${requested[@]}"; do
-        if [[ -z "${TRAJECTORIES[$fleet_size]+x}" ]]; then
-          echo "unknown fleet size '${fleet_size}'; known: ${!TRAJECTORIES[*]}" >&2
-          exit 1
-        fi
-      done
-      # Descending: the largest fleet is by far the longest run, so it must start
-      # immediately rather than being queued behind the cheap ones.
-      mapfile -t TRAIN_FLEET_SIZES < <(printf '%s\n' "${requested[@]}" | sort -rn)
-    fi
-
-    echo "training fleets: ${TRAIN_FLEET_SIZES[*]} | encoders: ${ENCODERS[*]}" \
-         "| policies: ${POLICIES[*]} | seeds: ${SEEDS[*]}" \
-         "| target_epochs=${TARGET_EPOCHS} max_train_steps=${MAX_TRAIN_STEPS:-unset}" \
-         "| config_suffix='${CONFIG_SUFFIX}' schedule_from_config=${SCHEDULE_FROM_CONFIG}"
-    for fleet_size in "${TRAIN_FLEET_SIZES[@]}"; do
-      for encoder in "${ENCODERS[@]}"; do
-        for policy in "${POLICIES[@]}"; do
-          for seed in "${SEEDS[@]}"; do
-            await_slot
-            train_one "$encoder" "$policy" "$fleet_size" "$seed" &
-          done
-        done
-      done
-    done
-    wait
-    echo "All training runs finished. Checkpoints under outputs/train_dagger_multi_robot/"
-    ;;
-
   eval)
     scenario="${2:-random}"
     if [[ -z "${SCENARIO_TEMPLATE[$scenario]+x}" ]]; then
@@ -366,8 +227,8 @@ case "$MODE" in
     ;;
 
   *)
-    echo "usage: $0 train [fleet ...] | eval [${!SCENARIO_TEMPLATE[*]}]" >&2
-    echo "       fleet sizes: ${!TRAJECTORIES[*]}   (MAX_PARALLEL=${MAX_PARALLEL}," \
+    echo "usage: $0 eval [${!SCENARIO_TEMPLATE[*]}]" >&2
+    echo "       (MAX_PARALLEL=${MAX_PARALLEL}," \
          "ENCODERS=\"${ENCODERS[*]}\", POLICIES=\"${POLICIES[*]}\", SEEDS=\"${SEEDS[*]}\")" >&2
     exit 1
     ;;
