@@ -7,6 +7,8 @@ not repeat:
 - [evaluation.md](evaluation.md) — how to train, evaluate and plot both studies.
 - [experiment_plan.md](experiment_plan.md) — what the studies ask, their design,
   decisions and results.
+- [study2_encoders.md](study2_encoders.md) — study 2 in full: training setup, evaluation
+  scenarios, limits.
 
 Read those for the "what" and "how to run". This file is the "where things are, what
 must stay true, and what has already bitten us".

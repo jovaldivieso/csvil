@@ -64,30 +64,46 @@ ENCODERS = ("deepset", "transformer", "gnn")
 # disagree with the file it is generated into.
 HEADS = {
     "mlp": (1, "single-step regression"),
-    "flow": (8, "action chunk; the generative head's intended setting"),
+    "flow": (10, "action chunk; the generative head's intended setting"),
 }
 FLEET_SIZES = (2, 4, 6, 8)
 
 # Episodes collected per DAgger round, the same for every fleet size. Also sizes each
 # config's ring-layout list (RING_FRACTION of the round).
-TRAJECTORIES_PER_ROUND = 100
-DAGGER_ITERATIONS = 3
+TRAJECTORIES_PER_ROUND = 200
+DAGGER_ITERATIONS = 5
+
+# Episode length, from learning/config/multi_unicycle2_casadi_flow_config.yaml: 250 steps
+# for the +-3 workspace of a 2-robot fleet. Larger fleets get a proportionally wider
+# workspace (see test/config/generate_fleet_configs.py), so their robots have further to
+# drive; scaling the budget with the workspace keeps the time to reach a goal comparable
+# across fleet sizes. With a fixed 200 the expert itself finishes almost no 8-robot
+# episode, the in-training eval then never clears the beta-decay gate, and large fleets
+# would see far fewer arrivals than small ones.
+REFERENCE_STEPS_PER_TRAJECTORY = 250
+REFERENCE_HALF_WIDTH = 3.0
 
 
-def training_schedule() -> dict[str, object]:
+def steps_per_trajectory(half_width: float) -> int:
+    """Episode budget for a fleet whose workspace is +-half_width, rounded to 50."""
+    scaled = REFERENCE_STEPS_PER_TRAJECTORY * half_width / REFERENCE_HALF_WIDTH
+    return int(round(scaled / 50.0) * 50)
+
+
+def training_schedule(half_width: float) -> dict[str, object]:
     """The DAgger schedule shared by every generated config.
 
-    max_train_steps caps every round at the same number of gradient steps;
-    target_epochs_per_round is set high so the cap is what binds, and a weaker policy
-    that collects fewer frames is not also trained less.
+    Rounds, trajectories per round and epochs follow
+    learning/config/multi_unicycle2_casadi_flow_config.yaml. There is deliberately no
+    max_train_steps: every round trains for target_epochs_per_round epochs over the
+    whole aggregated dataset, so a fleet that collects more frames also trains longer.
     """
     rounds = DAGGER_ITERATIONS
     return {
         "dagger_iterations": rounds,
         "trajectories_per_iteration": [TRAJECTORIES_PER_ROUND] * rounds,
-        "steps_per_trajectory": 200,
-        "target_epochs_per_round": [400] * rounds,
-        "max_train_steps": 40000,
+        "steps_per_trajectory": steps_per_trajectory(half_width),
+        "target_epochs_per_round": [40] * rounds,
         "action_noise_std": 0.03,
         "expert_mix_beta_start": 0.5,
         "expert_mix_beta_decay_rate": 0.25,
@@ -447,13 +463,16 @@ def main() -> None:
                     f"# {count} of the {TRAJECTORIES_PER_ROUND} episodes per DAgger round "
                     f"({RING_FRACTION:.0%}) start from the ring layouts\n"
                     f"# below; the rest fall back to the expert config's randomized goals.\n"
+                    f"# {steps_per_trajectory(goal_box)} steps per episode, scaled from "
+                    f"{REFERENCE_STEPS_PER_TRAJECTORY} at +-{REFERENCE_HALF_WIDTH} to this "
+                    f"fleet's +-{goal_box} workspace.\n"
                     f"# Radii {NOMINAL_RADIUS} (rollout 0, the circle-eval layout) then "
                     f"{RADIUS_RANGE[0]}-{max_radius}; closest\n"
                     f"# starting pair {closest:.3f} (d_safe={d_safe}).\n"
                     + layout_summary + "\n"
                     + template_body(template_path.read_text(), prediction_horizon, horizon_note)
                     + "\ntraining:\n"
-                    + format_schedule(training_schedule())
+                    + format_schedule(training_schedule(goal_box))
                     + "  # No tolerance_overrides: convergence tolerances belong to the scenario\n"
                     + "  # config, so training and evaluation share one definition of success.\n"
                     + "  # Antipodal-ring rollouts, the training-time counterpart of the 'circle'\n"

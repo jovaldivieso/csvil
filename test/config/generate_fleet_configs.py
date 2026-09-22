@@ -127,9 +127,11 @@ def assert_fleet_is_placeable(config: dict, num_robots: int) -> float:
     return float(np.mean(visible_counts))
 
 
-def build_config(template: dict, num_robots: int) -> dict:
+def build_config(template: dict, num_robots: int, half_width: float | None = None) -> dict:
+    """A random-goal fleet config; ``half_width`` defaults to the study's sqrt(N) box."""
     robot_template = first_robot_template(template)
-    half_width = goal_half_width(num_robots, template["d_safe"])
+    if half_width is None:
+        half_width = goal_half_width(num_robots, template["d_safe"])
 
     robot_config = {
         key: value

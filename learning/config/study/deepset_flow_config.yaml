@@ -10,7 +10,7 @@ model:
   policy_type: flow
 
   flow:
-    num_inference_steps: 10     # Euler integration steps for ODE sampling
+    num_inference_steps: 3      # Euler integration steps for ODE sampling
 
   observation_horizon: 2        # number of past observation steps to consider
   prediction_horizon: 1

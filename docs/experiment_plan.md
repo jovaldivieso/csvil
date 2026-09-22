@@ -1,7 +1,8 @@
 # Experiment plan
 
 Two studies of decentralized DAgger policies for a `unicycle2` fleet imitating a
-CasADi MPC expert. How to run them: [evaluation.md](evaluation.md).
+CasADi MPC expert. How to run them: [evaluation.md](evaluation.md). Study 2 in full:
+[study2_encoders.md](study2_encoders.md).
 
 ## Study 1 — policy head and action horizon
 
@@ -34,16 +35,15 @@ All cells share the encoder, network size, scenario configs, DAgger schedule and
 
 ## Study 2 — neighbour encoders
 
-**Question.** Which encoder — DeepSet, Transformer or GNN — handles neighbouring robots
-best, and how does the fleet size a policy is trained on affect other fleet sizes?
+Design, training setup, evaluation scenarios and caveats of the **current** run:
+[study2_encoders.md](study2_encoders.md).
 
-**Design.** Each encoder trained at N=2, 4, 6 and 8 and evaluated at N=2–32, under both
-policies: the existing MLP grid and a flow grid (8-step chunks, one seed, study 1's
-settings).
+**Status.** Being retrained. The configs, the two evaluation axes (fleet size and
+density) and the scenarios are new; the results below come from the earlier run, whose
+checkpoints can no longer be loaded (their observation layout predates the `state_mask`
+and neighbour-mask features).
 
-**Status.** Done. Models, results and plots are in `outputs/study2/{models,eval,plots}`.
-
-**Results**
+**Earlier results** (N=2-8 trained, evaluated at N=2-32, one seed, older settings)
 - *Random goals:* the encoders are indistinguishable under both policies. Flow with the
   GNN is lowest from N=8 on (0.53, 0.12, 0.01 at N=8, 16, 32).
 - *Ring, flow:* the encoders separate. At N=2, DeepSet reaches 0.76, the Transformer 0.65
