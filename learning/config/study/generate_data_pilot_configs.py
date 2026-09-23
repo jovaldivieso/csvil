@@ -17,10 +17,13 @@ Two things make a run cheap, and they are separate:
 * **Data.** Episodes per round follow from the budget: the expert dominates the cost, and
   its per-step solve time is known per fleet size (measured with test/evaluate_policy.py).
 
-Gradient steps are deliberately held fixed (``max_train_steps``) instead of following the
-data. With 40 epochs over the aggregated set, a tenth of the data would mean a tenth of
-the optimizer steps, and a weak policy could not be told apart from an undertrained one --
-which is the whole question here.
+Every fleet size gets the same rounds, episodes and epochs, so the policies differ only in
+the fleet they were trained on. Note that this equalizes *episodes*, not frames: one
+episode yields one LeRobot episode per robot, so an 8-robot round holds four times the
+frames of a 2-robot one, and at fixed epochs it also takes four times the optimizer steps.
+``--max-train-steps`` caps those steps instead (utils.resolve_round_steps takes the
+minimum), which equalizes optimization but then makes the epochs differ between fleet
+sizes -- pick whichever of the two should be comparable.
 
 Usage:
     python learning/config/study/generate_data_pilot_configs.py \
@@ -56,16 +59,16 @@ CONFIG_DIR = Path(__file__).resolve().parent
 # (centralized solve for the whole fleet).
 EXPERT_SECONDS_PER_STEP = {2: 0.157, 4: 0.463, 6: 0.835, 8: 1.483}
 # Episodes end as soon as every robot is at its goal, so a round does not spend the full
-# budget. From the expert rollouts: it reaches the goals in roughly 60% of the budget.
-FINISH_FRACTION = 0.6
+# budget. Measured with test/plot_expert_trajectories.py at this density: the expert needs
+# 65-78% of the budget. Later rounds run on the policy, which needs more steps than the
+# expert and more often reaches the limit, so treat an estimate as a lower bound.
+FINISH_FRACTION = 0.75
 # A denser workspace means more neighbour pairs close enough to matter, and the MPC grows
 # a little slower per solve. Measured only at 1x, so this is a margin, not a measurement.
 DENSITY_SOLVE_PENALTY = 1.25
 
-# Gradient steps per round, from the study-2 grid. Fixed here so that only the amount of
-# data varies between pilot and study; target_epochs is set high so the cap is what binds.
-MAX_TRAIN_STEPS = 40000
-TARGET_EPOCHS = 400
+# Epochs over the aggregated dataset per round, as in the study schedule.
+TARGET_EPOCHS = 40
 
 
 def episode_seconds(num_robots: int, steps: int) -> float:
@@ -78,35 +81,89 @@ def trajectories_for_budget(num_robots: int, steps: int, hours: float, rounds: i
     return max(5, int(affordable // 5) * 5)
 
 
-def pilot_schedule(half_width: float, steps: int, rounds: int, trajectories: int) -> dict[str, object]:
-    return {
+def trajectories_for_frames(num_robots: int, steps: int, frames: int, minimum: int) -> int:
+    """Episodes per round holding the dataset size roughly equal across fleet sizes.
+
+    One episode yields one dataset episode per robot, so it is worth `steps * num_robots`
+    frames: a large fleet reaches the same dataset with far fewer episodes, and far less
+    expert time. The floor is there because those frames are not equally informative --
+    the per-robot trajectories of one episode all come from the same scene, so cutting a
+    fleet to a handful of episodes buys equal frames at the price of scenario variety.
+    """
+    return max(minimum, round(frames / (steps * num_robots) / 5) * 5)
+
+
+def pilot_schedule(
+    half_width: float,
+    steps: int,
+    rounds: int,
+    trajectories: int,
+    epochs: float,
+    max_train_steps: int | None,
+) -> dict[str, object]:
+    schedule = {
         "dagger_iterations": rounds,
         "trajectories_per_iteration": [trajectories] * rounds,
         "steps_per_trajectory": steps,
-        "target_epochs_per_round": [TARGET_EPOCHS] * rounds,
-        "max_train_steps": MAX_TRAIN_STEPS,
+        "target_epochs_per_round": [epochs] * rounds,
         "action_noise_std": 0.03,
         "expert_mix_beta_start": 0.5,
         "expert_mix_beta_decay_rate": 0.25,
         "expert_mix_decay_after_eval_success": 0.5,
+        # Backtrack recovery: when an episode gets stuck, replay it 75% expert-driven
+        # rather than purely expert, escalating by 0.25 per failed attempt. At the
+        # default 1.0 the gradual path is skipped (see rollouts.py), so the recovered
+        # frames would all be pure-expert ones.
+        "expert_mix_beta_recovery": 0.75,
+        "expert_mix_beta_recovery_increment": 0.25,
         "eval_episodes": 20,
         "workspace_bounds": [-half_width, half_width],
     }
+    if max_train_steps is not None:
+        schedule["max_train_steps"] = max_train_steps
+    return schedule
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--name", required=True, help="directory prefix, e.g. data_small")
-    parser.add_argument("--hours", type=float, required=True, help="wall-clock budget per run")
+    parser.add_argument("--hours", type=float, default=None,
+                        help="wall-clock budget per run; sizes --trajectories when that is unset")
     parser.add_argument("--rounds", type=int, default=3, help="DAgger rounds (default 3)")
+    parser.add_argument(
+        "--trajectories", type=int, default=None,
+        help="episodes per round for every fleet size; without it, sized from --hours. "
+             "A fixed count gives every policy the same amount of data, which is what makes "
+             "the fleet sizes comparable -- the runs then differ in length.",
+    )
     parser.add_argument("--fleets", type=int, nargs="+", default=[4, 6],
                         choices=sorted(EXPERT_SECONDS_PER_STEP))
     parser.add_argument("--encoders", nargs="+", default=["deepset"], choices=list(_study.ENCODERS))
     parser.add_argument("--head", default="mlp", choices=sorted(_study.HEADS))
+    parser.add_argument(
+        "--frames-per-round", type=int, default=None,
+        help="size the episodes so every fleet size collects about this many frames "
+             "per round (dataset-equal instead of episode-equal)",
+    )
+    parser.add_argument("--min-episodes", type=int, default=50,
+                        help="floor for --frames-per-round (default 50), so a large fleet "
+                             "keeps some scenario variety")
+    parser.add_argument("--epochs", type=float, default=TARGET_EPOCHS,
+                        help=f"epochs over the aggregated set per round (default {TARGET_EPOCHS})")
+    parser.add_argument("--max-train-steps", type=int, default=None,
+                        help="cap the optimizer steps per round; equalizes optimization across "
+                             "fleet sizes at the cost of unequal epochs")
     parser.add_argument("--density-factor", type=float, default=3.0,
                         help="times the study's training density (3 = 0.167 robots/m^2)")
-    return parser.parse_args()
+    args = parser.parse_args()
+    chosen = [args.hours, args.trajectories, args.frames_per_round]
+    if sum(value is not None for value in chosen) != 1:
+        parser.error(
+            "pass exactly one of --hours (budget), --trajectories (fixed episodes) or "
+            "--frames-per-round (fixed dataset size)."
+        )
+    return args
 
 
 def main() -> None:
@@ -122,15 +179,24 @@ def main() -> None:
         half_width = round(study_half_width / math.sqrt(args.density_factor), 3)
         density = num_robots / (2.0 * half_width) ** 2
         steps = _study.steps_per_trajectory(half_width)
-        trajectories = trajectories_for_budget(num_robots, steps, args.hours, args.rounds)
+        if args.trajectories is not None:
+            trajectories = args.trajectories
+        elif args.frames_per_round is not None:
+            trajectories = trajectories_for_frames(
+                num_robots, steps, args.frames_per_round, args.min_episodes)
+        else:
+            trajectories = trajectories_for_budget(num_robots, steps, args.hours, args.rounds)
+        frames = trajectories * steps * num_robots
         estimate = args.rounds * trajectories * episode_seconds(num_robots, steps) / 3600.0
 
         # Rings must stay inside this box: a layout the randomized episodes can never
         # produce would be a different task, not a harder one.
         max_radius = min(_study.RADIUS_RANGE[1], half_width)
         count = round(trajectories * _study.RING_FRACTION)
+        # Antipodal goals only: a ring is here for the head-on conflict through the
+        # centre, and the 'skew' layout's goal one seat further round does not force one.
         initial_states, goal_states, kind_counts = _study.build_rollouts(
-            num_robots, count, max_radius, d_safe
+            num_robots, count, max_radius, d_safe, antipodal_only=True
         )
         closest = _study.validate(num_robots, initial_states, goal_states, d_safe)
         layout_summary = textwrap.fill(
@@ -160,13 +226,15 @@ def main() -> None:
                 f"# {density:.4f} robots/m^2, {args.density_factor:g}x the study's training density.\n"
                 f"# {steps} steps per episode, scaled from {_study.REFERENCE_STEPS_PER_TRAJECTORY} "
                 f"at +-{_study.REFERENCE_HALF_WIDTH} to this box.\n"
-                f"# Episodes per round sized for ~{args.hours:g} h per run "
-                f"(estimate {estimate:.1f} h); gradient steps are\n"
-                f"# capped at {MAX_TRAIN_STEPS} per round, so only the amount of data varies.\n"
+                f"# {args.rounds} rounds x {trajectories} episodes x {args.epochs:g} epochs; "
+                f"{frames} frames per round\n"
+                f"# ({trajectories} episodes x {steps} steps x {num_robots} robots, one dataset "
+                f"episode per robot). Estimate {estimate:.1f} h per run.\n"
                 + _study.template_body(template_path.read_text(), horizon, horizon_note)
                 + "\ntraining:\n"
-                + _study.format_schedule(
-                    pilot_schedule(half_width, steps, args.rounds, trajectories))
+                + _study.format_schedule(pilot_schedule(
+                    half_width, steps, args.rounds, trajectories,
+                    args.epochs, args.max_train_steps))
                 + f"  # {count} of the {trajectories} episodes per round start from ring\n"
                 f"  # layouts of radius {_study.RADIUS_RANGE[0]}-{max_radius}; closest starting pair\n"
                 f"  # {closest:.3f} (d_safe={d_safe}).\n"
@@ -178,7 +246,8 @@ def main() -> None:
             print(
                 f"wrote {out_path.relative_to(PROJECT_ROOT)} "
                 f"(+-{half_width}, {density:.3f} robots/m^2, {steps} steps, "
-                f"{args.rounds}x{trajectories} episodes, ~{estimate:.1f} h)"
+                f"{args.rounds}x{trajectories} episodes, {frames} frames/round, "
+                f"~{estimate:.1f} h)"
             )
 
 

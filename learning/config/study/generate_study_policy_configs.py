@@ -244,20 +244,27 @@ def jittered_ring(
     )
 
 
-def layout_kinds(num_robots: int) -> list[str]:
+def layout_kinds(num_robots: int, antipodal_only: bool = False) -> list[str]:
     # Ordered so that the first K entries of the sequence cover every kind before
     # a wave repeats: rollout 0 is the plain circle-eval layout, and a fleet whose
     # rounds are short still sees turning, asymmetry and skewed goals.
+    #
+    # 'skew' is the one kind that moves the goal off the antipode (one seat further
+    # round), so its robots no longer meet head-on through the centre. With
+    # antipodal_only every robot crosses to the opposite side, which is the conflict
+    # the ring layouts exist for -- at 4 robots the skewed goal is a quarter turn
+    # away and barely forces an interaction at all.
     if num_robots == 2:
         # 'ellipse' and 'skew' both degenerate at 2 robots: the ring lies on the
         # x-axis, so squashing y changes nothing, and the goal one seat past the
         # antipode is the robot's own start.
         return ["nominal", "heading", "jitter", "heading_neg", "heading_tangent"]
-    return ["nominal", "heading", "jitter", "heading_neg", "ellipse", "heading_tangent", "skew"]
+    kinds = ["nominal", "heading", "jitter", "heading_neg", "ellipse", "heading_tangent"]
+    return kinds if antipodal_only else kinds + ["skew"]
 
 
-def variant_sequence(num_robots: int, count: int) -> list[tuple[str, int]]:
-    kinds = layout_kinds(num_robots)
+def variant_sequence(num_robots: int, count: int, antipodal_only: bool = False) -> list[tuple[str, int]]:
+    kinds = layout_kinds(num_robots, antipodal_only)
     sequence: list[tuple[str, int]] = []
     wave = 0
     while len(sequence) < count:
@@ -335,12 +342,18 @@ def build_layout(
     return points, goals, headings
 
 
-def build_rollouts(num_robots: int, count: int, max_radius: float, d_safe: float):
+def build_rollouts(
+    num_robots: int,
+    count: int,
+    max_radius: float,
+    d_safe: float,
+    antipodal_only: bool = False,
+):
     rng = random.Random(JITTER_SEED + num_robots)
     initial_states: list[list[list[float]]] = []
     goal_states: list[list[list[float]]] = []
     kind_counts: dict[str, int] = {}
-    for kind, wave in variant_sequence(num_robots, count):
+    for kind, wave in variant_sequence(num_robots, count, antipodal_only):
         points, goals, headings = build_layout(kind, num_robots, wave, max_radius, d_safe, rng)
         initial_states.append(
             [[x, y, heading, 0.0, 0.0] for (x, y), heading in zip(points, headings)]

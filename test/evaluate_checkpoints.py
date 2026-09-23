@@ -39,15 +39,23 @@ from planning.casadi_planner import PlannerSolveError
 
 from evaluate_policy import _load_checkpoint_policy_components, get_inference_device, _synchronize_device
 
-FLOW_CKPT = "outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_flow_v8/flow_dagger_iter_003.pt"
-SAFEFLOW_CKPT = "outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_safeflow_v8/flow_dagger_iter_001.pt"
-MLP_CKPT = "outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_mlp_v8/mlp_dagger_iter_002.pt"
+# FLOW_CKPT = "outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_flow_v8/flow_dagger_iter_003.pt"
+# SAFEFLOW_CKPT = "outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_safeflow_v8/flow_dagger_iter_001.pt"
+# MLP_CKPT = "outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_mlp_v8/mlp_dagger_iter_002.pt"
+
+# MODES: dict[str, tuple[str, str]] = {
+#     "flow_native": ("flow", FLOW_CKPT),
+#     "flow_in_safeflow_mode": ("safeflow", FLOW_CKPT),
+#     "safeflow_native": ("safeflow", SAFEFLOW_CKPT),
+#     "mlp": ("mlp", MLP_CKPT),
+# }
+
+DEEPSET_MLP_N04_S1_CKPT = "outputs/study1_retrain/models/deepset_mlp_n04_s1/mlp_dagger_checkpoint.pt"
+DATA_SMALL_DEEPSET_MLP_N04_CKPT = "outputs/data_small/data_small/models/deepset_mlp_unicycle2_fleet_04_s42/mlp_dagger_checkpoint.pt"
 
 MODES: dict[str, tuple[str, str]] = {
-    "flow_native": ("flow", FLOW_CKPT),
-    "flow_in_safeflow_mode": ("safeflow", FLOW_CKPT),
-    "safeflow_native": ("safeflow", SAFEFLOW_CKPT),
-    "mlp": ("mlp", MLP_CKPT),
+    "study1_deepset_mlp_n04_s1": ("mlp", DEEPSET_MLP_N04_S1_CKPT),
+    "data_small_deepset_mlp_n04_s42": ("mlp", DATA_SMALL_DEEPSET_MLP_N04_CKPT),
 }
 
 
@@ -58,7 +66,9 @@ def _parse_int_list(raw: str) -> list[int]:
 def build_eval_config(expert_config_path: str, eval_config_path: str, system: str, workspace_bounds: tuple[float, float]):
     with open(eval_config_path) as f:
         training = yaml.safe_load(f)["training"]
-    tolerance_overrides = training["eval_tolerance_overrides"]
+    # tolerance_overrides = training["eval_tolerance_overrides"]
+    tolerance_overrides = training.get("eval_tolerance_overrides") or training.get("tolerance_overrides") or {}
+
     initial_states = training["initial_states"]
     goal_states = training["goal_states"]
 
