@@ -34,13 +34,15 @@ policy learns from ego observations plus masked neighbour observations. Policy h
 | `test/config/multi_unicycle2_casadi_config.yaml` | Template every study scenario config is derived from |
 | `test/config/generate_fleet_configs.py` | → `test/config/study/unicycle2_fleet_NN.yaml` (random-goal scenario) |
 | `test/config/generate_circle_configs.py` | → `test/config/study/circle/unicycle2_circle_NN.yaml` (antipodal ring) |
+| `test/config/generate_density_configs.py` | → `test/config/study/density/unicycle2_nNN_d<factor>.yaml` (density sweep) |
+| `test/plot_scenarios.py` | Scenario layouts (starts, goals, d_collision, visibility) as PNG |
 | `learning/config/study/generate_study_policy_configs.py` | → study 2 policy configs (see below) |
 | `train.sh` | Parallel Docker training: `train.sh <experiment> <policy_dir> <expert_dir>`, every policy × expert × seed |
-| `run_study.sh` | Parallel Docker evaluation: `eval [random|circle]` (old study 2 run names only) |
+| `eval.sh` | Parallel Docker evaluation: `eval.sh <experiment> [random|density|circle|all]` |
 | `eval_study1.sh` | Study 1 evaluation, runs locally without Docker |
 | `test/evaluate_scaling.py` | Policy-only rollouts at many fleet sizes → one CSV row per checkpoint × fleet size |
 | `test/evaluate_policy.py` | Expert **and** policy from the same start → PDF + MP4. Practical only up to ~8 robots |
-| `test/plot_study_results.py`, `test/plot_study1_results.py` | Study 2 / study 1 figures |
+| `test/plot_study_results.py`, `test/plot_study1_results.py` | Study 2 (`--axis fleet|density|auto`) / study 1 figures |
 | `outputs/`, `data/`, `logs/` | Gitignored: models, eval CSVs, plots, LeRobot datasets, run logs |
 
 Generated study 2 policy configs: `learning/config/study/n{02,04,06,08}/<encoder>_{mlp,flow}.yaml`,
@@ -52,10 +54,18 @@ directory, because `train.sh` trains every YAML it finds there.
 
 ## Current state
 
-- Branch `study-encoder`. Work now focuses on study 2 (encoders). The study 1 retrain
-  configs and the `run_study.sh train` mode were removed, and training goes through
-  `train.sh`. Evaluation (`run_study.sh eval`) has not been adapted to `train.sh` run
-  names yet.
+- Branch `study-encoder`. Work now focuses on study 2 (encoders). Training goes through
+  `train.sh`, evaluation through `eval.sh`; `run_study.sh` and the study 1 retrain configs
+  are gone.
+- **Evaluation runs on two axes**, each changing one quantity: `random` (fleet size 2-32
+  at the training density) and `density` (0.25x-3x the training density at N=4 and N=8),
+  plus `circle` as the stress case. Training keeps one density for every fleet size, so
+  the training fleet size is the only thing that differs between training runs.
+- **Checkpoints from before the observation layout changed cannot be loaded** (`state_dim`
+  16 instead of 20 at N=2, i.e. everything under `outputs/study2/models/` and most of
+  `outputs/train_dagger_multi_robot/`). They fail with "Canonical ego features must
+  concatenate to shape (B, 6)". The study-1 retrain runs (`deepset_*_h1/h10_n04_s*`) still
+  load.
 - Retrained `deepset_flow_h1_n04_s*` shares its name with an original study 1 run.
   Keep retrained runs out of `outputs/study1/models/`; evaluate with
   `MODELS=<dir> ./eval_study1.sh`. Runs started before the relabelling are named
@@ -102,6 +112,11 @@ To validate a scenario config: `core.config.load_and_validate_system_config("mul
 - **`evaluate_scaling.py` appends to its output CSV.** Both runners delete the
   per-policy CSV first; do the same when calling it by hand.
 
+- **Step budgets are derived per config** (`step_budget` in `test/evaluate_scaling.py`):
+  `3 * longest distance / (max_linear_vel * dt)`. A fixed budget would fail sparse configs
+  by timeout just for having a larger workspace. The expert alone needs ~1.7x the
+  straight-line time on the ring.
+
 ## Gotchas already hit
 
 **Config schema**
@@ -125,12 +140,12 @@ To validate a scenario config: `core.config.load_and_validate_system_config("mul
 **Bash / git**
 - In `echo "$(date) ... $?"` the command substitution runs first and resets `$?`. The
   runners capture the status into a variable before anything else.
-- Bash reads a script as it runs. Don't edit `train.sh`/`run_study.sh` in place while a run is
+- Bash reads a script as it runs. Don't edit `train.sh`/`eval.sh` in place while a run is
   using it; write a copy and `mv` it over.
 - Don't run two commands that write `.git/index` in parallel (`git rm`, `git add`,
   `git rm --cached`). One silently undoes the other.
 
-**Docker** (`compose.yaml`, `train.sh`, `run_study.sh`)
+**Docker** (`compose.yaml`, `train.sh`, `eval.sh`)
 - Run containers with `-u "$(id -u):$(id -g)" -e HOME=/tmp -e USER=csvil`. Without
   `-u`, outputs are root-owned; without `USER`, LeRobot's `getpass.getuser()` fails
   with `getpwuid(): uid not found`.
@@ -161,8 +176,7 @@ To validate a scenario config: `core.config.load_and_validate_system_config("mul
 
 ## Open items
 
-- Raise the circle scenario step budget (`SCENARIO_STEPS` in `run_study.sh`, `STEPS`
-  in `eval_study1.sh`) to ~600.
+- `eval_study1.sh` still uses fixed step budgets (200/400) and the old study-1 layout.
 - After the study 1 retrain, update its section in `experiment_plan.md`; the current
   text describes the original h8 runs.
 - `db-lacam` in `compose.yaml` still needs `network: host` for its build.

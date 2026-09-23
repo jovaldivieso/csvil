@@ -35,9 +35,20 @@ import numpy as np  # noqa: E402
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.config import load_and_validate_system_config  # noqa: E402
+import yaml  # noqa: E402
+
+from core.config import load_and_validate_system_config, validate_system_config  # noqa: E402
 from core.factory import DynamicsFactory  # noqa: E402
-from learning.dagger import evaluation_seed_specs, sample_initial_state  # noqa: E402
+from learning.dagger import (  # noqa: E402
+    apply_config_overrides,
+    evaluation_seed_specs,
+    sample_initial_state,
+)
+from systems.initial_state_utils import (  # noqa: E402
+    normalize_goal_state_specs,
+    normalize_initial_state_specs,
+)
+from systems.seed_utils import initial_state_seed_for_rollout  # noqa: E402
 
 STUDY = "test/config/study"
 DEFAULT_CONFIGS = (
@@ -149,12 +160,116 @@ def plot_config(config_path: str, episodes: int, output_dir: Path) -> Path:
     return output_path
 
 
+def plot_training(policy_path: str, expert_path: str, episodes: int, output_dir: Path) -> list[Path]:
+    """Plot what a policy config actually trains on: its workspace and its ring layouts.
+
+    A policy config's training section may override workspace_bounds, which train_dagger.py
+    applies to data collection (dagger_trainer._apply_runtime_config_overrides), and may pin
+    the opening episodes of every round to ring layouts. Neither is visible in the expert
+    config, so plotting that alone would show the wrong scenario.
+    """
+    training = yaml.safe_load(Path(policy_path).read_text()).get("training", {})
+    raw_config = yaml.safe_load(Path(expert_path).read_text())
+    bounds = training.get("workspace_bounds")
+    overrides = {"workspace_bounds": list(bounds)} if bounds else {}
+    config = validate_system_config("multi_robot", apply_config_overrides(raw_config, overrides))
+    simulator = DynamicsFactory.create(system_name="multi_robot", config=config)
+    num_robots = int(simulator.num_robots)
+    half_width = float(config["robots"][0]["config"]["workspace_bounds"][1])
+    label = Path(policy_path).stem
+    written = []
+
+    # Randomized episodes, seeded the way collect_dagger_rollouts seeds them.
+    panels = []
+    base_seed = int(config.get("initial_state_seed", 0))
+    for episode in range(1, episodes + 1):
+        seed = initial_state_seed_for_rollout(base_seed, rollout_index=episode, round_index=0)
+        state = sample_initial_state(simulator, seed)
+        panels.append((
+            state.reshape(num_robots, -1),
+            np.asarray(simulator.goal_state).reshape(num_robots, -1),
+            visible_neighbours(simulator, state),
+        ))
+    density = num_robots / (2.0 * half_width) ** 2
+    written.append(render_panels(
+        panels, config, half_width, output_dir / f"{label}_random.png",
+        f"{label}: randomized training episodes ({round(1 - RING_FRACTION_OF(training), 2):.0%} of each round)\n"
+        f"N={num_robots}, workspace ±{half_width:g} m, {density:.3f} robots/m², "
+        f"{training.get('steps_per_trajectory', '?')} steps per episode",
+    ))
+
+    # Ring layouts, the other part of each round. Shown as evenly spaced samples of the
+    # list, so the panels cover the different layout kinds rather than the first few.
+    rings = training.get("initial_states")
+    if rings:
+        goals = training["goal_states"]
+        states = normalize_initial_state_specs(simulator, rings)
+        goal_states = normalize_goal_state_specs(simulator, goals)
+        picks = np.linspace(0, len(states) - 1, min(episodes, len(states))).round().astype(int)
+        panels = [
+            (
+                states[i].reshape(num_robots, -1),
+                goal_states[i].reshape(num_robots, -1),
+                visible_neighbours(simulator, states[i]),
+            )
+            for i in picks
+        ]
+        written.append(render_panels(
+            panels, config, half_width, output_dir / f"{label}_rings.png",
+            f"{label}: ring layouts, {len(states)} of {training['trajectories_per_iteration'][0]} "
+            f"episodes per round\nrollouts {', '.join(str(i) for i in picks)} of the list",
+        ))
+    return written
+
+
+def RING_FRACTION_OF(training: dict) -> float:
+    rings = training.get("initial_states") or []
+    per_round = training.get("trajectories_per_iteration", [1])[0]
+    return len(rings) / per_round if per_round else 0.0
+
+
+def render_panels(panels, config, half_width, output_path: Path, title: str) -> Path:
+    columns = min(len(panels), 3)
+    rows = math.ceil(len(panels) / columns)
+    width = 4.2 * max(columns, 2)
+    fig, axes = plt.subplots(rows, columns, figsize=(width, 4.2 * rows + 0.8), squeeze=False)
+    for ax, (starts, goals, visible) in zip(axes.flat, panels):
+        draw_episode(ax, starts, goals, config, half_width)
+        ax.set_title(f"{visible:.2f} visible neighbours at t=0", fontsize=8)
+    for ax in list(axes.flat)[len(panels):]:
+        ax.axis("off")
+    fig.suptitle(
+        f"{title}\nd_collision {config['d_collision']} m (disks), "
+        f"visibility {config['inter_robot_visibility_radius']} m (dotted, robot 0)",
+        fontsize=9,
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=110)
+    plt.close(fig)
+    return output_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--configs", nargs="+", default=DEFAULT_CONFIGS)
+    parser.add_argument(
+        "--policy-configs", nargs="+", default=None,
+        help="plot what these policy configs train on (workspace override + ring layouts) "
+             "instead of the evaluation scenarios",
+    )
+    parser.add_argument(
+        "--expert-config", default=f"{STUDY}/unicycle2_fleet_04.yaml",
+        help="expert config the policy configs are trained against",
+    )
     parser.add_argument("--episodes", type=int, default=6, help="panels per random-goal config")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()
+    if args.policy_configs:
+        for policy_path in args.policy_configs:
+            for path in plot_training(policy_path, args.expert_config, args.episodes, args.output_dir):
+                print(f"wrote {os.path.relpath(path, PROJECT_ROOT)}")
+        return
     for config_path in args.configs:
         print(f"wrote {os.path.relpath(plot_config(config_path, args.episodes, args.output_dir), PROJECT_ROOT)}")
 

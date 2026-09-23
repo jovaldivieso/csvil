@@ -1,33 +1,44 @@
 """Plot encoder-scaling study results produced by test/evaluate_scaling.py.
 
-Two figures:
+The study evaluates on two axes, and each one varies exactly one quantity (see
+docs/study2_encoders.md): evaluation **fleet size** at the training density, and
+evaluation **density** at a fixed fleet size. ``--axis`` picks which one is plotted;
+``auto`` reads it off the results, since a density sweep holds several densities per
+fleet size and a fleet sweep exactly one.
 
-* ``*_matrix.pdf`` - one panel per encoder, training fleet size across, evaluation
-  fleet size down, one metric per cell. The in-distribution cells (train == eval)
-  are outlined, because those are the only cells where a policy is scored on the
-  fleet size it actually trained on.
-* ``*_by_fleet.pdf`` - the same success rates as lines against evaluation fleet
-  size with 95% Wilson intervals, pooled over training fleet size. The matrix shows
-  the cells; this shows whether the differences between them survive the sample.
-* ``*_by_fleet_facets.pdf`` - one panel per training fleet size, so the pooled
-  figure's assumption is visible rather than implied. Pooling buys a tighter
-  interval but would hide a real training-fleet effect if one existed; these panels
-  are the evidence that it does not.
+Three figures per axis:
+
+* ``*_matrix.pdf`` - one panel per encoder, training fleet size across, the axis down,
+  one metric per cell. The in-distribution cells are outlined: trained and evaluated on
+  the same fleet size, or evaluated at the training density.
+* ``*_by_<axis>.pdf`` - the same success rates as lines along the axis with 95% Wilson
+  intervals, pooled over training fleet size. The matrix shows the cells; this shows
+  whether the differences between them survive the sample.
+* ``*_by_<axis>_facets.pdf`` - one panel per training fleet size, so the pooled figure's
+  assumption is visible rather than implied. Pooling buys a tighter interval but would
+  hide a real training-fleet effect if one existed.
+
+On the density axis every figure is written once per evaluation fleet size, because a
+density sweep holds several fleet sizes whose rows would otherwise share a cell.
 
 Usage:
     python test/plot_study_results.py
     python test/plot_study_results.py --metric collision_rate
+    python test/plot_study_results.py --results outputs/study2/eval/density.csv --policy flow
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import math
 import os
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import matplotlib
 
@@ -72,6 +83,83 @@ METRIC_LABELS = {
     "mean_action_ms_per_robot": "Mean policy call (ms/step/robot)",
 }
 RATE_METRICS = {"success_rate", "collision_rate", "timeout_rate"}
+
+
+def training_density() -> float:
+    """Robots per m^2 every training fleet size is placed at.
+
+    Read off the generator rather than written down here, so the reference the density
+    axis is expressed in cannot drift from the configs the policies were trained on.
+    test/config is not a package, and 'test' would shadow the standard library's module,
+    so it is loaded by path -- the same way generate_density_configs.py does it.
+    """
+    path = PROJECT_ROOT / "test/config/generate_fleet_configs.py"
+    spec = importlib.util.spec_from_file_location("_generate_fleet_configs", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    template = __import__("yaml").safe_load(module.TEMPLATE_PATH.read_text())
+    half_width = module.goal_half_width(module.REFERENCE_FLEET_SIZE, template["d_safe"])
+    return module.REFERENCE_FLEET_SIZE / (2.0 * half_width) ** 2
+
+
+@dataclass(frozen=True)
+class Axis:
+    """What varies along the plotted axis, and which cells count as in-distribution."""
+
+    name: str
+    value: Callable[[dict[str, str]], float]
+    tick: Callable[[float], str]
+    axis_label: str
+    title: str
+    # A cell is in-distribution when the policy is scored under the condition it trained
+    # on: its own fleet size on the fleet axis, the training density on the density axis.
+    in_distribution: Callable[[int, float], bool]
+    note: str
+
+
+def fleet_axis() -> Axis:
+    return Axis(
+        name="fleet",
+        value=lambda row: float(int(row["eval_fleet_size"])),
+        tick=lambda value: f"{int(value)}",
+        axis_label="Evaluated on (robots)",
+        title="evaluation fleet size",
+        in_distribution=lambda train_size, value: float(train_size) == value,
+        note="trained and evaluated on the same fleet size",
+    )
+
+
+def density_axis() -> Axis:
+    reference = training_density()
+    return Axis(
+        name="density",
+        # As a multiple of the training density: the absolute value (0.0139 robots/m^2)
+        # says nothing without it, and the sweep is defined in those multiples. Rounded
+        # to two decimals so the sweep's levels come out as the round numbers they are:
+        # the CSV stores the density rounded to four decimals, which would otherwise
+        # turn 3x into 3.0006x and leave the 1x level just off the in-distribution test.
+        value=lambda row: round(float(row["density"]) / reference, 2),
+        tick=lambda value: f"{value:g}x",
+        axis_label="Evaluated at (x training density)",
+        title="evaluation density",
+        in_distribution=lambda train_size, value: abs(value - 1.0) < 0.005,
+        note="evaluated at the density every policy trained at",
+    )
+
+
+def detect_axis(rows: list[dict[str, str]]) -> str:
+    """'density' when a fleet size appears at several densities, else 'fleet'.
+
+    The two scenarios are distinguishable in the data itself: a density sweep holds one
+    fleet size at five densities, a fleet sweep holds every fleet size at the training
+    density. Results without a 'density' column predate it and can only be the latter.
+    """
+    per_fleet_densities = defaultdict(set)
+    for row in rows:
+        if not row.get("density"):
+            return "fleet"
+        per_fleet_densities[int(row["eval_fleet_size"])].add(row["density"])
+    return "density" if any(len(v) > 1 for v in per_fleet_densities.values()) else "fleet"
 
 
 def display_path(path: Path) -> str:
@@ -121,11 +209,11 @@ def titled(label: str, title: str) -> str:
     return f"{label} — {title}" if label else title
 
 
-def plot_matrix(rows, metric: str, output_path: Path, label: str = "") -> None:
+def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "") -> None:
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
-    eval_sizes = sorted({int(r["eval_fleet_size"]) for r in rows})
+    eval_sizes = sorted({axis.value(r) for r in rows})
     values = {
-        (r["encoder_type"], int(r["train_fleet_size"]), int(r["eval_fleet_size"])): float(r[metric])
+        (r["encoder_type"], int(r["train_fleet_size"]), axis.value(r)): float(r[metric])
         for r in rows
     }
     encoders = [e for e in ENCODER_ORDER if any(k[0] == e for k in values)]
@@ -166,13 +254,13 @@ def plot_matrix(rows, metric: str, output_path: Path, label: str = "") -> None:
                 text = f"{value:.2f}" if metric in RATE_METRICS else f"{value:.1f}"
                 ax.text(col_idx, row_idx, text, ha="center", va="center",
                         fontsize=10, color=ink)
-                if train_size == eval_size:
+                if axis.in_distribution(train_size, eval_size):
                     ax.add_patch(mpatches.Rectangle(
                         (col_idx - 0.5, row_idx - 0.5), 1, 1,
                         fill=False, edgecolor=TEXT_PRIMARY, linewidth=2.0, zorder=3))
 
         ax.set_xticks(range(len(train_sizes)), [str(t) for t in train_sizes])
-        ax.set_yticks(range(len(eval_sizes)), [str(e) for e in eval_sizes])
+        ax.set_yticks(range(len(eval_sizes)), [axis.tick(e) for e in eval_sizes])
         ax.set_xlabel("Trained on (robots)", fontsize=10, color=TEXT_SECONDARY)
         ax.set_title(ENCODER_LABELS.get(encoder, encoder), fontsize=12,
                      color=TEXT_PRIMARY, pad=10)
@@ -185,7 +273,7 @@ def plot_matrix(rows, metric: str, output_path: Path, label: str = "") -> None:
         ax.grid(which="minor", color=SURFACE, linewidth=2)
         ax.tick_params(which="minor", length=0)
 
-    axes[0].set_ylabel("Evaluated on (robots)", fontsize=10, color=TEXT_SECONDARY)
+    axes[0].set_ylabel(axis.axis_label, fontsize=10, color=TEXT_SECONDARY)
 
     colorbar = fig.colorbar(mesh, ax=axes, fraction=0.025, pad=0.02)
     colorbar.set_label(METRIC_LABELS.get(metric, metric), fontsize=10, color=TEXT_SECONDARY)
@@ -195,10 +283,10 @@ def plot_matrix(rows, metric: str, output_path: Path, label: str = "") -> None:
     episodes = int(rows[0]["episodes"])
     # Titles sit above the panel row; panel titles own the band just under them.
     fig.suptitle(
-        titled(label, f"{METRIC_LABELS.get(metric, metric)} by training and evaluation fleet size"),
+        titled(label, f"{METRIC_LABELS.get(metric, metric)} by training fleet size and {axis.title}"),
         fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.10)
     fig.text(0.02, 1.045,
-             f"{episodes} episodes per cell; outlined cells are in-distribution (trained and evaluated on the same fleet size)",
+             f"{episodes} episodes per cell; outlined cells are in-distribution ({axis.note})",
              fontsize=9, color=TEXT_MUTED, ha="left")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,16 +295,16 @@ def plot_matrix(rows, metric: str, output_path: Path, label: str = "") -> None:
     print(f"wrote {display_path(output_path)}")
 
 
-def plot_by_fleet(rows, output_path: Path, label: str = "") -> None:
-    """Success rate against evaluation fleet size, pooled over training fleet size.
+def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "") -> None:
+    """Success rate along the axis, pooled over training fleet size.
 
     Pooling is what makes the comparison readable: per cell there are only 50
     episodes, so any single row of the matrix is dominated by sampling noise.
     """
-    eval_sizes = sorted({int(r["eval_fleet_size"]) for r in rows})
+    eval_sizes = sorted({axis.value(r) for r in rows})
     pooled = defaultdict(lambda: [0, 0])
     for row in rows:
-        key = (row["encoder_type"], int(row["eval_fleet_size"]))
+        key = (row["encoder_type"], axis.value(row))
         episodes = int(row["episodes"])
         pooled[key][0] += round(float(row["success_rate"]) * episodes)
         pooled[key][1] += episodes
@@ -248,8 +336,8 @@ def plot_by_fleet(rows, output_path: Path, label: str = "") -> None:
         # against this surface requires.
 
     total_per_point = pooled[(encoders[0], eval_sizes[0])][1]
-    ax.set_xticks(x, [str(e) for e in eval_sizes])
-    ax.set_xlabel("Evaluated on (robots)", fontsize=10, color=TEXT_SECONDARY)
+    ax.set_xticks(x, [axis.tick(e) for e in eval_sizes])
+    ax.set_xlabel(axis.axis_label, fontsize=10, color=TEXT_SECONDARY)
     ax.set_ylabel("Success rate", fontsize=10, color=TEXT_SECONDARY)
     ax.set_ylim(-0.03, 1.03)
     ax.set_xlim(-0.4, len(eval_sizes) - 0.1)
@@ -261,7 +349,7 @@ def plot_by_fleet(rows, output_path: Path, label: str = "") -> None:
     ax.tick_params(colors=TEXT_SECONDARY, length=0)
     ax.legend(frameon=False, fontsize=10, labelcolor=TEXT_SECONDARY, loc="upper right")
 
-    fig.suptitle(titled(label, "Success rate by evaluation fleet size"),
+    fig.suptitle(titled(label, f"Success rate by {axis.title}"),
                  fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.06)
     fig.text(0.02, 1.0,
              f"Pooled over all training fleet sizes ({total_per_point} episodes per point); bars are 95% Wilson intervals",
@@ -273,16 +361,16 @@ def plot_by_fleet(rows, output_path: Path, label: str = "") -> None:
     print(f"wrote {display_path(output_path)}")
 
 
-def plot_by_fleet_facets(rows, output_path: Path, label: str = "") -> None:
+def plot_by_axis_facets(rows, output_path: Path, axis: Axis, label: str = "") -> None:
     """One panel per training fleet size -- the un-pooled view of plot_by_fleet.
 
     Each point is a single matrix cell, so the intervals are the honest per-cell
     ones (n=50, roughly +-0.13 at mid-range) rather than the pooled +-0.06.
     """
-    eval_sizes = sorted({int(r["eval_fleet_size"]) for r in rows})
+    eval_sizes = sorted({axis.value(r) for r in rows})
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
     cells = {
-        (r["encoder_type"], int(r["train_fleet_size"]), int(r["eval_fleet_size"])):
+        (r["encoder_type"], int(r["train_fleet_size"]), axis.value(r)):
             (round(float(r["success_rate"]) * int(r["episodes"])), int(r["episodes"]))
         for r in rows
     }
@@ -315,8 +403,8 @@ def plot_by_fleet_facets(rows, output_path: Path, label: str = "") -> None:
             if ax is axes[0]:
                 handles.append(line)
 
-        ax.set_xticks(x, [str(e) for e in eval_sizes])
-        ax.set_xlabel("Evaluated on (robots)", fontsize=10, color=TEXT_SECONDARY)
+        ax.set_xticks(x, [axis.tick(e) for e in eval_sizes])
+        ax.set_xlabel(axis.axis_label, fontsize=10, color=TEXT_SECONDARY)
         ax.set_title(f"Trained on {train_size} robots", fontsize=11, color=TEXT_PRIMARY, pad=8)
         ax.set_ylim(-0.03, 1.03)
         ax.set_xlim(-0.4, len(eval_sizes) - 0.6)
@@ -330,7 +418,7 @@ def plot_by_fleet_facets(rows, output_path: Path, label: str = "") -> None:
     axes[0].set_ylabel("Success rate", fontsize=10, color=TEXT_SECONDARY)
 
     episodes = int(rows[0]["episodes"])
-    fig.suptitle(titled(label, "Success rate by evaluation fleet size, per training fleet size"),
+    fig.suptitle(titled(label, f"Success rate by {axis.title}, per training fleet size"),
                  fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.14)
     fig.text(0.02, 1.07,
              f"One point per matrix cell ({episodes} episodes); bars are 95% Wilson intervals",
@@ -357,6 +445,10 @@ def main() -> None:
         help="plot only this policy's rows; required when the results hold more than one",
     )
     parser.add_argument("--label", default="", help="scenario name shown in the titles, e.g. 'antipodal ring'")
+    parser.add_argument(
+        "--axis", choices=["auto", "fleet", "density"], default="auto",
+        help="what varies along the plotted axis; 'auto' reads it off the results",
+    )
     args = parser.parse_args()
 
     rows = load_rows(args.results)
@@ -373,10 +465,38 @@ def main() -> None:
         prefix = f"encoder_study_{args.policy}"
 
     label = " · ".join(part for part in (args.policy, args.label) if part)
-    plot_matrix(rows, args.metric,
-                args.output_dir / f"{prefix}_{args.metric}_matrix.{args.format}", label)
-    plot_by_fleet(rows, args.output_dir / f"{prefix}_by_fleet.{args.format}", label)
-    plot_by_fleet_facets(rows, args.output_dir / f"{prefix}_by_fleet_facets.{args.format}", label)
+
+    axis_name = args.axis if args.axis != "auto" else detect_axis(rows)
+    axis = density_axis() if axis_name == "density" else fleet_axis()
+    if axis_name == "density" and not all(row.get("density") for row in rows):
+        raise SystemExit(
+            f"{args.results} has no 'density' column; it predates the density axis. "
+            "Re-run test/evaluate_scaling.py, or pass --axis fleet."
+        )
+
+    # On the density axis the rows of several fleet sizes would land in the same cell,
+    # so each fleet size gets its own set of figures.
+    groups = (
+        [("", rows)]
+        if axis_name == "fleet"
+        else [
+            (f"_n{size:02d}", [r for r in rows if int(r["eval_fleet_size"]) == size])
+            for size in sorted({int(r["eval_fleet_size"]) for r in rows})
+        ]
+    )
+    for suffix, group in groups:
+        group_label = label
+        if suffix:
+            group_label = " · ".join(part for part in (label, f"N={int(suffix[2:])}") if part)
+        plot_matrix(group, args.metric,
+                    args.output_dir / f"{prefix}_{args.metric}_matrix{suffix}.{args.format}",
+                    axis, group_label)
+        plot_by_axis(group,
+                     args.output_dir / f"{prefix}_by_{axis.name}{suffix}.{args.format}",
+                     axis, group_label)
+        plot_by_axis_facets(group,
+                            args.output_dir / f"{prefix}_by_{axis.name}_facets{suffix}.{args.format}",
+                            axis, group_label)
 
 
 if __name__ == "__main__":

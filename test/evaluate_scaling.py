@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import sys
 import time
@@ -57,7 +58,7 @@ TOLERANCE_FIELDS = ("pos_tol", "theta_tol", "vel_tol", "omega_tol")
 
 CSV_FIELDS = (
     "checkpoint", "encoder_type", "policy_type", "train_seed", "train_fleet_size", "eval_fleet_size",
-    "config", "episodes", "steps", "action_noise_std", *TOLERANCE_FIELDS,
+    "density", "config", "episodes", "steps", "action_noise_std", *TOLERANCE_FIELDS,
     "success_rate",
     "collision_rate", "timeout_rate", "mean_steps", "mean_goal_position_error",
     "mean_goal_heading_error", "mean_min_pair_distance",
@@ -129,6 +130,80 @@ def tolerance_columns(simulator: DynamicsProtocol) -> dict[str, float | str]:
     """The fleet's convergence tolerances, read off robot 0 (fleets are homogeneous)."""
     robot_simulator = simulator.simulators[0]
     return {name: getattr(robot_simulator, name, "") for name in TOLERANCE_FIELDS}
+
+
+# Step budget per config, as a multiple of the time a robot needs to drive the longest
+# distance the scenario produces in a straight line at full speed. A fixed budget across
+# configs would score the sparse ones as timeouts purely because their workspace is
+# larger, which is the opposite of what the density sweep is meant to measure.
+#
+# 3 rather than something tighter because avoiding costs time: on the antipodal ring the
+# CasADi expert needs ~1.7x the straight-line time (197 steps at N=4, 204 at N=8, against
+# 120), and a learned policy is slower than the expert. An episode that succeeds ends when
+# it succeeds, so a generous budget only costs time on the failures.
+STEP_BUDGET_FACTOR = 2.5
+
+
+def robot_density(
+    simulator: DynamicsProtocol,
+    fixed_initial_state: np.ndarray | None,
+) -> float:
+    """Robots per m^2 of the area the scenario places them in.
+
+    The density axis varies this at a fixed fleet size, and the fleet-size axis holds it
+    constant, so a result row is only interpretable with it: without this column the five
+    density levels of one fleet size are indistinguishable in the CSV.
+
+    Sampled starts and goals come from the workspace box. With a fixed start (the ring)
+    that box is meaningless -- the circle configs do not even set one, so the simulator
+    default would report the crowding of a +-1 m arena -- and the area the layout actually
+    spans is used instead.
+    """
+    robot_simulator = simulator.simulators[0]
+    if fixed_initial_state is not None:
+        positions = np.concatenate([
+            np.stack([
+                np.asarray(robot_state)[list(robot_simulator.position_indices)]
+                for robot_state in np.split(np.asarray(fixed_initial_state), simulator.num_robots)
+            ]),
+            np.stack([
+                np.asarray(goal)[:2]
+                for goal in np.split(np.asarray(simulator.goal_state), simulator.num_robots)
+            ]),
+        ])
+        side = float(np.max(positions.max(axis=0) - positions.min(axis=0)))
+    else:
+        low, high = robot_simulator.workspace_bounds
+        side = float(high - low)
+    if side <= 0.0:
+        return 0.0
+    return round(float(simulator.num_robots) / side ** 2, 4)
+
+
+def step_budget(
+    simulator: DynamicsProtocol,
+    factor: float,
+    fixed_initial_state: np.ndarray | None,
+) -> int:
+    """Steps allowed per episode, from the longest distance the config can produce.
+
+    With a fixed start that is the longest start-to-goal distance; otherwise the
+    workspace diagonal, since starts and goals are drawn from that box.
+    """
+    robot_simulator = simulator.simulators[0]
+    position_indices = list(robot_simulator.position_indices)
+    if fixed_initial_state is not None:
+        starts = np.split(np.asarray(fixed_initial_state), simulator.num_robots)
+        goals = np.split(np.asarray(simulator.goal_state), simulator.num_robots)
+        max_travel = max(
+            float(np.linalg.norm(np.asarray(start)[position_indices] - np.asarray(goal)[:2]))
+            for start, goal in zip(starts, goals)
+        )
+    else:
+        low, high = robot_simulator.workspace_bounds
+        max_travel = float(np.hypot(high - low, high - low))
+    speed = float(robot_simulator.max_linear_vel)
+    return int(math.ceil(factor * max_travel / (speed * float(robot_simulator.dt))))
 
 
 def config_start_state(raw_config: Mapping[str, Any]) -> np.ndarray:
@@ -262,7 +337,17 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True, help="metadata .pt written by learning/train_dagger.py")
     parser.add_argument("--configs", nargs="+", required=True, help="one multi_robot YAML config per fleet size")
     parser.add_argument("--episodes", type=int, default=50)
-    parser.add_argument("--steps", type=int, default=200)
+    parser.add_argument(
+        "--steps", type=int,
+        help="fixed step budget for every config; mutually exclusive with --step-budget-factor",
+    )
+    parser.add_argument(
+        "--step-budget-factor", type=float,
+        help=(
+            "derive the step budget per config from the distances it produces: "
+            f"{STEP_BUDGET_FACTOR} is the usual setting (see step_budget)"
+        ),
+    )
     parser.add_argument("--seed-start", type=int, default=50000, help="disjoint from the trainer's --eval-seed-start")
     parser.add_argument("--action-noise-std", type=float, default=0.0)
     parser.add_argument(
@@ -281,6 +366,10 @@ def main() -> None:
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--device", default=None, help="cpu, cuda, mps; autodetected when omitted")
     args = parser.parse_args()
+    if args.steps is not None and args.step_budget_factor is not None:
+        parser.error("pass either --steps or --step-budget-factor, not both.")
+    if args.steps is None and args.step_budget_factor is None:
+        args.step_budget_factor = STEP_BUDGET_FACTOR
 
     if args.device is not None:
         device = torch.device(args.device)
@@ -329,13 +418,18 @@ def main() -> None:
             fixed_start = config_start_state(config) if args.use_config_start else None
             if fixed_start is not None and simulator.is_collision(fixed_start):
                 raise SystemExit(f"{config_path}: configured start state is already in collision.")
+            steps = (
+                args.steps
+                if args.steps is not None
+                else step_budget(simulator, args.step_budget_factor, fixed_start)
+            )
             start_time = time.perf_counter()
             metrics = evaluate_fleet(
                 simulator=simulator,
                 policy=policy,
                 device=device,
                 episodes=episodes,
-                steps=args.steps,
+                steps=steps,
                 seed_start=args.seed_start,
                 action_noise_std=args.action_noise_std,
                 action_noise_seed=default_action_noise_seed_for_config(config),
@@ -349,9 +443,10 @@ def main() -> None:
                 "train_seed": args.train_seed,
                 "train_fleet_size": train_fleet_size,
                 "eval_fleet_size": int(simulator.num_robots),
+                "density": robot_density(simulator, fixed_start),
                 "config": config_path,
                 "episodes": episodes,
-                "steps": args.steps,
+                "steps": steps,
                 "action_noise_std": args.action_noise_std,
                 **tolerance_columns(simulator),
                 "wall_time_s": round(time.perf_counter() - start_time, 2),

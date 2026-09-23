@@ -21,7 +21,7 @@ OUT="${OUT:?set OUT to the output directory}"
 FLEETS="${FLEETS:-2 4 6 8}"
 EPISODES="${EPISODES:-200}"
 CHUNK="${CHUNK:-10}"
-STEPS="${STEPS:-200}"
+STEPS="${STEPS:-600}"
 PARALLEL="${PARALLEL:-$(nproc)}"
 RUNNER="${RUNNER:-docker}"   # docker | local
 
