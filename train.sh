@@ -41,8 +41,19 @@ read -r -a SEEDS <<< "${SEEDS:-0}"
 
 # Print the repo-relative YAML files a path argument names, one per line. The container
 # mounts the repo at /workspace, so anything outside it would not exist in there.
+#
+# A directory holding both policy heads is the normal case, so the argument may also be a
+# quoted glob ('.../n04/*_mlp.yaml') to train one head without splitting the directory.
+# Quoted, because the shell would otherwise expand it into several arguments.
 yaml_files() {
   local arg="$1" abs
+  if [[ ! -e "$arg" && "$arg" == *[*?\[]* ]]; then
+    local matches; mapfile -t matches < <(compgen -G "$arg" | sort)
+    (( ${#matches[@]} )) || { echo "no files match: ${arg}" >&2; return 1; }
+    local match
+    for match in "${matches[@]}"; do yaml_files "$match" || return 1; done
+    return 0
+  fi
   abs="$(realpath -e -- "$arg" 2>/dev/null)" || { echo "no such path: ${arg}" >&2; return 1; }
   if [[ "$abs" != "$REPO_ROOT"/* ]]; then
     echo "${arg} is outside the repository (${REPO_ROOT}); the container cannot see it" >&2
