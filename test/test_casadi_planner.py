@@ -15,7 +15,7 @@ from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger.rollouts import apply_execution_noise
 from planning.casadi_planner import PlannerSolveError
 
-CONFIG_PATH = os.path.join(PROJECT_ROOT, "test", "config", "multi_unicycle2_casadi_config.yaml")
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "test", "config", "2_multi_unicycle2_casadi_config.yaml")
 
 
 class MpcWarmStartFailureRecoveryTests(unittest.TestCase):
