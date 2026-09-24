@@ -59,10 +59,15 @@ TOLERANCE_FIELDS = ("pos_tol", "theta_tol", "vel_tol", "omega_tol")
 CSV_FIELDS = (
     "checkpoint", "encoder_type", "policy_type", "train_seed", "train_fleet_size", "eval_fleet_size",
     "density", "config", "episodes", "steps", "action_noise_std", *TOLERANCE_FIELDS,
-    "success_rate",
-    "collision_rate", "timeout_rate", "mean_steps", "mean_goal_position_error",
+    "success_rate", "collision_rate", "timeout_rate",
+    # Per robot, as in GLAS (Riviere et al. 2020, eq. 6): a robot succeeds when it ends
+    # at its goal and was never within d_collision of another. Fleet-level success needs
+    # all N robots at once, so it falls off as p^N and says nothing at 32 robots even
+    # when most robots did their job.
+    "robot_success_rate", "robot_collision_rate", "robot_timeout_rate",
+    "mean_steps", "mean_goal_position_error",
     "mean_goal_heading_error", "mean_min_pair_distance",
-    "mean_action_ms", "mean_action_ms_per_robot", "wall_time_s",
+    "mean_visible_neighbours", "mean_action_ms", "mean_action_ms_per_robot", "wall_time_s",
 )
 
 
@@ -124,6 +129,49 @@ def min_pair_distance(simulator: DynamicsProtocol, state: np.ndarray) -> float:
     distances = np.linalg.norm(positions[:, None] - positions[None, :], axis=-1)
     np.fill_diagonal(distances, np.inf)
     return float(distances.min())
+
+
+def collided_robots(simulator: DynamicsProtocol, state: np.ndarray) -> np.ndarray:
+    """Per-robot mask: is this robot within d_collision of any other right now?
+
+    simulator.is_collision answers the same question for the fleet as a whole. Per
+    robot it is what a per-robot success rate needs: the two robots of a collision are
+    the ones that failed, and the rest of the fleet may still complete its task.
+    """
+    positions = np.stack([
+        np.asarray(robot_state)[list(simulator.simulators[0].position_indices)]
+        for robot_state in np.split(np.asarray(state), simulator.num_robots)
+    ])
+    distances = np.linalg.norm(positions[:, None] - positions[None, :], axis=-1)
+    np.fill_diagonal(distances, np.inf)
+    return distances.min(axis=1) < float(simulator.d_collision)
+
+
+def robots_at_goal(simulator: DynamicsProtocol, state: np.ndarray) -> np.ndarray:
+    """Per-robot mask of is_done, the same criterion should_terminate_rollout uses."""
+    state_array = np.asarray(state, dtype=float)
+    return np.array([
+        bool(sub.is_done(state_array[state_slice], validate=False))
+        for sub, state_slice in zip(simulator.simulators, simulator.robot_state_slices)
+    ])
+
+
+def visible_neighbours(simulator: DynamicsProtocol, state: np.ndarray) -> float:
+    """Mean number of neighbours inside the sensing radius, over the fleet.
+
+    This is what the encoder actually receives, and it is what the two evaluation axes
+    move: the fleet size caps it at N-1, the density lifts its ceiling (density * pi * R^2).
+    Recorded per step so a scenario is described by what the policy saw, not only by the
+    configured geometry.
+    """
+    positions = np.stack([
+        np.asarray(robot_state)[list(simulator.simulators[0].position_indices)]
+        for robot_state in np.split(np.asarray(state), simulator.num_robots)
+    ])
+    distances = np.linalg.norm(positions[:, None] - positions[None, :], axis=-1)
+    np.fill_diagonal(distances, np.inf)
+    radii = np.asarray(simulator.robot_visibility_radii, dtype=float).reshape(-1, 1)
+    return float((distances < radii).sum(axis=1).mean())
 
 
 def tolerance_columns(simulator: DynamicsProtocol) -> dict[str, float | str]:
@@ -236,14 +284,22 @@ def evaluate_fleet(
     action_noise_seed: int,
     fixed_initial_state: np.ndarray | None = None,
     observation_horizon: int = 1,
+    stop_on_collision: bool = False,
 ) -> dict[str, float]:
     """Roll the policy out over seeded episodes and summarize the outcomes.
 
     With ``fixed_initial_state`` the layout is identical every episode, so the only
     thing separating episodes is the action-noise draw. Without noise the scenario
     is fully deterministic and one episode is the whole result.
+
+    An episode runs on after a collision, which is what makes the per-robot rates
+    meaningful: stopping at the first one would score every robot of a 32-robot fleet as
+    failed because two of them touched at step 10. The fleet-level rates are unaffected
+    (an episode with a collision is a collision either way); only mean_steps grows, and
+    with it the cost. ``stop_on_collision`` restores the cheaper behaviour.
     """
     successes = collisions = 0
+    robot_successes = robot_collisions = robot_total = 0
     # One entry per control step: the wall time of the policy call that produced that
     # step's joint action. Kept separate from wall_time_s, which also covers the
     # simulator, the collision checks and the observation construction.
@@ -252,6 +308,7 @@ def evaluate_fleet(
     position_errors: list[float] = []
     heading_errors: list[float] = []
     min_distances: list[float] = []
+    visible_counts: list[float] = []
 
     for episode_index, seed_spec in enumerate(evaluation_seed_specs(simulator, episodes, seed_start)):
         # Flow policies draw their action from noise (flow_policy.py:130), so without a
@@ -273,6 +330,10 @@ def evaluate_fleet(
         )
         noise_rng = action_noise_rng_for_rollout(action_noise_seed, seed_spec=seed_spec)
         episode_min_distance = min_pair_distance(simulator, state)
+        episode_visible = [visible_neighbours(simulator, state)]
+        # Accumulated over the episode: a robot that touches another at any point has
+        # failed, even if it is clear of everyone at the end.
+        ever_collided = collided_robots(simulator, state)
         reached_goal = collided = False
         rollout_steps = 0
 
@@ -297,15 +358,22 @@ def evaluate_fleet(
             )
             rollout_steps = step
             episode_min_distance = min(episode_min_distance, min_pair_distance(simulator, state))
-            if simulator.is_collision(state):
+            episode_visible.append(visible_neighbours(simulator, state))
+            ever_collided |= collided_robots(simulator, state)
+            if ever_collided.any():
                 collided = True
-                break
+                if stop_on_collision:
+                    break
             if simulator.should_terminate_rollout(state):
                 reached_goal = True
                 break
 
         successes += int(reached_goal)
         collisions += int(collided)
+        at_goal = robots_at_goal(simulator, state)
+        robot_successes += int((at_goal & ~ever_collided).sum())
+        robot_collisions += int(ever_collided.sum())
+        robot_total += int(simulator.num_robots)
         steps_taken.append(rollout_steps)
         # Split by coordinate geometry: a raw L2 over the state vector scores a
         # correct-but-wrapped heading as an error of 2*pi. See systems/goal_metrics.py.
@@ -313,15 +381,20 @@ def evaluate_fleet(
         position_errors.append(position_error)
         heading_errors.append(heading_error)
         min_distances.append(episode_min_distance)
+        visible_counts.append(float(np.mean(episode_visible)))
 
     return {
         "success_rate": successes / episodes,
         "collision_rate": collisions / episodes,
         "timeout_rate": (episodes - successes - collisions) / episodes,
+        "robot_success_rate": robot_successes / robot_total,
+        "robot_collision_rate": robot_collisions / robot_total,
+        "robot_timeout_rate": (robot_total - robot_successes - robot_collisions) / robot_total,
         "mean_steps": float(np.mean(steps_taken)),
         "mean_goal_position_error": float(np.mean(position_errors)),
         "mean_goal_heading_error": float(np.mean(heading_errors)),
         "mean_min_pair_distance": float(np.mean(min_distances)),
+        "mean_visible_neighbours": float(np.mean(visible_counts)),
         # The fleet is one batched forward pass, so this is the latency of a whole
         # control step, not of a single robot deciding on its own hardware. The
         # per-robot figure divides that batch cost evenly and therefore understates
@@ -350,6 +423,11 @@ def main() -> None:
     )
     parser.add_argument("--seed-start", type=int, default=50000, help="disjoint from the trainer's --eval-seed-start")
     parser.add_argument("--action-noise-std", type=float, default=0.0)
+    parser.add_argument(
+        "--stop-on-collision", action="store_true",
+        help="end an episode at the first collision. Cheaper, but the per-robot rates then "
+             "count every robot of the fleet as failed because two of them touched",
+    )
     parser.add_argument(
         "--use-config-start",
         action="store_true",
@@ -435,6 +513,7 @@ def main() -> None:
                 action_noise_seed=default_action_noise_seed_for_config(config),
                 fixed_initial_state=fixed_start,
                 observation_horizon=int(checkpoint.get("observation_horizon", 1)),
+                stop_on_collision=args.stop_on_collision,
             )
             row = {
                 "checkpoint": args.checkpoint,
@@ -456,7 +535,8 @@ def main() -> None:
             handle.flush()
             print(
                 f"  eval_fleet={row['eval_fleet_size']:>2}  "
-                f"success={metrics['success_rate']:.3f}  collision={metrics['collision_rate']:.3f}  "
+                f"success={metrics['success_rate']:.3f} (robots {metrics['robot_success_rate']:.3f})  "
+                f"collision={metrics['collision_rate']:.3f}  "
                 f"timeout={metrics['timeout_rate']:.3f}  mean_steps={metrics['mean_steps']:.1f}  "
                 f"pos_err={metrics['mean_goal_position_error']:.3f}  "
                 f"head_err={metrics['mean_goal_heading_error']:.3f}  "

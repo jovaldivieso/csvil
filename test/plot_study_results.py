@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import math
 import os
 import sys
@@ -41,6 +40,7 @@ from pathlib import Path
 from typing import Callable
 
 import matplotlib
+import yaml
 
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches
@@ -51,6 +51,8 @@ from matplotlib.colors import LinearSegmentedColormap
 PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# The 1x level of both evaluation axes: the density the policies train at.
+REFERENCE_FLEET_CONFIG = "test/config/study/fleet/unicycle2_n02.yaml"
 DEFAULT_RESULTS = PROJECT_ROOT / "outputs/study2/eval/random/encoder_scaling.csv"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/study2/plots/random"
 
@@ -72,9 +74,12 @@ TEXT_MUTED = "#8a8983"
 GRID = "#e3e2de"
 
 METRIC_LABELS = {
-    "success_rate": "Success rate",
-    "collision_rate": "Collision rate",
-    "timeout_rate": "Timeout rate",
+    "success_rate": "Success rate (episodes)",
+    "collision_rate": "Collision rate (episodes)",
+    "timeout_rate": "Timeout rate (episodes)",
+    "robot_success_rate": "Success rate (robots)",
+    "robot_collision_rate": "Collision rate (robots)",
+    "robot_timeout_rate": "Timeout rate (robots)",
     "mean_steps": "Mean steps",
     "mean_goal_position_error": "Mean goal position error (m)",
     "mean_goal_heading_error": "Mean goal heading error (rad)",
@@ -82,24 +87,30 @@ METRIC_LABELS = {
     "mean_action_ms": "Mean policy call (ms/step)",
     "mean_action_ms_per_robot": "Mean policy call (ms/step/robot)",
 }
-RATE_METRICS = {"success_rate", "collision_rate", "timeout_rate"}
+RATE_METRICS = {
+    "success_rate", "collision_rate", "timeout_rate",
+    "robot_success_rate", "robot_collision_rate", "robot_timeout_rate",
+}
+# The two failure modes belonging to a success metric, shown under the value in each
+# matrix cell. Episode rates and per-robot rates must not be mixed: they have different
+# denominators (episodes against robots), so a cell would not add up.
+FAILURE_COLUMNS = {
+    "success_rate": ("collision_rate", "timeout_rate"),
+    "robot_success_rate": ("robot_collision_rate", "robot_timeout_rate"),
+}
 
 
 def training_density() -> float:
-    """Robots per m^2 every training fleet size is placed at.
+    """Robots per m^2 the policies train at, and the 1x level of the density axis.
 
-    Read off the generator rather than written down here, so the reference the density
-    axis is expressed in cannot drift from the configs the policies were trained on.
-    test/config is not a package, and 'test' would shadow the standard library's module,
-    so it is loaded by path -- the same way generate_density_configs.py does it.
+    Read off the reference fleet config rather than written down here, so the unit the
+    density axis is expressed in cannot drift from the scenarios themselves. The 1x
+    density level of test/config/study/density/ is generated from the same file.
     """
-    path = PROJECT_ROOT / "test/config/generate_fleet_configs.py"
-    spec = importlib.util.spec_from_file_location("_generate_fleet_configs", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    template = __import__("yaml").safe_load(module.TEMPLATE_PATH.read_text())
-    half_width = module.goal_half_width(module.REFERENCE_FLEET_SIZE, template["d_safe"])
-    return module.REFERENCE_FLEET_SIZE / (2.0 * half_width) ** 2
+    config = yaml.safe_load((PROJECT_ROOT / REFERENCE_FLEET_CONFIG).read_text())
+    num_robots = len(config["robots"])
+    half_width = float(config["robots"][0]["config"]["workspace_bounds"][1])
+    return num_robots / (2.0 * half_width) ** 2
 
 
 @dataclass(frozen=True)
@@ -129,7 +140,13 @@ def fleet_axis() -> Axis:
     )
 
 
-def density_axis() -> Axis:
+def density_axis(train_density_factor: float = 1.0) -> Axis:
+    """`train_density_factor` in units of the reference density: the row to outline.
+
+    The study's runs no longer all train at the reference density -- data_mid and
+    data_large train at 3x it -- so which row is in-distribution depends on the runs the
+    results came from, not on the axis.
+    """
     reference = training_density()
     return Axis(
         name="density",
@@ -142,8 +159,8 @@ def density_axis() -> Axis:
         tick=lambda value: f"{value:g}x",
         axis_label="Evaluated at (x training density)",
         title="evaluation density",
-        in_distribution=lambda train_size, value: abs(value - 1.0) < 0.005,
-        note="evaluated at the density every policy trained at",
+        in_distribution=lambda train_size, value: abs(value - train_density_factor) < 0.005,
+        note=f"evaluated at the density the policies trained at ({train_density_factor:g}x)",
     )
 
 
@@ -209,13 +226,24 @@ def titled(label: str, title: str) -> str:
     return f"{label} — {title}" if label else title
 
 
-def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "") -> None:
+def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "",
+                show_failures: bool = True) -> None:
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
     eval_sizes = sorted({axis.value(r) for r in rows})
     values = {
         (r["encoder_type"], int(r["train_fleet_size"]), axis.value(r)): float(r[metric])
         for r in rows
     }
+    failures = None
+    if show_failures and metric in FAILURE_COLUMNS:
+        collision_column, timeout_column = FAILURE_COLUMNS[metric]
+        if all(r.get(collision_column) not in (None, "") and r.get(timeout_column) not in (None, "")
+               for r in rows):
+            failures = {
+                (r["encoder_type"], int(r["train_fleet_size"]), axis.value(r)):
+                    (float(r[collision_column]), float(r[timeout_column]))
+                for r in rows
+            }
     encoders = [e for e in ENCODER_ORDER if any(k[0] == e for k in values)]
 
     all_values = [v for v in values.values()]
@@ -252,8 +280,21 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
                 shade = (value - vmin) / (vmax - vmin) if vmax > vmin else 0.0
                 ink = "#ffffff" if shade > 0.55 else TEXT_PRIMARY
                 text = f"{value:.2f}" if metric in RATE_METRICS else f"{value:.1f}"
-                ax.text(col_idx, row_idx, text, ha="center", va="center",
-                        fontsize=10, color=ink)
+                cell = failures.get((encoder, train_size, eval_size)) if failures else None
+                if cell is None:
+                    ax.text(col_idx, row_idx, text, ha="center", va="center",
+                            fontsize=10, color=ink)
+                else:
+                    # Value and failure split on two lines: the split is the secondary
+                    # reading, so it sits smaller and below, and the pair stays centred
+                    # in the cell rather than the value alone.
+                    collision, timeout = cell
+                    ax.text(col_idx, row_idx - 0.13, text, ha="center", va="center",
+                            fontsize=10, color=ink)
+                    ax.text(col_idx, row_idx + 0.17,
+                            f"C{collision:.2f}".replace("0.", ".")
+                            + " " + f"T{timeout:.2f}".replace("0.", "."),
+                            ha="center", va="center", fontsize=7, color=ink, alpha=0.85)
                 if axis.in_distribution(train_size, eval_size):
                     ax.add_patch(mpatches.Rectangle(
                         (col_idx - 0.5, row_idx - 0.5), 1, 1,
@@ -285,9 +326,10 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
     fig.suptitle(
         titled(label, f"{METRIC_LABELS.get(metric, metric)} by training fleet size and {axis.title}"),
         fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.10)
-    fig.text(0.02, 1.045,
-             f"{episodes} episodes per cell; outlined cells are in-distribution ({axis.note})",
-             fontsize=9, color=TEXT_MUTED, ha="left")
+    note = f"{episodes} episodes per cell; outlined cells are in-distribution ({axis.note})"
+    if failures:
+        note += "; C = collision rate, T = timeout rate"
+    fig.text(0.02, 1.045, note, fontsize=9, color=TEXT_MUTED, ha="left")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE)
@@ -295,19 +337,23 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
     print(f"wrote {display_path(output_path)}")
 
 
-def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "") -> None:
+def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "",
+                 metric: str = "success_rate") -> None:
     """Success rate along the axis, pooled over training fleet size.
 
     Pooling is what makes the comparison readable: per cell there are only 50
     episodes, so any single row of the matrix is dominated by sampling noise.
     """
+    per_robot = metric.startswith("robot_")
     eval_sizes = sorted({axis.value(r) for r in rows})
     pooled = defaultdict(lambda: [0, 0])
     for row in rows:
         key = (row["encoder_type"], axis.value(row))
-        episodes = int(row["episodes"])
-        pooled[key][0] += round(float(row["success_rate"]) * episodes)
-        pooled[key][1] += episodes
+        # Wilson intervals need counts, and the denominator differs per metric: an
+        # episode rate is over episodes, a per-robot rate over episodes x robots.
+        trials = int(row["episodes"]) * (int(row["eval_fleet_size"]) if per_robot else 1)
+        pooled[key][0] += round(float(row[metric]) * trials)
+        pooled[key][1] += trials
 
     encoders = [e for e in ENCODER_ORDER if any(k[0] == e for k in pooled)]
 
@@ -338,7 +384,7 @@ def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "") -> None:
     total_per_point = pooled[(encoders[0], eval_sizes[0])][1]
     ax.set_xticks(x, [axis.tick(e) for e in eval_sizes])
     ax.set_xlabel(axis.axis_label, fontsize=10, color=TEXT_SECONDARY)
-    ax.set_ylabel("Success rate", fontsize=10, color=TEXT_SECONDARY)
+    ax.set_ylabel(METRIC_LABELS.get(metric, metric), fontsize=10, color=TEXT_SECONDARY)
     ax.set_ylim(-0.03, 1.03)
     ax.set_xlim(-0.4, len(eval_sizes) - 0.1)
     ax.grid(axis="y", color=GRID, linewidth=1)
@@ -349,10 +395,11 @@ def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "") -> None:
     ax.tick_params(colors=TEXT_SECONDARY, length=0)
     ax.legend(frameon=False, fontsize=10, labelcolor=TEXT_SECONDARY, loc="upper right")
 
-    fig.suptitle(titled(label, f"Success rate by {axis.title}"),
+    fig.suptitle(titled(label, f"{METRIC_LABELS.get(metric, metric)} by {axis.title}"),
                  fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.06)
     fig.text(0.02, 1.0,
-             f"Pooled over all training fleet sizes ({total_per_point} episodes per point); bars are 95% Wilson intervals",
+             f"Pooled over all training fleet sizes ({total_per_point} "
+             f"{'robot-episodes' if per_robot else 'episodes'} per point); bars are 95% Wilson intervals",
              fontsize=9, color=TEXT_MUTED, ha="left")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -445,6 +492,12 @@ def main() -> None:
         help="plot only this policy's rows; required when the results hold more than one",
     )
     parser.add_argument("--label", default="", help="scenario name shown in the titles, e.g. 'antipodal ring'")
+    parser.add_argument("--train-density", type=float, default=1.0,
+                        help="density the evaluated policies trained at, in multiples of the "
+                             "reference density (data_mid/data_large: 3); decides which row "
+                             "of the density matrix is marked in-distribution")
+    parser.add_argument("--no-failure-modes", action="store_true",
+                        help="only the metric per cell, without the collision/timeout split")
     parser.add_argument(
         "--axis", choices=["auto", "fleet", "density"], default="auto",
         help="what varies along the plotted axis; 'auto' reads it off the results",
@@ -467,7 +520,7 @@ def main() -> None:
     label = " · ".join(part for part in (args.policy, args.label) if part)
 
     axis_name = args.axis if args.axis != "auto" else detect_axis(rows)
-    axis = density_axis() if axis_name == "density" else fleet_axis()
+    axis = density_axis(args.train_density) if axis_name == "density" else fleet_axis()
     if axis_name == "density" and not all(row.get("density") for row in rows):
         raise SystemExit(
             f"{args.results} has no 'density' column; it predates the density axis. "
@@ -490,10 +543,10 @@ def main() -> None:
             group_label = " · ".join(part for part in (label, f"N={int(suffix[2:])}") if part)
         plot_matrix(group, args.metric,
                     args.output_dir / f"{prefix}_{args.metric}_matrix{suffix}.{args.format}",
-                    axis, group_label)
+                    axis, group_label, show_failures=not args.no_failure_modes)
         plot_by_axis(group,
                      args.output_dir / f"{prefix}_by_{axis.name}{suffix}.{args.format}",
-                     axis, group_label)
+                     axis, group_label, metric=args.metric if args.metric in FAILURE_COLUMNS else "success_rate")
         plot_by_axis_facets(group,
                             args.output_dir / f"{prefix}_by_{axis.name}_facets{suffix}.{args.format}",
                             axis, group_label)

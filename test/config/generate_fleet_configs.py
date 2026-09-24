@@ -35,7 +35,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.config import validate_system_config  # noqa: E402
 
-TEMPLATE_PATH = PROJECT_ROOT / "test/config/multi_unicycle2_casadi_config.yaml"
+# Renamed with a 2_ prefix when the 4-robot configs arrived. Note that file has since
+# been retuned for other work (4 m/s instead of 1), so regenerating changes every study
+# scenario -- check_template_matches_existing below refuses to do that silently.
+TEMPLATE_PATH = PROJECT_ROOT / "test/config/2_multi_unicycle2_casadi_config.yaml"
 OUTPUT_DIR = PROJECT_ROOT / "test/config/study"
 FLEET_SIZES = (2, 4, 6, 8, 16, 32)
 
@@ -198,8 +201,35 @@ def render_config(config: dict, num_robots: int) -> str:
     )
 
 
+def check_template_matches_existing(template: dict) -> None:
+    """Refuse to regenerate when the template would change the robots themselves.
+
+    The generated configs define the task every policy is trained and scored on, so a
+    template edit that changes the dynamics silently makes new runs incomparable with
+    every existing checkpoint. Tolerances and the box are set here and may differ.
+    """
+    existing_path = OUTPUT_DIR / "unicycle2_fleet_02.yaml"
+    if not existing_path.exists():
+        return
+    existing = yaml.safe_load(existing_path.read_text())["robots"][0]["config"]
+    candidate = first_robot_template(template)["config"]
+    changed = {
+        key: (existing.get(key), candidate.get(key))
+        for key in ("dt", "max_linear_vel", "max_angular_vel", "max_linear_accel", "max_angular_accel")
+        if existing.get(key) != candidate.get(key)
+    }
+    if changed:
+        details = ", ".join(f"{k}: {old} -> {new}" for k, (old, new) in changed.items())
+        raise SystemExit(
+            f"{TEMPLATE_PATH.name} would change the robot dynamics of every study scenario "
+            f"({details}).\nExisting checkpoints were trained under the current values; "
+            "delete test/config/study/unicycle2_fleet_*.yaml to confirm the change."
+        )
+
+
 def main() -> None:
     template = yaml.safe_load(TEMPLATE_PATH.read_text())
+    check_template_matches_existing(template)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     d_safe = template["d_safe"]

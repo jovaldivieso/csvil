@@ -80,7 +80,7 @@ the flag. A command-line flag overrides the config's value for that run only.
 runs it for every checkpoint of an experiment:
 
 ```bash
-./eval.sh <experiment> [random|density|circle|all]
+./eval.sh <experiment> [arena|fleet|density|circle|all]
 #   env: EPISODES=50 MAX_PARALLEL=8 RUNNER=docker|local SEED_START=50000
 #        STEP_BUDGET_FACTOR=3 ACTION_NOISE=0.0
 ```
@@ -98,8 +98,9 @@ encoder sees only neighbours within 4 m, never the fleet size. Two things drive 
 
 | Scenario | Configs | Changes |
 |---|---|---|
-| `random` | `test/config/study/unicycle2_fleet_{02..32}.yaml` | fleet size 2…32 **at the training density** (workspace grows as √N) |
-| `density` | `test/config/study/density/unicycle2_n{04,08}_d{0.25,0.5,1,2,3}.yaml` | 0.25×…3× the training density **at a fixed fleet size** |
+| `arena` | `test/config/study/arena/unicycle2_n{02..32}.yaml` | N = 2…32 in **one fixed ±6.5 m workspace** (after GLAS): same task and path length throughout, density rises with the fleet |
+| `fleet` | `test/config/study/fleet/unicycle2_n{02..32}.yaml` | fleet size 2…32 at the training density. Kept but **not part of `all`**: its box grows as √N, so path length rises with the fleet and it isolates no better than `arena` |
+| `density` | `test/config/study/density/unicycle2_n{02,06}_d{025,05,1,133}.yaml` | 0.25×…1.33× the training density **at a fixed fleet size**: spacing shrinks, the ceiling on visible neighbours does not |
 | `circle` | `test/config/study/circle/unicycle2_circle_{02..32}.yaml` | antipodal swap from fixed starts, the stress case (`--use-config-start`) |
 
 Training keeps one density for every fleet size (about 0.056 robots/m²), so the training
@@ -170,7 +171,7 @@ Reads `outputs/<experiment>/models/`, written by `train.sh`.
 
 ```bash
 ./eval.sh study2 all                  # random + density + circle
-for s in random density circle; do for p in mlp flow; do
+for s in arena density circle; do for p in mlp flow; do
   python3 test/plot_study_results.py --results outputs/study2/eval/$s.csv \
     --policy $p --label $s --output-dir outputs/study2/plots/$s
 done; done

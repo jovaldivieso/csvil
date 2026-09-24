@@ -12,17 +12,26 @@ supports it, see ``_validate_multi_robot_start`` in core/config.py) and a fixed
 
     python test/evaluate_scaling.py --use-config-start ...
 
-Radius: adjacent robots on the circle sit 2*R*sin(pi/N) apart, so R has to grow with
-the fleet or the *starting* formation already violates d_safe. R is the larger of a
-floor (so small fleets still travel a meaningful distance) and the spacing
-requirement, which keeps the ring feasible out to 32 robots.
+Radius: the ring is sized so that **every fleet size rings at the same robot density**,
+R = sqrt(N / density) / 2, i.e. the circle inscribed in the square a fleet of that
+density would occupy. The alternative -- one radius for every fleet -- makes the ring
+density grow with N (4x from 2 to 8 robots at radius 3), so a "more robots" curve would
+really be a "more crowding" curve, which is exactly what the other evaluation axes are
+built to avoid. Adjacent robots sit 2*R*sin(pi/N) apart; that spacing shrinks slowly
+with N, so the generator checks it against d_safe and says how much margin is left.
+
+--density defaults to the training density of the study's runs (0.1667 robots/m^2,
+the +-1.73/2.45/3.0/3.46 boxes of learning/config/study/data_*_n<NN>), so the ring is
+in-distribution in density and differs from training only in the layout.
 
 Usage:
     python test/config/generate_circle_configs.py
+    python test/config/generate_circle_configs.py --density 0.0556 --out-subdir sparse
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import importlib.util
 import math
@@ -47,22 +56,36 @@ Q_BLOCK, _FlowListDumper, format_q_diag = _fleet.Q_BLOCK, _fleet._FlowListDumper
 first_robot_template = _fleet.first_robot_template
 TASK_TOLERANCES = _fleet.TASK_TOLERANCES
 
-TEMPLATE_PATH = PROJECT_ROOT / "test/config/multi_unicycle2_casadi_config.yaml"
+# The 2-robot fleet config rather than test/config/2_multi_unicycle2_casadi_config.yaml:
+# the rings must match the scenarios the policies are actually trained and scored on,
+# and the raw template has since been retuned (4 m/s instead of 1) for other work.
+# Everything taken from here is fleet-size independent -- dt, d_safe, d_collision,
+# visibility, horizon, cost weights and the per-robot dynamics; the ring writes its own
+# starts, goals and Q_diag.
+TEMPLATE_PATH = PROJECT_ROOT / "test/config/study/unicycle2_fleet_02.yaml"
 OUTPUT_DIR = PROJECT_ROOT / "test/config/study/circle"
 FLEET_SIZES = (2, 4, 6, 8, 16, 32)
 
-# Neighbour spacing on the ring, in units of d_safe. 1.5 leaves the starting
-# formation clearly feasible without spreading the ring so wide that robots never
-# meet before reaching the centre.
+# Neighbour spacing on the ring, in units of d_safe. Below 1.0 the starting formation
+# is in collision; 1.5 is the margin this generator prefers and warns below.
 RING_SPACING_PER_D_SAFE = 1.5
-# Smallest ring radius, so a 2-robot swap is not a trivially short hop.
-MIN_RADIUS = 3.0
+# Robots per m^2 the ring is sized for. The default is what the study's runs train at
+# (learning/config/study/generate_data_pilot_configs.py, --density-factor 3).
+DEFAULT_DENSITY = 0.1667
 
 
-def ring_radius(num_robots: int, d_safe: float) -> float:
-    """Radius where neighbouring starts clear d_safe with margin."""
-    required = RING_SPACING_PER_D_SAFE * d_safe / (2.0 * math.sin(math.pi / num_robots))
-    return round(max(MIN_RADIUS, required), 4)
+def ring_radius(num_robots: int, density: float) -> float:
+    """Radius that puts `num_robots` on a ring at `density` robots per m^2.
+
+    The circle inscribed in the square that many robots would occupy at that density,
+    so the ring's crowding matches the randomized scenarios of the same density.
+    """
+    return round(math.sqrt(num_robots / density) / 2.0, 4)
+
+
+def ring_spacing(num_robots: int, radius: float) -> float:
+    """Distance between neighbouring robots on the ring."""
+    return 2.0 * radius * math.sin(math.pi / num_robots)
 
 
 def robot_endpoints(num_robots: int, radius: float, robot_idx: int):
@@ -77,15 +100,14 @@ def robot_endpoints(num_robots: int, radius: float, robot_idx: int):
     return start, goal
 
 
-def build_config(template: dict, num_robots: int) -> tuple[dict, float]:
+def build_config(template: dict, num_robots: int, density: float) -> tuple[dict, float]:
     if num_robots % 2 != 0:
         raise SystemExit(
             f"Fleet size {num_robots} is odd; the antipode of a start is then not "
             "another robot's start, which is the property this scenario is for."
         )
     robot_template = first_robot_template(template)
-    d_safe = float(template["d_safe"])
-    radius = ring_radius(num_robots, d_safe)
+    radius = ring_radius(num_robots, density)
 
     base_robot_config = {
         key: value
@@ -141,8 +163,9 @@ def check_scenario(config: dict, num_robots: int, radius: float, d_safe: float) 
 
     if simulator.is_collision(start_state):
         raise SystemExit(
-            f"{num_robots}-robot ring starts in collision at radius {radius}; "
-            f"raise RING_SPACING_PER_D_SAFE above {RING_SPACING_PER_D_SAFE}."
+            f"{num_robots}-robot ring starts in collision at radius {radius} "
+            f"(spacing {ring_spacing(num_robots, radius):.3f} < d_safe {d_safe}); "
+            "lower --density."
         )
 
     positions = np.stack([entry_start(entry)[:2] for entry in config["robots"]])
@@ -173,23 +196,41 @@ def check_scenario(config: dict, num_robots: int, radius: float, d_safe: float) 
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--density", type=float, default=DEFAULT_DENSITY,
+                        help=f"robots per m^2 the rings are sized for (default {DEFAULT_DENSITY})")
+    parser.add_argument("--out-subdir", default=None,
+                        help="write into test/config/study/circle/<subdir> instead of circle/")
+    args = parser.parse_args()
+
     template = yaml.safe_load(TEMPLATE_PATH.read_text())
     d_safe = float(template["d_safe"])
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = OUTPUT_DIR / args.out_subdir if args.out_subdir else OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"template d_safe={d_safe}, visibility={template['inter_robot_visibility_radius']}")
+    print(f"template d_safe={d_safe}, visibility={template['inter_robot_visibility_radius']}, "
+          f"ring density {args.density} robots/m^2")
     worst_steps = 0
     for num_robots in FLEET_SIZES:
-        config, radius = build_config(template, num_robots)
+        config, radius = build_config(template, num_robots, args.density)
         validated = validate_system_config(system_name="multi_robot", raw_config=config)
         stats = check_scenario(validated, num_robots, radius, d_safe)
         worst_steps = max(worst_steps, stats["straight_line_steps"])
 
-        output_path = OUTPUT_DIR / f"unicycle2_circle_{num_robots:02d}.yaml"
+        spacing = ring_spacing(num_robots, radius)
+        # Above d_safe the ring is feasible, but a thin margin means the robots start
+        # nearly touching, so the run is decided in the first few steps.
+        if spacing < RING_SPACING_PER_D_SAFE * d_safe:
+            print(f"  note: {num_robots} robots sit {spacing:.3f} apart on the ring, "
+                  f"{spacing / d_safe:.2f}x d_safe (preferred >= {RING_SPACING_PER_D_SAFE})")
+
+        output_path = output_dir / f"unicycle2_circle_{num_robots:02d}.yaml"
         header = (
             f"# {num_robots}x unicycle2 antipodal-circle swap for the encoder-scaling study.\n"
             f"# Generated by test/config/generate_circle_configs.py -- do not edit by hand.\n"
-            f"# Robot i starts at angle 2*pi*i/{num_robots} on a circle of radius {radius}\n"
+            f"# Robot i starts at angle 2*pi*i/{num_robots} on a circle of radius {radius},\n"
+            f"# sized for {args.density} robots/m^2 so every fleet size rings at the same density.\n"
             f"# and targets the antipode, which is the start of robot i+{num_robots // 2}.\n"
             f"# Deterministic: fixed 'start' and 'goal', randomize_goal false.\n"
             f"# Closest starting pair {stats['min_pair_distance']:.3f} (d_safe={d_safe}); "

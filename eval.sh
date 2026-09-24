@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Evaluate every checkpoint of an experiment on one scenario, in parallel containers.
 #
-#   ./eval.sh <experiment> [scenario]        # scenario: random (default) | density | circle | all
+#   ./eval.sh <experiment> [scenario]   # scenario: arena (default) | fleet | density | circle | all
 #
 #   env: EPISODES=50  MAX_PARALLEL=8  RUNNER=docker|local  SEED_START=50000
-#        STEP_BUDGET_FACTOR=3  ACTION_NOISE=0.0
+#        STEP_BUDGET_FACTOR=3  ACTION_NOISE=0.0  CONFIGS="<glob>"
 #
 # Reads  outputs/<experiment>/models/<run>/<policy_type>_dagger_checkpoint.pt
 # Writes outputs/<experiment>/eval/<scenario>/<run>.csv, merged into
@@ -13,9 +13,19 @@
 #
 # The scenarios are the study's two axes plus the ring; each changes one quantity:
 #
-#   random   fleet size 2..32 at the training density (workspace grows as sqrt(N))
-#   density  0.25x .. 3x the training density at a fixed fleet size (N=4 and N=8)
-#   circle   antipodal swap from the configs' fixed starts -- the stress case
+# What a policy sees is the neighbour set inside its sensing radius: its size is capped
+# by N-1 and by the density, and how close those neighbours come depends on the density
+# alone. Each scenario moves exactly one of the two:
+#
+#   arena    N = 2..32 in ONE fixed workspace (after GLAS): the task is identical --
+#            same box, ~7 m to drive -- and only the number of robots sharing it changes
+#   density  0.25x .. 1.25x the training density at fixed N: spacing shrinks, ceiling does not
+#   fleet    N = 2..32 at the training density. Not part of 'all': the box grows as sqrt(N),
+#            so it drags the path length along and isolates no better than 'arena' does
+#   circle   antipodal swap from the configs' fixed starts, ringed at the training
+#            density for every N -- the stress case for head-on conflicts
+#
+# CONFIGS overrides a scenario's config glob, for a smoke run over a few configs.
 #
 # Every scenario derives its step budget per config from the distances that config
 # produces (see step_budget in test/evaluate_scaling.py), because a fixed budget would
@@ -30,7 +40,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 EXPERIMENT="${1:-}"
-SCENARIO="${2:-random}"
+SCENARIO="${2:-arena}"
 MAX_PARALLEL="${MAX_PARALLEL:-8}"
 EPISODES="${EPISODES:-50}"
 SEED_START="${SEED_START:-50000}"
@@ -39,12 +49,13 @@ ACTION_NOISE="${ACTION_NOISE:-0.0}"
 RUNNER="${RUNNER:-docker}"
 
 declare -A SCENARIO_GLOB=(
-  [random]="test/config/study/unicycle2_fleet_*.yaml"
+  [arena]="test/config/study/arena/*.yaml"
+  [fleet]="test/config/study/fleet/*.yaml"
   [density]="test/config/study/density/*.yaml"
   [circle]="test/config/study/circle/*.yaml"
 )
 # The ring layouts are the configs' own 'start' entries, not sampled ones.
-declare -A SCENARIO_FLAGS=( [random]="" [density]="" [circle]="--use-config-start" )
+declare -A SCENARIO_FLAGS=( [arena]="" [fleet]="" [density]="" [circle]="--use-config-start" )
 
 usage() {
   echo "usage: $0 <experiment> [${!SCENARIO_GLOB[*]}|all]" >&2
@@ -138,9 +149,10 @@ eval_one() {
 
 run_scenario() {
   local scenario="$1"
-  local configs; mapfile -t configs < <(compgen -G "${SCENARIO_GLOB[$scenario]}" | sort)
+  local glob="${CONFIGS:-${SCENARIO_GLOB[$scenario]}}"
+  local configs; mapfile -t configs < <(compgen -G "$glob" | sort)
   if (( ${#configs[@]} == 0 )); then
-    echo "no configs for scenario '${scenario}' (${SCENARIO_GLOB[$scenario]});" \
+    echo "no configs for scenario '${scenario}' (${glob});" \
          "run the generators in test/config/" >&2
     return 1
   fi
@@ -164,7 +176,7 @@ run_scenario() {
 }
 
 if [[ "$SCENARIO" == "all" ]]; then
-  for scenario in random density circle; do run_scenario "$scenario"; done
+  for scenario in arena density circle; do run_scenario "$scenario"; done
 else
   run_scenario "$SCENARIO"
 fi

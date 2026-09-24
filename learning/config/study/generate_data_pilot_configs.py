@@ -146,6 +146,12 @@ def parse_args() -> argparse.Namespace:
         help="size the episodes so every fleet size collects about this many frames "
              "per round (dataset-equal instead of episode-equal)",
     )
+    parser.add_argument(
+        "--ring-fraction", type=float, default=None,
+        help=f"share of each round that starts from an antipodal ring layout "
+             f"(default {_study.RING_FRACTION:.2f}, the study's). The rest falls back to "
+             f"the expert config's randomized goals",
+    )
     parser.add_argument("--min-episodes", type=int, default=50,
                         help="floor for --frames-per-round (default 50), so a large fleet "
                              "keeps some scenario variety")
@@ -192,7 +198,8 @@ def main() -> None:
         # Rings must stay inside this box: a layout the randomized episodes can never
         # produce would be a different task, not a harder one.
         max_radius = min(_study.RADIUS_RANGE[1], half_width)
-        count = round(trajectories * _study.RING_FRACTION)
+        ring_fraction = args.ring_fraction if args.ring_fraction is not None else _study.RING_FRACTION
+        count = round(trajectories * ring_fraction)
         # Antipodal goals only: a ring is here for the head-on conflict through the
         # centre, and the 'skew' layout's goal one seat further round does not force one.
         initial_states, goal_states, kind_counts = _study.build_rollouts(
@@ -235,7 +242,8 @@ def main() -> None:
                 + _study.format_schedule(pilot_schedule(
                     half_width, steps, args.rounds, trajectories,
                     args.epochs, args.max_train_steps))
-                + f"  # {count} of the {trajectories} episodes per round start from ring\n"
+                + f"  # {count} of the {trajectories} episodes per round ({ring_fraction:.0%}) "
+                f"start from ring\n"
                 f"  # layouts of radius {_study.RADIUS_RANGE[0]}-{max_radius}; closest starting pair\n"
                 f"  # {closest:.3f} (d_safe={d_safe}).\n"
                 + layout_summary + "\n"
@@ -247,7 +255,7 @@ def main() -> None:
                 f"wrote {out_path.relative_to(PROJECT_ROOT)} "
                 f"(+-{half_width}, {density:.3f} robots/m^2, {steps} steps, "
                 f"{args.rounds}x{trajectories} episodes, {frames} frames/round, "
-                f"~{estimate:.1f} h)"
+                f"{ring_fraction:.0%} rings, ~{estimate:.1f} h)"
             )
 
 

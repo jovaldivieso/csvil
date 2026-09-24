@@ -32,10 +32,11 @@ policy learns from ego observations plus masked neighbour observations. Policy h
 | `learning/config_loaders.py` | `DEFAULT_DAGGER_TRAINING_CONFIG` — every key the `training:` section accepts |
 | `learning/dagger/dagger_config.py`, `dagger_trainer.py`, `rollouts.py` | Validation, the DAgger loop, collection and eval |
 | `test/config/multi_unicycle2_casadi_config.yaml` | Template every study scenario config is derived from |
-| `test/config/generate_fleet_configs.py` | → `test/config/study/unicycle2_fleet_NN.yaml` (random-goal scenario) |
+| `test/config/generate_fleet_configs.py` | → `test/config/study/unicycle2_fleet_NN.yaml` (the training/expert scenario) |
 | `test/config/generate_circle_configs.py` | → `test/config/study/circle/unicycle2_circle_NN.yaml` (antipodal ring) |
-| `test/config/generate_density_configs.py` | → `test/config/study/density/unicycle2_nNN_d<factor>.yaml` (density sweep) |
+| `test/config/generate_eval_configs.py` | → `test/config/study/arena/`, `fleet/`, `density/` (the three evaluation axes) |
 | `test/plot_scenarios.py` | Scenario layouts (starts, goals, d_collision, visibility) as PNG |
+| `test/make_mock_checkpoints.py` | Untrained checkpoints, for testing the evaluation pipeline without training |
 | `learning/config/study/generate_study_policy_configs.py` | → study 2 policy configs (see below) |
 | `train.sh` | Parallel Docker training: `train.sh <experiment> <policy_dir> <expert_dir>`, every policy × expert × seed |
 | `eval.sh` | Parallel Docker evaluation: `eval.sh <experiment> [random|density|circle|all]` |
