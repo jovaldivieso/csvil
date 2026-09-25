@@ -9,14 +9,23 @@ episodes) and reports aggregate success/failure-mode rates plus
 per-control-tick inference-time statistics against --dt, to answer whether
 each is real-time (per-tick computation time <= dt).
 
-Edit MODES below to choose what to compare; everything else (system,
-configs, sample sizes, step budget, dt) is a CLI flag. Example:
+--checkpoints picks what to compare, or MODES below when the flag is absent.
+Everything else (system, configs, sample sizes, step budget, dt) is a CLI flag:
 
     python test/evaluate_checkpoints.py --num-steps 250 --dt 0.05
+    python test/evaluate_checkpoints.py \
+        --checkpoints round0=mlp:outputs/.../mlp_dagger_iter_000.pt \
+                      round1=mlp:outputs/.../mlp_dagger_iter_001.pt
+    python test/evaluate_checkpoints.py --checkpoint-dir outputs/.../<run>
+
+The last form compares every round of one run: DAgger saves a checkpoint per round and
+the run keeps the *latest*, not the best, so which round a run ends on is a question the
+training summary raises and this answers.
 """
 import os
 import sys
 import argparse
+import glob
 import time
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -222,6 +231,15 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--checkpoints", nargs="+", default=None, metavar="NAME=TYPE:PATH",
+        help="checkpoints to compare, e.g. round0=mlp:outputs/.../mlp_dagger_iter_000.pt; "
+             "replaces MODES",
+    )
+    parser.add_argument(
+        "--checkpoint-dir", default=None,
+        help="a run directory: compares every <type>_dagger_iter_NNN.pt in it, in order",
+    )
+    parser.add_argument(
         "--system",
         type=str.lower,
         default="multi_robot",
@@ -273,6 +291,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_modes(args) -> dict[str, tuple[str, str]]:
+    """What to compare: --checkpoint-dir, --checkpoints, or the MODES constant."""
+    if args.checkpoint_dir and args.checkpoints:
+        raise SystemExit("pass either --checkpoint-dir or --checkpoints, not both.")
+
+    if args.checkpoint_dir:
+        directory = (args.checkpoint_dir if os.path.isabs(args.checkpoint_dir)
+                     else os.path.join(PROJECT_ROOT, args.checkpoint_dir))
+        # <policy_type>_dagger_iter_NNN.pt are the per-round checkpoints; the run's
+        # <policy_type>_dagger_checkpoint.pt is the one it leaves behind, added as
+        # 'final' so a comparison shows what an evaluation would otherwise pick up.
+        rounds = sorted(glob.glob(os.path.join(directory, "*_dagger_iter_*.pt")))
+        if not rounds:
+            raise SystemExit(f"no *_dagger_iter_*.pt in {args.checkpoint_dir}")
+        modes = {}
+        for path in rounds:
+            policy_type = os.path.basename(path).split("_dagger_iter_")[0]
+            round_index = int(os.path.basename(path).split("_iter_")[1].split(".")[0])
+            modes[f"round{round_index}"] = (policy_type, path)
+        latest = glob.glob(os.path.join(directory, "*_dagger_checkpoint.pt"))
+        if latest:
+            policy_type = os.path.basename(latest[0]).split("_dagger_checkpoint")[0]
+            modes["final"] = (policy_type, latest[0])
+        return modes
+
+    if args.checkpoints:
+        modes = {}
+        for entry in args.checkpoints:
+            name, _, rest = entry.partition("=")
+            policy_type, _, path = rest.partition(":")
+            if not (name and policy_type and path):
+                raise SystemExit(f"expected NAME=TYPE:PATH, got '{entry}'")
+            modes[name] = (policy_type, path)
+        return modes
+
+    return MODES
+
+
 def main():
     args = parse_args()
     device = torch.device(args.device) if args.device else get_inference_device()
@@ -289,8 +345,9 @@ def main():
     print(f"sample size per mode: {n_config} config + {n_random} random = {n_config + n_random} episodes")
     print(f"num_robots={num_robots}, dt={args.dt}s")
 
+    modes = resolve_modes(args)
     results = {}
-    for name, (policy_type, checkpoint_path) in MODES.items():
+    for name, (policy_type, checkpoint_path) in modes.items():
         results[name] = evaluate_mode(
             name, policy_type, checkpoint_path, validated_config, initial_states, goal_states, device, num_robots,
             num_steps=args.num_steps,

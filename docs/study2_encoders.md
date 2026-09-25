@@ -41,7 +41,7 @@ trains on everything collected so far.
 | Expert share (beta) | 0.5, −0.25 per round once in-training eval success exceeds 0.5 |
 | Backtrack recovery | a stuck episode is replayed 75% expert-driven, +0.25 per failed attempt |
 | Action noise | 0.03 |
-| In-training eval | 20 episodes, scenario tolerances |
+| In-training eval | 20 episodes (`data_mid`), one round's worth (`data_mid_flow`), scenario tolerances |
 
 **Training scenario:** random starts and goals in a workspace scaled to
 **0.167 robots/m²** at every fleet size (±1.73 / ±2.45 / ±3.0 / ±3.46 m for

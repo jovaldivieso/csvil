@@ -555,6 +555,7 @@ def run_evaluation(
     tolerance_overrides: Mapping[str, float] | None = None,
     action_noise_std: float = 0.0,
     output_path: str | None = None,
+    video_episode: int = 1,
     device_override: str | None = None,
 ):
     if tolerance_overrides:
@@ -977,18 +978,39 @@ def run_evaluation(
     )
     print(f"Plot saved to {output_path}")
 
+    # The plot above shows every rollout at once, which is what a still image is for.
+    # An animation of the same thing is unreadable: all episodes move simultaneously and
+    # nothing can be followed. So the video shows one episode -- first the expert driving
+    # it, then the policy from the same start -- which is the comparison the figure is
+    # about. video_episode=0 restores the old all-at-once behaviour.
+    video_trajectories = all_trajectories
+    video_labels = path_labels
+    video_colors = trajectory_colors
+    video_styles = trajectory_line_styles
+    video_goal_states = all_goal_states
+    video_phases = [num_expert, num_policy]
+    if video_episode and num_expert and num_policy:
+        index = min(max(int(video_episode), 1), min(num_expert, num_policy)) - 1
+        video_trajectories = [expert_trajectories[index], policy_trajectories[index]]
+        video_labels = ["Expert", f"{policy_display_name} Policy"]
+        video_colors = ["tab:blue", "tab:orange"]
+        video_styles = ["--", "-"]
+        video_goal_states = [rollout_goal_states[index], rollout_goal_states[index]]
+        video_phases = [1, 1]
+        print(f"Video shows rollout {index + 1} of {num_policy}: expert first, then policy")
+
     video_path = save_xy_rollout_video(
         simulator=simulator,
-        trajectories=all_trajectories,
+        trajectories=video_trajectories,
         path_to_output=output_path,
         title=comparison_title,
         show_heading=show_heading,
         fps=12,
-        path_labels=path_labels,
-        trajectory_colors=trajectory_colors,
-        trajectory_line_styles=trajectory_line_styles,
-        phase_lengths=[num_expert, num_policy],
-        goal_states=all_goal_states,
+        path_labels=video_labels,
+        trajectory_colors=video_colors,
+        trajectory_line_styles=video_styles,
+        phase_lengths=video_phases,
+        goal_states=video_goal_states,
     )
     if video_path is not None:
         print(f"Video saved to {video_path}")
@@ -1119,6 +1141,11 @@ def main():
         help="path to generated PDF plot",
     )
     parser.add_argument(
+        "--video-episode", type=int, default=1,
+        help="which rollout the MP4 shows, expert first and then the policy from the same "
+             "start (default 1). 0 animates every rollout at once, which is hard to follow",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=None,
@@ -1154,6 +1181,7 @@ def main():
         tolerance_overrides=tolerance_overrides,
         action_noise_std=args.action_noise_std,
         output_path=args.output_path,
+        video_episode=args.video_episode,
         device_override=args.device,
     )
 

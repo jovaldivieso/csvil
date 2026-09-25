@@ -45,7 +45,7 @@ training:
   expert_mix_decay_after_eval_success: 0.5
   expert_mix_beta_recovery: 0.75
   expert_mix_beta_recovery_increment: 0.25
-  eval_episodes: 20
+  eval_episodes: 480
   workspace_bounds: [-1.732, 1.732]
   # 240 of the 480 episodes per round (50%) start from ring
   # layouts of radius 2.0-1.732; closest starting pair

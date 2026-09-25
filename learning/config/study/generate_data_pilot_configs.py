@@ -100,6 +100,7 @@ def pilot_schedule(
     trajectories: int,
     epochs: float,
     max_train_steps: int | None,
+    eval_episodes: int,
 ) -> dict[str, object]:
     schedule = {
         "dagger_iterations": rounds,
@@ -116,7 +117,7 @@ def pilot_schedule(
         # frames would all be pure-expert ones.
         "expert_mix_beta_recovery": 0.75,
         "expert_mix_beta_recovery_increment": 0.25,
-        "eval_episodes": 20,
+        "eval_episodes": eval_episodes,
         "workspace_bounds": [-half_width, half_width],
     }
     if max_train_steps is not None:
@@ -151,6 +152,16 @@ def parse_args() -> argparse.Namespace:
         help=f"share of each round that starts from an antipodal ring layout "
              f"(default {_study.RING_FRACTION:.2f}, the study's). The rest falls back to "
              f"the expert config's randomized goals",
+    )
+    parser.add_argument(
+        "--eval-episodes", default="20",
+        help="episodes of the in-training evaluation per round, or 'match' for one "
+             "round's worth. That evaluation gates the expert-share decay "
+             "(expert_mix_decay_after_eval_success), so at 20 episodes the gate sits "
+             "inside its own noise: +-0.11 around a threshold of 0.5. It also draws its "
+             "first min(rings, episodes) episodes from the ring layouts, so the count "
+             "sets the mix too, and 'match' is the count that reproduces the training "
+             "mix exactly",
     )
     parser.add_argument("--min-episodes", type=int, default=50,
                         help="floor for --frames-per-round (default 50), so a large fleet "
@@ -200,6 +211,10 @@ def main() -> None:
         max_radius = min(_study.RADIUS_RANGE[1], half_width)
         ring_fraction = args.ring_fraction if args.ring_fraction is not None else _study.RING_FRACTION
         count = round(trajectories * ring_fraction)
+        # The evaluation takes its first min(rings, episodes) episodes from the ring list
+        # and samples the rest, so one round's worth of episodes reproduces the training
+        # mix: rings/trajectories = ring_fraction either way.
+        eval_episodes = trajectories if args.eval_episodes == "match" else int(args.eval_episodes)
         # Antipodal goals only: a ring is here for the head-on conflict through the
         # centre, and the 'skew' layout's goal one seat further round does not force one.
         initial_states, goal_states, kind_counts = _study.build_rollouts(
@@ -241,7 +256,7 @@ def main() -> None:
                 + "\ntraining:\n"
                 + _study.format_schedule(pilot_schedule(
                     half_width, steps, args.rounds, trajectories,
-                    args.epochs, args.max_train_steps))
+                    args.epochs, args.max_train_steps, eval_episodes))
                 + f"  # {count} of the {trajectories} episodes per round ({ring_fraction:.0%}) "
                 f"start from ring\n"
                 f"  # layouts of radius {_study.RADIUS_RANGE[0]}-{max_radius}; closest starting pair\n"
