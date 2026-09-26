@@ -368,7 +368,10 @@ def evaluate_fleet(
                 reached_goal = True
                 break
 
-        successes += int(reached_goal)
+        # An episode that collided is a collision even if every robot later reached its
+        # goal: episodes no longer stop at the first collision, so reaching the goals is
+        # not on its own a success. The three outcomes stay mutually exclusive.
+        successes += int(reached_goal and not collided)
         collisions += int(collided)
         at_goal = robots_at_goal(simulator, state)
         robot_successes += int((at_goal & ~ever_collided).sum())
