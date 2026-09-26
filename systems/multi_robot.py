@@ -413,13 +413,34 @@ class MultiRobotSimulator(DynamicsSimulator):
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
         split_action = self._split_action(action, validate=validate)
-        next_parts = [
-            sim.step(robot_state, robot_action)
-            for sim, robot_state, robot_action in zip(self.simulators, split_state, split_action)
-        ]
+        next_parts = []
+
+        for sim, robot_state, robot_action in zip(
+            self.simulators,
+            split_state,
+            split_action,
+        ):
+            next_state = sim.step(robot_state, robot_action)
+
+            # keep position inside the configured workspace
+            if hasattr(sim, "workspace_bounds"):
+                low, high = sim.workspace_bounds
+                position_indices = sim.position_indices
+
+                next_state = next_state.copy()
+                next_state[list(position_indices)] = np.clip(
+                    next_state[list(position_indices)],
+                    low,
+                    high,
+                )
+
+            next_parts.append(next_state)
+
         next_state = np.concatenate(next_parts)
+
         self.state = next_state.copy()
         self.time += 1
+
         return next_state
 
     def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:

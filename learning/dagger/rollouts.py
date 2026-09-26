@@ -796,9 +796,16 @@ def collect_dagger_rollouts(
             raise RuntimeError("'frame_builder' produced no frames for the rollout.")
         for frame_buffer in episode_frame_buffers:
             if not frame_buffer:
-                continue
+                raise RuntimeError(
+                    "DAgger produced an empty frame buffer for a non-discarded episode."
+                )
+
             for frame_data in frame_buffer:
+                print(frame_data)
                 dataset_writer.add_frame(frame_data)
+
+            dataset_writer.save_episode()
+                 
         successful_episodes += 1
         reached_goal_count += int(reached_goal)
         steps_taken.append(int(rollout_steps))

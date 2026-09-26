@@ -753,6 +753,10 @@ class DaggerTrainer:
                     policy_reset_fn=reset_policy_state,
                     frame_builder=frames,
                 )
+                if metrics.num_episodes == 0:
+                    raise RuntimeError(
+                        "DAgger aggregation produced no valid episodes; skipping retraining."
+                    )
             finally:
                 writer.finalize()
                 del writer

@@ -1,4 +1,3 @@
-from importlib.resources import path
 import os
 import yaml
 import subprocess
@@ -7,7 +6,7 @@ import warnings
 
 import numpy as np
 
-from .planner import Planner
+from .planner import Planner, PlannerSolveError
 
 class DbLacamPlanner(Planner):
     """
@@ -144,7 +143,8 @@ class DbLacamPlanner(Planner):
             ]
 
             for robot_type, path in self.motion_primitives.items():
-                    command.extend(["--motion", f"{robot_type}={path}"])
+                command.extend(["--motion", f"{robot_type}={path}"])
+                
             process = subprocess.run(
                 command,
                 cwd=self.cwd,
@@ -153,22 +153,22 @@ class DbLacamPlanner(Planner):
             )
 
             if process.returncode != 0:
-                raise RuntimeError(f"db-lacam failed:\n{process.stdout[-2000:]=}\n{process.stderr[-2000:]=}")
+                raise PlannerSolveError(f"db-lacam failed:\n{process.stdout[-2000:]=}\n{process.stderr[-2000:]=}")
             if not os.path.isfile(result_yaml_path):
-                raise RuntimeError(f"db-lacam did not create an output yaml:\n{process.stdout[-2000:]=}\n{process.stderr[-2000:]=}")
+                raise PlannerSolveError(f"db-lacam did not create an output yaml:\n{process.stdout[-2000:]=}\n{process.stderr[-2000:]=}")
 
             with open(result_yaml_path, "r", encoding="utf-8") as file:
                 result_data = yaml.safe_load(file)
 
         if not isinstance(result_data, dict):
-            raise RuntimeError(
+            raise PlannerSolveError(
                 f"db-lacam output yaml must be a mapping, got {type(result_data).__name__}"
             )
 
         # extracts one action plan per robot from db-lacam result:
         trajectories = result_data.get("result")
         if not isinstance(trajectories, list) or len(trajectories) != len(self.robots):
-            raise RuntimeError(
+            raise PlannerSolveError(
                 f"db-lacam output yaml must contain a 'result' list with {len(self.robots)} entries"
             )
 
@@ -264,7 +264,7 @@ class DbLacamPlanner(Planner):
             self.step_idx += 1
             return actions
 
-        except RuntimeError as error:
+        except PlannerSolveError as error:
             
             if self.raise_planning_error:
                 raise
