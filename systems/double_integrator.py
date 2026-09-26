@@ -24,6 +24,8 @@ class DoubleIntegrator(DynamicsSimulator):
         self.nx = 4
         self.nu = 2
         self.error_tolerance = float(config.get("error_tolerance", 0.05))
+        
+        self.db_lacam_robot_type = "integrator2_2d_v0"
 
     def predict_next_state(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)

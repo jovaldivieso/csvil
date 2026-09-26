@@ -1,3 +1,4 @@
+from importlib.resources import path
 import os
 import yaml
 import subprocess
@@ -53,7 +54,9 @@ class DbLacamPlanner(Planner):
         
         # run_dblacam requires time limit: 
         self.time_limit_ms = int(self.config.get("time_limit_ms", 60_000))
-
+        
+        self.motion_primitives = self.config.get("motion_primitives", {})
+        
         # raises planning error:
         self.raise_planning_error = bool(self.config.get("raise_planning_error", True))
 
@@ -140,6 +143,8 @@ class DbLacamPlanner(Planner):
                 "-t", str(self.time_limit_ms),
             ]
 
+            for robot_type, path in self.motion_primitives.items():
+                    command.extend(["--motion", f"{robot_type}={path}"])
             process = subprocess.run(
                 command,
                 cwd=self.cwd,
