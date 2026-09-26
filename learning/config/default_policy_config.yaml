@@ -8,3 +8,6 @@ model:
     phi_dims: [128, 128]
     rho_dims: [128]
     pool_type: max
+
+training:
+  workspace_bounds: [-3.0, 3.0]

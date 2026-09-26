@@ -24,4 +24,3 @@ robots:
   config:
     dt: 0.1
     max_vel: 0.5
-    workspace_bounds: [0.0, 8.0]
