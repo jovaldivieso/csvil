@@ -57,6 +57,60 @@ def _print_yaml_block(title: str, data: dict[str, Any]) -> None:
         print(f"  {line}")
 
 
+def _summarize_cli_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "experiment_name": args.experiment_name,
+        "system": args.system,
+        "expert_config": args.expert_config,
+        "planner": args.planner,
+        "dagger_iterations": args.dagger_iterations,
+        "trajectories_per_iteration": args.trajectories_per_iteration,
+        "steps_per_trajectory": args.steps_per_trajectory,
+        "action_noise_std": args.action_noise_std,
+        "training_curriculum": args.training_curriculum,
+        "round_seeds": args.round_seeds,
+        "restart_round_seed": args.restart_round_seed,
+        "initial_states_count": len(parse_initial_states_argument(args.initial_states)) if isinstance(args.initial_states, str) and args.initial_states else (len(args.initial_states) if args.initial_states is not None else 0),
+        "goal_states_count": len(parse_goal_states_argument(args.goal_states)) if isinstance(args.goal_states, str) and args.goal_states else (len(args.goal_states) if args.goal_states is not None else 0),
+        "workspace_bounds": args.workspace_bounds,
+        "eval_episodes": args.eval_episodes,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "policy_config": str(args.policy_config),
+        "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir is not None else None,
+        "seed": args.seed,
+    }
+
+
+def _summarize_dagger_config(cfg: Any) -> dict[str, Any]:
+    return {
+        "system": cfg.system,
+        "planner_name": cfg.planner_name,
+        "dagger_iterations": cfg.dagger_iterations,
+        "trajectories_per_iteration": cfg.trajectories_per_iteration,
+        "steps_per_trajectory": cfg.steps_per_trajectory,
+        "action_noise_std": cfg.action_noise_std,
+        "expert_mix_beta_start": cfg.expert_mix_beta_start,
+        "expert_mix_beta_end": cfg.expert_mix_beta_end,
+        "expert_mix_beta_decay_rate": cfg.expert_mix_beta_decay_rate,
+        "adaptive_beta_recovery": cfg.adaptive_beta_recovery,
+        "expert_mix_beta_recovery": cfg.expert_mix_beta_recovery,
+        "training_curriculum": cfg.training_curriculum,
+        "initial_states_count": len(cfg.initial_states) if cfg.initial_states is not None else 0,
+        "goal_states_count": len(cfg.goal_states) if cfg.goal_states is not None else 0,
+        "workspace_bounds": cfg.workspace_bounds,
+        "eval_episodes": cfg.eval_episodes,
+        "eval_seed_start": cfg.eval_seed_start,
+        "batch_size": cfg.batch_size,
+        "learning_rate": cfg.learning_rate,
+        "prediction_horizon": cfg.prediction_horizon,
+        "observation_horizon": cfg.observation_horizon,
+        "policy_type": cfg.policy_type,
+        "checkpoint_dir": str(cfg.checkpoint_dir),
+        "seed": cfg.seed,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train a policy with DAgger")
     p.add_argument("--experiment-name", required=True)
@@ -201,7 +255,10 @@ def save_experiment_configs(args: argparse.Namespace, experiment_dir: Path,  rep
 
 def main() -> None:
     args = parse_args()
-    _print_yaml_block("CLI arguments (train_dagger.py, unset flags fall back to policy YAML/defaults)", vars(args))
+    _print_yaml_block(
+        "CLI arguments (summary; full initial_states/goal_states omitted)",
+        _summarize_cli_args(args),
+    )
     validated = load_and_validate_system_config(args.system, args.expert_config)
     training_config = load_dagger_training_config(args.policy_config)
 
@@ -338,7 +395,10 @@ def main() -> None:
         seed=int(option("seed", 99)),
         max_train_steps=option("max_train_steps", None),
     )
-    _print_yaml_block("Resolved DaggerConfig (CLI + policy YAML + hardcoded defaults, fully merged)", asdict(cfg))
+    _print_yaml_block(
+        "Resolved DaggerConfig (summary; full explicit states omitted)",
+        _summarize_dagger_config(cfg),
+    )
     DaggerTrainer(cfg).run()
 
 if __name__ == "__main__":

@@ -4,11 +4,11 @@ d_collision: 1.0
 inter_robot_visibility_radius: 4.0
 horizon: 40
 mode: mpc
-Q_diag: [100.0, 100.0, 10.0, 100.0, 1.0, 
-         100.0, 100.0, 10.0, 100.0, 1.0,
-         100.0, 100.0, 10.0, 100.0, 1.0,
-         100.0, 100.0, 10.0, 100.0, 1.0]
-R_weight: 0.1
+Q_diag: [100.0, 100.0, 100.0, 100.0, 100.0, 
+         100.0, 100.0, 100.0, 100.0, 100.0,
+         100.0, 100.0, 100.0, 100.0, 100.0,
+         100.0, 100.0, 100.0, 100.0, 100.0]
+R_weight: 0.5
 terminal_cost_multiplier: 1000.0
 collision_slack_penalty_weight: 1000000.0
 initial_state_seed: 0
@@ -20,6 +20,6 @@ robots:
   config:
     dt: 0.05
     max_linear_accel: 3.0
-    max_angular_accel: 15.0
-    max_linear_vel: 1.0
-    max_angular_vel: 2.0
+    max_angular_accel: 3.0
+    max_linear_vel: 4.0
+    max_angular_vel: 1.0

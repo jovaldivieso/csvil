@@ -77,8 +77,10 @@ csvil/
 │   │   ├── default_policy_config.yaml           # Used when --policy-config is omitted (MLP, no DAgger schedule)
 │   │   ├── gnn_encoder_mlp_policyhead_config.yaml
 │   │   ├── transformer_encoder_mlp_policyhead_config.yaml
-│   │   ├── multi_unicycle2_casadi_flow_config.yaml
-│   │   ├── multi_unicycle2_casadi_mlp_config.yaml
+│   │   ├── 2_multi_unicycle2_casadi_flow_config.yaml
+│   │   ├── 2_multi_unicycle2_casadi_mlp_config.yaml
+│   │   ├── 2_multi_unicycle2_casadi_safeflow_config.yaml
+│   │   ├── 4_multi_unicycle2_casadi_flow_config.yaml
 │   │   ├── multi_double_integrator_casadi_flow_config.yaml
 │   │   ├── multi_double_integrator_casadi_mlp_config.yaml
 │   │   └── unicycle2_casadi_mlp_config.yaml
@@ -109,9 +111,9 @@ csvil/
 ├── systems/
 │   ├── dynamics.py            # Base simulator protocol and validation
 │   ├── single_integrator.py   # Example simulator subclass (holonomic, first-order)
-│   ├── double_integrator.py   # Example simulator subclass (holonomic)
+│   ├── double_integrator.py   # Example simulator subclass (holonomic, second-order)
 │   ├── unicycle1.py           # Example simulator subclass (non-holonomic, first-order)
-│   ├── unicycle2.py           # Example simulator subclass (non-holonomic)
+│   ├── unicycle2.py           # Example simulator subclass (non-holonomic, second-order)
 │   ├── collision_checker.py   # Pairwise fleet collision detection helper
 │   ├── initial_state_utils.py # Shared initial/goal-state parsing and normalization
 │   ├── multi_robot.py         # Fleet composition wrapper over per-robot simulators
@@ -123,10 +125,12 @@ csvil/
 │   └── train_dagger_multi_robot/  # Multi-robot DAgger checkpoints (MLP, flow, or safeflow)
 └── test/
     ├── config/
-    │   ├── multi_unicycle2_casadi_config.yaml       # Canonical example (used throughout this README)
+    │   ├── 2_multi_unicycle2_casadi_config.yaml     # Canonical example (used throughout this README)
+    │   ├── 4_multi_unicycle2_casadi_config.yaml
     │   ├── multi_double_integrator_casadi_config.yaml
     │   └── multi_robot_dblacam_config.yaml          # Long-form robots: list example (distinct per-robot `start` states)
     ├── evaluate_policy.py           # CLI for rollout/evaluation across policy families
+    ├── evaluate_checkpoints.py      # CLI to compare multiple checkpoints/policy_types head-to-head (success rates + inference-time/real-time verdict)
     ├── plot_expert_trajectories.py  # Canonical single/multi-robot expert analysis CLI (plots + optional MP4)
     └── test_simulator_contracts.py  # Schema consistency tests
 ```
@@ -296,15 +300,15 @@ offline dataset is required.
 ```bash
 python learning/train_dagger.py \
 --system multi_robot \
---expert-config test/config/multi_unicycle2_casadi_config.yaml \
---policy-config learning/config/multi_unicycle2_casadi_flow_config.yaml \
+--expert-config test/config/2_multi_unicycle2_casadi_config.yaml \
+--policy-config learning/config/2_multi_unicycle2_casadi_flow_config.yaml \
 --experiment-name 2_unicycle2_casadi_deepset_flow
 ```
 
 That's the whole command — the DAgger schedule, expert-mixing, curriculum, and
-evaluation cadence all come from `multi_unicycle2_casadi_flow_config.yaml`'s
+evaluation cadence all come from `2_multi_unicycle2_casadi_flow_config.yaml`'s
 `training:` block (see above). To train the MLP baseline instead, swap
-`--policy-config` for `learning/config/multi_unicycle2_casadi_mlp_config.yaml`;
+`--policy-config` for `learning/config/2_multi_unicycle2_casadi_mlp_config.yaml`;
 the command is otherwise identical, since both policies share the same
 DeepSet neighbor encoder and DAgger loop.
 
@@ -319,7 +323,7 @@ Checkpoints land under `--checkpoint-dir` (default
 python test/evaluate_policy.py \
   --system multi_robot \
   --policy-type flow \
-  --config test/config/multi_unicycle2_casadi_config.yaml \
+  --config test/config/2_multi_unicycle2_casadi_config.yaml \
   --model-dir outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_flow/flow_dagger_iter_001.pt \
   --num-steps 200 \
   --action-noise-std 0.03 \
@@ -378,7 +382,7 @@ a different `robots.num_robots` — no retraining required:
 python test/evaluate_policy.py \
   --system multi_robot \
   --policy-type flow \
-  --config test/config/eval_multi_unicycle2_casadi_config.yaml \
+  --config test/config/4_multi_unicycle2_casadi_config.yaml \
   --model-dir outputs/train_dagger_multi_robot/2_unicycle2_casadi_deepset_flow/flow_dagger_checkpoint.pt \
   --num-steps 200 \
   --action-noise-std 0.03 \
@@ -387,7 +391,7 @@ python test/evaluate_policy.py \
   --tolerance-overrides '{"pos_tol": 0.2, "theta_tol": 1.1, "vel_tol": 0.5, "omega_tol": 0.5}'
 ```
 
-Here `eval_multi_unicycle2_casadi_config.yaml` sets `robots.num_robots: 4` (a
+Here `4_multi_unicycle2_casadi_config.yaml` sets `robots.num_robots: 4` (a
 4-way rotational swap), while the checkpoint was trained on 2 robots — the
 encoder's per-neighbor schema and observation horizon must still match, but
 `neighbor_slots` adapts automatically to the runtime fleet size.
@@ -477,7 +481,7 @@ docker compose run --rm csvil \
 python test/plot_expert_trajectories.py \
 --system multi_robot \
 --planner casadi \
---config test/config/multi_unicycle2_casadi_config.yaml \
+--config test/config/2_multi_unicycle2_casadi_config.yaml \
 --num-steps 200 \
 --action-noise-std 0.03
 ```
@@ -496,7 +500,7 @@ docker compose run --rm csvil \
 python test/plot_expert_trajectories.py \
 --system multi_robot \
 --planner casadi \
---config test/config/multi_unicycle2_casadi_config.yaml \
+--config test/config/2_multi_unicycle2_casadi_config.yaml \
 --num-steps 200 \
 --initial-states '[[[-2.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 3.14, 0.0, 0.0]]]' \
 --goal-states '[[[2.0, 0.0, 0.0], [-2.0, 0.0, 3.14]]]' \

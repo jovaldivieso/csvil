@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import copy
-import csv
 import gc
 from typing import Any, Mapping
 
 import numpy as np
 import torch
+import yaml
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -212,63 +212,39 @@ class DaggerTrainer:
 
         self.cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Print rich startup diagnostic logs
-        print("Starting DAgger training")
-        print(f"Device: {self.device}")
-        print(f"Initial dataset root: {self.cfg.dataset_root}")
-        print(f"Aggregation action noise std: {self.cfg.action_noise_std:.6f}")
-        print(f"Evaluation action noise std: {self.cfg.eval_action_noise_std:.6f}")
-        print(f"Action noise seed: {self.action_noise_seed}")
+        # Keep startup logs brief and non-redundant; the full config summary is already printed above.
+        print(f"Starting DAgger training for {self.cfg.system} ({self.cfg.policy_type})")
+        print(f"Device: {self.device}; dataset_root={self.cfg.dataset_root}")
+        print(
+            "Schedule: "
+            f"rounds={self.cfg.dagger_iterations}, "
+            f"trajectories_per_round={self.cfg.trajectories_per_iteration}, "
+            f"steps_per_trajectory={self.cfg.steps_per_trajectory}, "
+            f"target_epochs={self.cfg.target_epochs_per_round}"
+        )
         if self.cfg.expert_mix_beta_decay_rate is not None:
             print(
-                "Expert execution mixing schedule: "
-                f"beta_start={self.cfg.expert_mix_beta_start:.3f}, "
-                f"beta_decay_rate={self.cfg.expert_mix_beta_decay_rate:.3f}/round, "
-                f"beta_floor=0.000, "
-                f"decay_after_eval_success={self.cfg.expert_mix_decay_after_eval_success if self.cfg.expert_mix_decay_after_eval_success is not None else 'none'}"
+                "Expert beta: "
+                f"start={self.cfg.expert_mix_beta_start:.3f}, "
+                f"decay_rate={self.cfg.expert_mix_beta_decay_rate:.3f}/round, "
+                f"floor=0.000"
             )
         else:
             print(
-                "Expert execution mixing schedule: "
-                f"beta_start={self.cfg.expert_mix_beta_start:.3f}, "
-                f"beta_end={self.cfg.expert_mix_beta_end:.3f}, "
-                f"decay_rounds={self.cfg.dagger_iterations}, "
-                f"decay_after_eval_success={self.cfg.expert_mix_decay_after_eval_success if self.cfg.expert_mix_decay_after_eval_success is not None else 'none'}"
+                "Expert beta: "
+                f"start={self.cfg.expert_mix_beta_start:.3f}, "
+                f"end={self.cfg.expert_mix_beta_end:.3f}"
             )
         print(
-            "Backtrack recovery schedule: "
-            f"beta_recovery={self.cfg.expert_mix_beta_recovery:.3f}, "
-            f"beta_recovery_increment={self.cfg.expert_mix_beta_recovery_increment:.3f} "
-            "(escalates toward 1.0 per retry at the same backtracked state; "
-            "resets to beta_recovery fresh on every new backtrack)"
+            "Noise: "
+            f"aggregation_std={self.cfg.action_noise_std:.6f}, "
+            f"eval_std={self.cfg.eval_action_noise_std:.6f}, "
+            f"seed={self.action_noise_seed}"
         )
-        print(f"MLP hidden dims: {list(self.cfg.mlp_hidden_dims)}")
-        print(f"Prediction horizon: {self.cfg.prediction_horizon}")
-        print(f"Policy type: {self.cfg.policy_type}")
-        if self.cfg.policy_type in {"flow", "safeflow"}:
-            print(
-                "Flow inference: "
-                f"num_inference_steps={self.cfg.flow_config.num_inference_steps}"
-            )
-            action_scale = np.broadcast_to(
-                np.asarray(self.simulator.simulators[0].max_action, dtype=float),
-                (self.action_dim,),
-            ).tolist()
-            print(
-                "Flow action normalization: "
-                f"action_scale={action_scale} "
-                "(per-dimension divisor against the flow-matching noise prior, from this robot's own max_action)"
-            )
         if self.cfg.start_with_aggregation:
-            print("Fresh DAgger mode: collecting round-0 data before any offline pretraining.")
+            print("Mode: fresh DAgger collection before any offline pretraining")
         else:
-            print("Initial offline training pass starts from the current expert dataset.")
-        print(
-            "Epoch-target schedule: "
-            f"target_epochs={self.cfg.target_epochs_per_round}, "
-            f"max={self.cfg.max_train_steps if self.cfg.max_train_steps is not None else 'none'}"
-        )
-        print(f"Decentralized policy neighbor slots: {self.neighbor_slots}")
+            print("Mode: resume from existing expert dataset")
 
     def train_policy_steps(self, dataloader: DataLoader, num_steps: int) -> float:
         if self.policy is None or self.optimizer is None or self.device is None:
@@ -431,19 +407,46 @@ class DaggerTrainer:
             print_rollout_metrics(label, "eval", metrics)
         return metrics
 
-    def save_results(
+    def persist_round_summary(
         self,
-        train_loss: float,
+        round_index: int,
+        train_loss: float | None,
         eval_metrics: DaggerEvalMetrics | None,
         aggregation_metrics: DaggerEvalMetrics | None = None,
+        latest_checkpoint: str | None = None,
+        iteration_checkpoint: str | None = None,
     ) -> None:
-        """
-        saves training and evaluation results to results.csv
-        """
+        self.save_round_summary(
+            round_index=round_index,
+            train_loss=train_loss,
+            eval_metrics=eval_metrics,
+            aggregation_metrics=aggregation_metrics,
+            latest_checkpoint=latest_checkpoint,
+            iteration_checkpoint=iteration_checkpoint,
+        )
 
-        path_to_results = self.cfg.checkpoint_dir / "results.csv"
+    def save_round_summary(
+        self,
+        round_index: int,
+        train_loss: float | None,
+        eval_metrics: DaggerEvalMetrics | None,
+        aggregation_metrics: DaggerEvalMetrics | None = None,
+        latest_checkpoint: str | None = None,
+        iteration_checkpoint: str | None = None,
+    ) -> None:
+        """Persist a round-by-round YAML summary with success and failure stats."""
 
-        results = {
+        summary_path = self.cfg.checkpoint_dir / "training_summary.yaml"
+        summary: dict[str, Any]
+        if summary_path.exists():
+            with summary_path.open("r") as f:
+                summary = yaml.safe_load(f) or {}
+        else:
+            summary = {}
+
+        rounds = summary.get("rounds", [])
+        entry: dict[str, Any] = {
+            "round": int(round_index),
             "train_loss": train_loss,
             "aggregation_success_rate": (
                 aggregation_metrics.success_rate
@@ -460,12 +463,102 @@ class DaggerTrainer:
                 if eval_metrics is not None
                 else None
             ),
+            "eval_min_steps": (
+                eval_metrics.min_steps
+                if eval_metrics is not None
+                else None
+            ),
+            "eval_max_steps": (
+                eval_metrics.max_steps
+                if eval_metrics is not None
+                else None
+            ),
+            "eval_num_episodes": (
+                eval_metrics.num_episodes
+                if eval_metrics is not None
+                else None
+            ),
+            "eval_success_by_source": {
+                "config": {
+                    "successes": (
+                        eval_metrics.config_successes
+                        if eval_metrics is not None
+                        else 0
+                    ),
+                    "total": (
+                        eval_metrics.config_num_episodes
+                        if eval_metrics is not None
+                        else 0
+                    ),
+                    "rate": (
+                        100.0 * eval_metrics.config_successes / eval_metrics.config_num_episodes
+                        if eval_metrics is not None and eval_metrics.config_num_episodes > 0
+                        else None
+                    ),
+                },
+                "random": {
+                    "successes": (
+                        eval_metrics.random_successes
+                        if eval_metrics is not None
+                        else 0
+                    ),
+                    "total": (
+                        eval_metrics.random_num_episodes
+                        if eval_metrics is not None
+                        else 0
+                    ),
+                    "rate": (
+                        100.0 * eval_metrics.random_successes / eval_metrics.random_num_episodes
+                        if eval_metrics is not None and eval_metrics.random_num_episodes > 0
+                        else None
+                    ),
+                },
+            },
+            "eval_failure_breakdown": {
+                "collision": (
+                    eval_metrics.collision_failures
+                    if eval_metrics is not None
+                    else 0
+                ),
+                "timeout": (
+                    eval_metrics.timeout_failures
+                    if eval_metrics is not None
+                    else 0
+                ),
+                "solve_failure": (
+                    eval_metrics.solve_failures
+                    if eval_metrics is not None
+                    else 0
+                ),
+            },
         }
-
-        with path_to_results.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=results.keys())
-            writer.writeheader()
-            writer.writerow(results)
+        if latest_checkpoint is not None or iteration_checkpoint is not None:
+            entry["checkpoints"] = {
+                "latest": str(latest_checkpoint) if latest_checkpoint is not None else None,
+                "iteration": str(iteration_checkpoint) if iteration_checkpoint is not None else None,
+            }
+        rounds.append(entry)
+        summary["rounds"] = rounds
+        valid_rates = [
+            round_entry["eval_success_rate"]
+            for round_entry in rounds
+            if round_entry["eval_success_rate"] is not None
+        ]
+        if valid_rates:
+            best_round = max(
+                rounds,
+                key=lambda round_entry: round_entry["eval_success_rate"]
+                if round_entry["eval_success_rate"] is not None
+                else float("-inf"),
+            )
+            summary["best_round"] = best_round["round"]
+            summary["best_success_rate"] = best_round["eval_success_rate"]
+        else:
+            summary["best_round"] = None
+            summary["best_success_rate"] = None
+        summary["latest_round"] = int(round_index)
+        with summary_path.open("w") as f:
+            yaml.safe_dump(summary, f, sort_keys=False)
 
     def save_checkpoints(self, training_round: int) -> None:
         assert self.policy is not None
@@ -532,7 +625,16 @@ class DaggerTrainer:
                 self.cfg.target_epochs_per_round[0],
             )
             initial = self.evaluate_current_policy("Round 0 evaluation")
+            latest_checkpoint = self.cfg.checkpoint_dir / "flow_dagger_checkpoint.pt"
+            iteration_checkpoint = self.cfg.checkpoint_dir / "flow_dagger_iter_000.pt"
             self.save_checkpoints(0)
+            self.persist_round_summary(
+                round_index=0,
+                train_loss=None,
+                eval_metrics=initial,
+                latest_checkpoint=str(latest_checkpoint),
+                iteration_checkpoint=str(iteration_checkpoint),
+            )
             if self.cfg.dagger_iterations == 0:
                 print("No DAgger refinements requested (--dagger-iterations 0).")
                 return
@@ -681,11 +783,21 @@ class DaggerTrainer:
             beta.update_after_evaluation(
                 eval_metrics.success_rate if eval_metrics is not None else None
             )
+            latest_checkpoint = self.cfg.checkpoint_dir / (
+                "flow_dagger_checkpoint.pt" if self.cfg.policy_type in {"flow", "safeflow"} else "mlp_dagger_checkpoint.pt"
+            )
+            iteration_checkpoint = self.cfg.checkpoint_dir / (
+                f"flow_dagger_iter_{index:03d}.pt"
+                if self.cfg.policy_type in {"flow", "safeflow"}
+                else f"mlp_dagger_iter_{index:03d}.pt"
+            )
             self.save_checkpoints(training_round=index)
+            self.persist_round_summary(
+                round_index=index,
+                train_loss=train_loss,
+                eval_metrics=eval_metrics,
+                aggregation_metrics=metrics,
+                latest_checkpoint=str(latest_checkpoint),
+                iteration_checkpoint=str(iteration_checkpoint),
+            )
 
-        # saves final results:
-        self.save_results(
-            train_loss=train_loss,
-            eval_metrics=eval_metrics,
-            aggregation_metrics=metrics,
-        )

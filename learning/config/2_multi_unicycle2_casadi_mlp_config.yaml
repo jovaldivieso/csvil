@@ -9,7 +9,7 @@ model:
   
   deepset:
     phi_dims: [128, 128]
-    rho_dims: [128]
+    rho_dims: [128, 128]
     pool_type: sum              # options: sum, max, mean
 
 # Optional DAgger defaults. Explicit command-line arguments override these values.

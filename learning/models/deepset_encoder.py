@@ -34,7 +34,7 @@ class DeepSetEncoder(ObservationEncoder):
         neighbor_slots: int,
         observation_horizon: int = 1,
         phi_dims: Iterable[int] = (128, 128),
-        rho_dims: Iterable[int] = (128,),
+        rho_dims: Iterable[int] = (128, 128),
         pool_type: str = "max",
     ) -> None:
         super().__init__()

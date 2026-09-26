@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+import yaml
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -156,6 +159,48 @@ class DaggerTrainerSchedulesRoundSeedsTests(unittest.TestCase):
             rounds=3,
         )
         self.assertIsNone(round_seeds)
+
+
+class DaggerTrainerSummaryYamlTests(unittest.TestCase):
+    def test_save_summary_yaml_persists_round_statistics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir)
+            cfg = _minimal_dagger_config(checkpoint_dir=checkpoint_dir)
+            trainer = DaggerTrainer(cfg)
+            metrics = trainer.__class__.__module__
+            del metrics
+
+            from learning.dagger.metrics import DaggerEvalMetrics
+
+            eval_metrics = DaggerEvalMetrics(
+                success_rate=0.7,
+                mean_steps=42.5,
+                min_steps=10,
+                max_steps=80,
+                num_episodes=20,
+                config_successes=3,
+                config_num_episodes=4,
+                random_successes=11,
+                random_num_episodes=16,
+                collision_failures=2,
+                timeout_failures=4,
+                solve_failures=1,
+            )
+            trainer.save_round_summary(
+                round_index=2,
+                train_loss=0.33,
+                eval_metrics=eval_metrics,
+                latest_checkpoint=checkpoint_dir / "flow_dagger_checkpoint.pt",
+                iteration_checkpoint=checkpoint_dir / "flow_dagger_iter_002.pt",
+            )
+            summary_path = checkpoint_dir / "training_summary.yaml"
+            self.assertTrue(summary_path.exists())
+            summary = yaml.safe_load(summary_path.read_text())
+            self.assertEqual(summary["rounds"][0]["round"], 2)
+            self.assertEqual(summary["rounds"][0]["eval_success_rate"], 0.7)
+            self.assertEqual(summary["rounds"][0]["eval_failure_breakdown"]["timeout"], 4)
+            self.assertEqual(summary["best_round"], 2)
+            self.assertEqual(summary["best_success_rate"], 0.7)
 
 
 if __name__ == "__main__":
