@@ -223,3 +223,83 @@ Per policy and scenario this writes a success matrix (training fleet size across
 evaluation fleet size down), success against evaluation fleet size pooled over training
 sizes, and the same split into one panel per training size. Bars are 95% Wilson
 intervals.
+
+### `data_mid_best` on a many-core host
+
+The 200-episode run of the three axes, as it was actually done. `data_mid_best` holds the
+best DAgger round per cell, picked by `test/evaluate_checkpoints.py`; `selection.yaml`
+records which round won and why.
+
+`eval.sh` parallelises over runs, so one scenario caps at 12 concurrent jobs — a third of
+a 32-core host. Running the three scenarios **at once** fills the machine, and the wall
+clock becomes the arena axis alone, about 4.5 h (94 core-h in total: 53 arena, 33 ring,
+9 density). Peak memory is roughly 0.5 GB per job.
+
+```bash
+cd <repo> && git checkout study-encoder && git pull
+docker compose build csvil                     # skip if the image is already built
+
+# outputs/ is gitignored. If the host has outputs/data_mid but not data_mid_best, the
+# selection is reproduced from it -- the best-round file is copied byte for byte -- after
+# scp'ing the 4.6 kB outputs/data_mid_best/selection.yaml across.
+python3 - <<'PY'
+import pathlib, shutil, yaml
+sel = yaml.safe_load(open('outputs/data_mid_best/selection.yaml'))
+for run, info in sorted(sel['runs'].items()):
+    rnd = int(info['round'].removeprefix('round'))
+    src = pathlib.Path(f'outputs/data_mid/models/{run}')
+    dst = pathlib.Path(f'outputs/data_mid_best/models/{run}'); dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src / f'mlp_dagger_iter_{rnd:03d}.pt', dst / 'mlp_dagger_checkpoint.pt')
+    for side in ('policy_config.yaml', 'expert_config.yaml', 'training_summary.yaml'):
+        shutil.copy2(src / side, dst / side)
+    print(run, info['round'], '->', f'mlp_dagger_iter_{rnd:03d}.pt')
+PY
+# identical on both hosts, or the selection was not reproduced:
+md5sum outputs/data_mid_best/models/*/mlp_dagger_checkpoint.pt | sort -k2 | md5sum
+
+# do all 12 checkpoints load? ~2 min
+EPISODES=2 MAX_PARALLEL=4 CONFIGS="test/config/study/arena/unicycle2_n02.yaml" \
+  ./eval.sh data_mid_best arena
+rm -rf outputs/data_mid_best/eval/arena outputs/data_mid_best/eval/arena.csv
+
+# the run: 33 jobs on 32 cores, ~4.5 h
+EPISODES=200 MAX_PARALLEL=11 ACTION_NOISE=0.03 nohup ./eval.sh data_mid_best circle  > circle.log  2>&1 &
+EPISODES=200 MAX_PARALLEL=11                   nohup ./eval.sh data_mid_best density > density.log 2>&1 &
+EPISODES=200 MAX_PARALLEL=11                   nohup ./eval.sh data_mid_best arena   > arena.log   2>&1 &
+wait
+```
+
+`ACTION_NOISE=0.03` on the **ring only**, and it is not cosmetic: the ring starts from the
+configs' fixed layout, so a deterministic MLP produces one identical episode and
+`evaluate_scaling.py` collapses the 200 repeats to 1. 0.03 is the action noise training
+used, and it is what makes 200 ring episodes distinct. A ring row whose `episodes` column
+reads 1 did not get the noise and has to be rerun.
+
+`STEP_BUDGET_FACTOR` (3) and `SEED_START` (50000) keep their defaults, so every checkpoint
+sees the same episodes. Add `RUNNER=local` to skip the containers where torch is installed
+on the host; lower `MAX_PARALLEL` on a host with less than ~20 GB.
+
+Collect the results (`eval/<scenario>.csv`, plus the per-run CSVs and logs):
+
+```bash
+rsync -av <remote>:<repo>/outputs/data_mid_best/eval/ outputs/data_mid_best/eval/
+```
+
+Expect 72 / 96 / 72 data rows for arena / density / circle — 12 checkpoints × 6 / 8 / 6
+configs. Then the figures, the tables and the rollout video:
+
+```bash
+for s in arena density circle; do
+  for m in success_rate robot_success_rate; do
+    python3 test/plot_study_results.py --results outputs/data_mid_best/eval/$s.csv \
+      --policy mlp --label $s --metric $m \
+      --output-dir outputs/data_mid_best/plots/$s$([ $m = robot_success_rate ] && echo _robot)
+  done
+done
+python3 test/summarize_study_results.py --results outputs/data_mid_best/eval/*.csv \
+  --output-dir outputs/data_mid_best/tables
+```
+
+The per-robot figures need their own `--output-dir`: `plot_study_results.py` puts the
+metric in the matrix filename but not in the `_by_<axis>` ones, so they would otherwise
+overwrite the episode-level line plots.
