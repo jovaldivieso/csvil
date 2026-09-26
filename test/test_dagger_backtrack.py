@@ -19,7 +19,7 @@ from learning.dagger.rollouts import (
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
 )
-from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerSolveError
 from systems.seed_utils import (
     action_noise_seed_for_rollout,
     initial_state_seed_for_rollout,

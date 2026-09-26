@@ -7,8 +7,7 @@ from collections.abc import Callable, Mapping
 import numpy as np
 import torch
 
-from planning.casadi_planner import PlannerSolveError
-from planning.planner import PlannerProtocol
+from planning.planner import PlannerProtocol, PlannerSolveError
 from systems.dynamics import DynamicsProtocol
 from systems.seed_utils import (
     action_noise_rng_for_rollout,
@@ -796,9 +795,10 @@ def collect_dagger_rollouts(
         if episode_frame_buffers is None:
             raise RuntimeError("'frame_builder' produced no frames for the rollout.")
         for frame_buffer in episode_frame_buffers:
+            if not frame_buffer:
+                continue
             for frame_data in frame_buffer:
                 dataset_writer.add_frame(frame_data)
-            dataset_writer.save_episode()
         successful_episodes += 1
         reached_goal_count += int(reached_goal)
         steps_taken.append(int(rollout_steps))

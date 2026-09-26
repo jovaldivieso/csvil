@@ -35,7 +35,7 @@ from learning.dagger import (
     evaluate_policy_rollouts,
 )
 from learning.models.policy import PolicyFactory
-from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerSolveError
 
 from evaluate_policy import _load_checkpoint_policy_components, get_inference_device, _synchronize_device
 

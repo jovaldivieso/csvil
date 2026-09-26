@@ -2,12 +2,8 @@ import casadi as ca
 import numpy as np
 from typing import Any, Mapping
 
-from .planner import Planner
+from .planner import Planner, PlannerSolveError
 from systems.dynamics import DynamicsProtocol
-
-
-class PlannerSolveError(RuntimeError):
-    """Raised when the CasADi optimization problem cannot be solved."""
 
 
 class CasadiPlanner(Planner):

@@ -10,17 +10,14 @@ from .planner import Planner
 
 class DbLacamPlanner(Planner):
     """
-    python wrapper around db-lacam executable for single- and multi-robot planning,
-    supporting heterogeneous robot teams
+    python wrapper around db-lacam executable for single- and multi-robot planning
 
     modes:
         - "open_loop": plans once and executes returned actions sequentially
+          optionally replans if the actual state deviates too much from the cached plan
         - "replan": computes a new joint plan after replan_freq steps
-
-    currently supported CSVIL systems:
-        - SingleIntegrator
-        - Unicycle1       
     """
+
     def __init__(self, simulator, config):
         self.sim = simulator
         self.config = config.get("db_lacam", config)
@@ -41,6 +38,10 @@ class DbLacamPlanner(Planner):
 
         self.mode = self.config.get("mode", "replan")
         self.replan_freq = int(self.config.get("replan_freq", 5))
+
+        # optionally computes new open-loop plan if actually visited state deviates too much:
+        self.replan_on_deviation = bool(self.config.get("replan_on_deviation", False))
+        self.deviation_threshold = float(self.config.get("deviation_threshold", 0.15))
 
         # path to db-lacam executable and working directory:
         self.executable = self.config.get("executable", "/opt/db-lacam/buildRelease/run_dblacam")
@@ -63,6 +64,7 @@ class DbLacamPlanner(Planner):
         self.obstacles = []
         
         self.cached_plans = None
+        self.cached_states = None
         self.step_idx = 0
 
         # dynobench model and db-lacam motion primitives were generated with dt = 0.1:
@@ -78,6 +80,7 @@ class DbLacamPlanner(Planner):
                 )
     def reset(self):
         self.cached_plans = None
+        self.cached_states = None
         self.step_idx = 0
 
     def _create_states_list(self, obs):
@@ -136,9 +139,14 @@ class DbLacamPlanner(Planner):
                 "--cfg", algorithm_yaml_path,
                 "-t", str(self.time_limit_ms),
             ]
-            process = subprocess.run(command, cwd=self.cwd, capture_output=True, text=True)
 
-            # useful error check cases were generated with ChatGPT:
+            process = subprocess.run(
+                command,
+                cwd=self.cwd,
+                capture_output=True,
+                text=True,
+            )
+
             if process.returncode != 0:
                 raise RuntimeError(f"db-lacam failed:\n{process.stdout[-2000:]=}\n{process.stderr[-2000:]=}")
             if not os.path.isfile(result_yaml_path):
@@ -158,13 +166,47 @@ class DbLacamPlanner(Planner):
             raise RuntimeError(
                 f"db-lacam output yaml must contain a 'result' list with {len(self.robots)} entries"
             )
-        self.cached_plans = []
+
+        self.cached_plans, self.cached_states = [], []
         for robot, trajectory in zip(self.robots, trajectories):
             actions = np.asarray(trajectory.get("actions") or [], dtype=float)
             actions = actions.reshape(-1, robot.nu)
+
+            states = np.asarray(trajectory.get("states") or [], dtype=float).reshape(-1, robot.nx)
+
             self.cached_plans.append(actions)
+            self.cached_states.append(states)
 
         self.step_idx = 0
+
+    def _deviated_from_plan(self, obs):
+        """
+        checks whether actually visited robot states differ too much
+        from states expected by currently cached db-lacam plan
+        """
+
+        if self.cached_states is None:
+            return False
+
+        actual_states = self._create_states_list(obs)
+
+        for actual_state, planned_states in zip(actual_states, self.cached_states):
+            
+            # db-lacam state trajectory should contain state corresponding to current action index:
+            if self.step_idx >= len(planned_states):
+                return True
+
+            expected_state = planned_states[self.step_idx]
+
+            deviation = np.linalg.norm(
+                np.asarray(actual_state, dtype=float)
+                - np.asarray(expected_state, dtype=float)
+            )
+
+            if deviation > self.deviation_threshold:
+                return True
+
+        return False
 
     def _get_current_actions(self):
         """
@@ -187,17 +229,32 @@ class DbLacamPlanner(Planner):
     def __call__(self, obs):
         
         try:
-            # computes plan if no cached plan exists or all cached actions were used 
-            # or replan mode is active and replan_freq steps passed:
-            if (
+            # computes plan if no cached plan exists or all cached actions were used:
+            needs_plan = (
                 self.cached_plans is None
                 or self.step_idx >= max((len(plan) for plan in self.cached_plans), default=0)
-                or (
-                    self.mode == "replan"
-                    and self.step_idx >= self.replan_freq
-                )
+            )
+
+            # (in open-loop mode) optionally computes fresh open-loop plan if actually visited state has deviated too much:
+            if (
+                not needs_plan
+                and self.mode == "open_loop"
+                and self.replan_on_deviation
+                and self._deviated_from_plan(obs)
             ):
+                needs_plan = True
+
+            # original fixed-frequency replanning mode:
+            if (
+                not needs_plan
+                and self.mode == "replan"
+                and self.step_idx >= self.replan_freq
+            ):
+                needs_plan = True
+
+            if needs_plan:
                 self._compute_plan(obs)
+                
             actions = self._get_current_actions()
             self.step_idx += 1
             return actions

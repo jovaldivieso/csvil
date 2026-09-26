@@ -1,36 +1,24 @@
 dt: 0.1
+d_safe: 1.2
+d_collision: 1.0
+inter_robot_visibility_radius: 4.0
+
 environment:
-    min: [0.0, 0.0]
-    max: [8.0, 8.0]
-    obstacles: []
+  min: [0.0, 0.0]
+  max: [8.0, 8.0]
+  obstacles: []
 
 db_lacam:
-  mode: replan
-  replan_freq: 60
+  mode: open_loop
+  replan_on_deviation: true
+  deviation_threshold: 0.15
   time_limit_ms: 60000
   algorithm_config: planning/dblacam_algorithm_default.yaml
 
 robots:
-  - system: single_integrator
-
-    start: [2.0, 2.0]
-
-    config:
-      dt: 0.1
-      max_vel: 0.5
-
-  - system: single_integrator
-
-    start: [5.0, 5.0]
-
-    config:
-      dt: 0.1
-      max_vel: 0.5
-
-  - system: single_integrator
-
-    start: [3.0, 2.0]
-
-    config:
-      dt: 0.1
-      max_vel: 0.5
+  num_robots: 2
+  system: single_integrator
+  config:
+    dt: 0.1
+    max_vel: 0.5
+    workspace_bounds: [0.0, 8.0]

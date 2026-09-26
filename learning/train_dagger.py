@@ -17,7 +17,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.config import load_and_validate_system_config
-from core.factory import DynamicsFactory
+from core.factory import DynamicsFactory, PlannerFactory
 from learning.config_loaders import (
     default_checkpoint_dir_for_system,
     default_dataset_root_for_system, default_repo_id_for_system,
@@ -118,7 +118,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--expert-config", required=True)
     p.add_argument("--repo-id")
     p.add_argument("--dataset-root", type=Path)
-    p.add_argument("--planner", choices=["casadi"])
+    p.add_argument("--planner", choices=PlannerFactory.names(), default="casadi")
     p.add_argument("--dagger-iterations", type=int)
     p.add_argument("--trajectories-per-iteration", nargs="+", type=int)
     p.add_argument("--steps-per-trajectory", type=int)

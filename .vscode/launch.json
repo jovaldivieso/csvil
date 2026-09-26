@@ -45,7 +45,50 @@
                 "1",
                 "--num-steps",
                 "400",
-                "--use-config-start"
+                "--no-video",
+                "--initial-states",
+                "[[3.0, 3.0], [5.0, 5.0]]",
+                "--goal-states",
+                "[[5.0, 5.0], [3.0, 3.0]]"
+            ]
+        }, 
+        {
+            "name": "train dagger db-lacam",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/opt/venv/bin/python",
+            "program": "/workspace/learning/train_dagger.py",
+            "cwd": "/workspace",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--experiment-name",
+                "dblacam_dagger_test",
+
+                "--system",
+                "multi_robot",
+
+                "--planner",
+                "dblacam",
+
+                "--expert-config",
+                "test/config/multi_robot_dblacam_config.yaml",
+
+                "--policy-config",
+                "learning/config/default_policy_config.yaml",
+
+                "--dagger-iterations",
+                "2",
+
+                "--trajectories-per-iteration",
+                "5",
+                "5",
+
+                "--steps-per-trajectory",
+                "150",
+
+                "--eval-episodes",
+                "2"
             ]
         }
     ]

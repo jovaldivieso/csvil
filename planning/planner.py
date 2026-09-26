@@ -4,6 +4,11 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 
+class PlannerSolveError(RuntimeError):
+    """Planner could not find/produce a valid solution."""
+    pass
+
+
 @runtime_checkable
 class PlannerProtocol(Protocol):
     """Structural contract for planners used by simulation and data pipelines."""
