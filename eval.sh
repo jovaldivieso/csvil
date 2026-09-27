@@ -27,6 +27,14 @@
 #   swap     two stacks trade corners from fixed starts, packed at d_safe inside each
 #            column. Like 'circle' but the formation, not just the crossing, is the
 #            difficulty. Not part of 'all', same as 'fleet'.
+#   crash    N = 2 head-on at the training ring radius, five rungs that differ ONLY in
+#            how fast the robots are already moving at t=0. A difficulty ladder for
+#            finding where each policy head breaks. Not part of 'all'.
+#            NOTE: needs STEP_BUDGET_FACTOR=6. The default 3 derives ~139 steps from the
+#            start-goal distance, which covers the drive but not the final in-place
+#            rotation (~113 steps on its own), so every rung would time out spuriously.
+#            Use ACTION_NOISE=0.03 too, or a deterministic MLP yields one distinct
+#            episode per rung and the success rate collapses to pass/fail.
 #
 # CONFIGS overrides a scenario's config glob, for a smoke run over a few configs.
 #
@@ -57,11 +65,13 @@ declare -A SCENARIO_GLOB=(
   [density]="test/config/study/density/*.yaml"
   [circle]="test/config/study/circle/*.yaml"
   [swap]="test/config/study/swap/*.yaml"
+  [crash]="test/config/study/crash/*.yaml"
 )
 # The ring layouts are the configs' own 'start' entries, not sampled ones.
 declare -A SCENARIO_FLAGS=(
   [arena]="" [fleet]="" [density]=""
   [circle]="--use-config-start" [swap]="--use-config-start"
+  [crash]="--use-config-start"
 )
 
 usage() {
