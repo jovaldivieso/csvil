@@ -67,6 +67,23 @@ SEQUENTIAL_STEPS = [
 # Categorical slots 1-3, validated for CVD separation against the light surface.
 SERIES_COLORS = {"deepset": "#2a78d6", "transformer": "#eb6834", "gnn": "#1baf7a"}
 
+# Status palette: reserved for the outcome of a cell, never reused as a series colour.
+# Used by --color-by-outcome, where the number in a cell is a continuous metric but the
+# fill says which of the three outcomes produced it.
+#
+# These are the status steps (#0ca30c good, #fab219 warning) at 60% over the surface: a
+# full-strength fill behind a whole grid of cells reads louder than the numbers it is
+# meant to support. Near-black ink sits at 9.4:1 on the green and 13.5:1 on the yellow.
+#
+# The cost is colour-blind separation. The pair measures OKLab dE 18.6 in normal vision
+# and 13.5 deutan, both comfortable, but 6.7 protan -- inside the 6-8 band, so a protan
+# reader may not separate a success cell from a timeout cell by fill. The legend names
+# all three states, and the paler the tint the worse this gets: at 50% protan falls to
+# 5.5 and normal vision to 15.7, which is the hard floor. Raise the factor toward 1.0
+# (protan 10.6) if the distinction has to survive protanopia unaided.
+STATUS_GOOD = "#6cc76c"       # the scenario succeeded
+STATUS_WARNING = "#fbd073"    # the scenario ran out of steps
+
 SURFACE = "#fcfcfb"
 TEXT_PRIMARY = "#0b0b0b"
 TEXT_SECONDARY = "#52514e"
@@ -143,9 +160,10 @@ def fleet_axis() -> Axis:
 def density_axis(train_density_factor: float = 1.0) -> Axis:
     """`train_density_factor` in units of the reference density: the row to outline.
 
-    The study's runs no longer all train at the reference density -- data_mid and
-    data_large train at 3x it -- so which row is in-distribution depends on the runs the
-    results came from, not on the axis.
+    Which row is in-distribution depends on the runs the results came from, not on the
+    axis, so it has to be passed in. data_mid and data_large train at 0.167 robots/m^2,
+    which is the reference density itself, hence the default of 1; an earlier grid trained
+    at a third of it and needed 3.
     """
     reference = training_density()
     return Axis(
@@ -227,7 +245,7 @@ def titled(label: str, title: str) -> str:
 
 
 def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "",
-                show_failures: bool = True) -> None:
+                show_failures: bool = True, outcome_colors: bool = False) -> None:
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
     eval_sizes = sorted({axis.value(r) for r in rows})
     values = {
@@ -246,13 +264,39 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
             }
     encoders = [e for e in ENCODER_ORDER if any(k[0] == e for k in values)]
 
+    # Which outcome produced each cell: whichever of the three rates is largest. With
+    # one episode per cell that is the episode's own outcome; with many it is the modal
+    # one, and the fill should then be read as "mostly", which the note says.
+    outcomes = {}
+    if outcome_colors:
+        for r in rows:
+            triple = (
+                ("success", float(r["success_rate"])),
+                ("collision", float(r["collision_rate"])),
+                ("timeout", float(r["timeout_rate"])),
+            )
+            outcomes[(r["encoder_type"], int(r["train_fleet_size"]), axis.value(r))] = (
+                max(triple, key=lambda pair: pair[1])[0]
+            )
+
     all_values = [v for v in values.values()]
     if metric in RATE_METRICS:
         vmin, vmax = 0.0, 1.0
+    elif outcomes:
+        # The ramp now describes the collision cells alone, so it is scaled to them. Over
+        # the whole range the successes -- which are far apart by definition -- would push
+        # vmax up and flatten the failures into the palest steps, which is the opposite of
+        # what this figure is for.
+        collided = [v for key, v in values.items() if outcomes.get(key) == "collision"]
+        vmin, vmax = (min(collided), max(collided)) if collided else (min(all_values), max(all_values))
     else:
         vmin, vmax = min(all_values), max(all_values)
 
     cmap = LinearSegmentedColormap.from_list("seq_blue", SEQUENTIAL_STEPS)
+    if outcomes:
+        # Non-collision cells are masked out of the mesh and painted as status fills.
+        cmap = cmap.copy()
+        cmap.set_bad(SURFACE)
 
     fig, axes = plt.subplots(
         1, len(encoders),
@@ -269,32 +313,58 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
             for e in eval_sizes
         ])
         ax.set_facecolor(SURFACE)
-        mesh = ax.imshow(grid, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+        shaded = grid
+        if outcomes:
+            shaded = np.array([
+                [grid[r, c] if outcomes.get((encoder, t, e)) == "collision" else np.nan
+                 for c, t in enumerate(train_sizes)]
+                for r, e in enumerate(eval_sizes)
+            ])
+            shaded = np.ma.masked_invalid(shaded)
+        mesh = ax.imshow(shaded, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
 
         for row_idx, eval_size in enumerate(eval_sizes):
             for col_idx, train_size in enumerate(train_sizes):
                 value = grid[row_idx, col_idx]
                 if np.isnan(value):
                     continue
-                # Flip ink to stay legible as the cell darkens.
-                shade = (value - vmin) / (vmax - vmin) if vmax > vmin else 0.0
-                ink = "#ffffff" if shade > 0.55 else TEXT_PRIMARY
-                text = f"{value:.2f}" if metric in RATE_METRICS else f"{value:.1f}"
+                outcome = outcomes.get((encoder, train_size, eval_size))
+                if outcome in ("success", "timeout"):
+                    # Painted here rather than through the mesh: these two are states,
+                    # not magnitudes, so they get a flat status fill under the value.
+                    ax.add_patch(mpatches.Rectangle(
+                        (col_idx - 0.5, row_idx - 0.5), 1, 1, zorder=1,
+                        facecolor=STATUS_GOOD if outcome == "success" else STATUS_WARNING,
+                        edgecolor="none"))
+                    ink = TEXT_PRIMARY
+                else:
+                    # Flip ink to stay legible as the cell darkens.
+                    shade = (value - vmin) / (vmax - vmin) if vmax > vmin else 0.0
+                    ink = "#ffffff" if shade > 0.55 else TEXT_PRIMARY
+                # Two decimals on a small scale: mean_min_pair_distance is read against
+                # d_collision = 1.0 m, and at one decimal 0.94 and 1.04 both print as
+                # ~1.0, hiding the only boundary that matters. Large scales (mean_steps,
+                # in the hundreds) do not need the extra digit.
+                if metric in RATE_METRICS or vmax < 10.0:
+                    text = f"{value:.2f}"
+                else:
+                    text = f"{value:.1f}"
                 cell = failures.get((encoder, train_size, eval_size)) if failures else None
                 if cell is None:
                     ax.text(col_idx, row_idx, text, ha="center", va="center",
-                            fontsize=10, color=ink)
+                            fontsize=10, color=ink, zorder=4)
                 else:
                     # Value and failure split on two lines: the split is the secondary
                     # reading, so it sits smaller and below, and the pair stays centred
                     # in the cell rather than the value alone.
                     collision, timeout = cell
                     ax.text(col_idx, row_idx - 0.13, text, ha="center", va="center",
-                            fontsize=10, color=ink)
+                            fontsize=10, color=ink, zorder=4)
                     ax.text(col_idx, row_idx + 0.17,
                             f"C{collision:.2f}".replace("0.", ".")
                             + " " + f"T{timeout:.2f}".replace("0.", "."),
-                            ha="center", va="center", fontsize=7, color=ink, alpha=0.85)
+                            ha="center", va="center", fontsize=7, color=ink, alpha=0.85,
+                            zorder=4)
                 if axis.in_distribution(train_size, eval_size):
                     ax.add_patch(mpatches.Rectangle(
                         (col_idx - 0.5, row_idx - 0.5), 1, 1,
@@ -317,7 +387,10 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
     axes[0].set_ylabel(axis.axis_label, fontsize=10, color=TEXT_SECONDARY)
 
     colorbar = fig.colorbar(mesh, ax=axes, fraction=0.025, pad=0.02)
-    colorbar.set_label(METRIC_LABELS.get(metric, metric), fontsize=10, color=TEXT_SECONDARY)
+    colorbar_label = METRIC_LABELS.get(metric, metric)
+    if outcomes:
+        colorbar_label += " (collisions only)"
+    colorbar.set_label(colorbar_label, fontsize=10, color=TEXT_SECONDARY)
     colorbar.ax.tick_params(colors=TEXT_SECONDARY, length=0)
     colorbar.outline.set_visible(False)
 
@@ -329,6 +402,20 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
     note = f"{episodes} episodes per cell; outlined cells are in-distribution ({axis.note})"
     if failures:
         note += "; C = collision rate, T = timeout rate"
+    if outcomes:
+        note += "; fill is the outcome" + ("" if episodes == 1 else " of most episodes")
+        # Below the panels, not in the header: the note already spans most of the width
+        # there, and a right-aligned legend lands on top of its tail.
+        fig.legend(
+            handles=[
+                mpatches.Patch(facecolor=STATUS_GOOD, edgecolor="none", label="success"),
+                mpatches.Patch(facecolor=STATUS_WARNING, edgecolor="none", label="timeout"),
+                mpatches.Patch(facecolor=SEQUENTIAL_STEPS[6], edgecolor="none",
+                               label="collision — shade is the value"),
+            ],
+            frameon=False, fontsize=9, labelcolor=TEXT_SECONDARY,
+            ncol=3, loc="upper center", bbox_to_anchor=(0.5, 0.02),
+        )
     fig.text(0.02, 1.045, note, fontsize=9, color=TEXT_MUTED, ha="left")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -494,8 +581,14 @@ def main() -> None:
     parser.add_argument("--label", default="", help="scenario name shown in the titles, e.g. 'antipodal ring'")
     parser.add_argument("--train-density", type=float, default=1.0,
                         help="density the evaluated policies trained at, in multiples of the "
-                             "reference density (data_mid/data_large: 3); decides which row "
-                             "of the density matrix is marked in-distribution")
+                             "reference density (data_mid/data_large train at it, so 1); "
+                             "decides which row of the density matrix is in-distribution")
+    parser.add_argument("--color-by-outcome", action="store_true",
+                        help="colour each matrix cell by what happened -- green success, "
+                             "yellow timeout, the blue ramp for collisions shaded by the "
+                             "metric. For a continuous metric such as "
+                             "mean_min_pair_distance, which says how badly a cell failed "
+                             "but not whether it failed at all")
     parser.add_argument("--no-failure-modes", action="store_true",
                         help="only the metric per cell, without the collision/timeout split")
     parser.add_argument(
@@ -543,7 +636,8 @@ def main() -> None:
             group_label = " · ".join(part for part in (label, f"N={int(suffix[2:])}") if part)
         plot_matrix(group, args.metric,
                     args.output_dir / f"{prefix}_{args.metric}_matrix{suffix}.{args.format}",
-                    axis, group_label, show_failures=not args.no_failure_modes)
+                    axis, group_label, show_failures=not args.no_failure_modes,
+                    outcome_colors=args.color_by_outcome)
         plot_by_axis(group,
                      args.output_dir / f"{prefix}_by_{axis.name}{suffix}.{args.format}",
                      axis, group_label, metric=args.metric if args.metric in FAILURE_COLUMNS else "success_rate")

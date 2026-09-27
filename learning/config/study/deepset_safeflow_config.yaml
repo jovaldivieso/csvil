@@ -1,0 +1,33 @@
+# Encoder-scaling study: DeepSet safe-flow baseline.
+# [template-only] train.sh does not train from this file: it trains from the
+# [template-only] per-fleet-size configs that the generators derive from it, which is
+# [template-only] also where the 'training' section (the ring initial_states/goal_states)
+# [template-only] is added.
+# Identical to deepset_flow_config.yaml except that every sampled action sequence is
+# projected onto the safety manifold by a CasADi QP after each of the 3 Euler steps
+# (SafeFlowMPC, Oelerich et al. 2026). The projector reads d_safe / d_collision /
+# R_diag / collision_slack_penalty_weight / terminal_velocity_weight /
+# fallback_terminal_velocity_tol from the *expert* config, which train_dagger.py hands
+# it as planner_config -- so those live there, not here.
+#
+# prediction_horizon is load-bearing for this head in a way it is not for plain flow:
+# the projector enforces its come-to-rest condition at the end of exactly this horizon
+# (SafeFlowMPC Eq. 12), so it has to be long enough for the robot to actually brake
+# from max_linear_vel. See the generator for the arithmetic.
+model:
+  policy_type: safeflow
+
+  flow:
+    num_inference_steps: 3      # Euler integration steps for ODE sampling
+
+  observation_horizon: 2        # >= 2 is required: SafeFlowMPCPolicy differences two
+                                # frames to recover a neighbour's absolute velocity
+  prediction_horizon: 1
+  hidden_dims: [256, 256, 256]
+
+  encoder: deepset
+
+  deepset:
+    phi_dims: [128, 128]
+    rho_dims: [128]        # -> context width 128
+    pool_type: mean        # Can be sum, max, mean (GNN uses sum!)

@@ -24,6 +24,9 @@
 #            so it drags the path length along and isolates no better than 'arena' does
 #   circle   antipodal swap from the configs' fixed starts, ringed at the training
 #            density for every N -- the stress case for head-on conflicts
+#   swap     two stacks trade corners from fixed starts, packed at d_safe inside each
+#            column. Like 'circle' but the formation, not just the crossing, is the
+#            difficulty. Not part of 'all', same as 'fleet'.
 #
 # CONFIGS overrides a scenario's config glob, for a smoke run over a few configs.
 #
@@ -53,9 +56,13 @@ declare -A SCENARIO_GLOB=(
   [fleet]="test/config/study/fleet/*.yaml"
   [density]="test/config/study/density/*.yaml"
   [circle]="test/config/study/circle/*.yaml"
+  [swap]="test/config/study/swap/*.yaml"
 )
 # The ring layouts are the configs' own 'start' entries, not sampled ones.
-declare -A SCENARIO_FLAGS=( [arena]="" [fleet]="" [density]="" [circle]="--use-config-start" )
+declare -A SCENARIO_FLAGS=(
+  [arena]="" [fleet]="" [density]=""
+  [circle]="--use-config-start" [swap]="--use-config-start"
+)
 
 usage() {
   echo "usage: $0 <experiment> [${!SCENARIO_GLOB[*]}|all]" >&2
