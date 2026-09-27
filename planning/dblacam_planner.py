@@ -1,8 +1,8 @@
 import os
 import yaml
-import subprocess
 import tempfile
 import warnings
+import subprocess
 
 import numpy as np
 
@@ -247,6 +247,7 @@ class DbLacamPlanner(Planner):
                 and self.replan_on_deviation
                 and self._deviated_from_plan(obs)
             ):
+                # print(f"db-lacam: replanning due to deviation (step {self.step_idx})")
                 needs_plan = True
 
             # original fixed-frequency replanning mode:

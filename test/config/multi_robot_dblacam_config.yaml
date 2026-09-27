@@ -19,7 +19,7 @@ db_lacam:
     integrator2_2d_v0: /workspace/data/motion_primitives/integrator2_2d_v0.bin.im.bin.sp.bin
 
 robots:
-  num_robots: 2
+  num_robots: 3
   system: double_integrator
   config:
     dt: 0.1

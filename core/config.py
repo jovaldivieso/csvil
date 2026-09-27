@@ -567,6 +567,34 @@ def _validate_db_lacam_config(
             raw_db_lacam["environment"],
             key_name="db_lacam.environment",
         )
+        
+    motion_primitives = raw_db_lacam.get("motion_primitives", {})
+
+    if not isinstance(motion_primitives, Mapping):
+        raise ConfigurationError("'db_lacam.motion_primitives' must be a mapping.")
+
+    validated_motion_primitives = {}
+
+    for robot_type, path in motion_primitives.items():
+        if not isinstance(robot_type, str) or not robot_type:
+            raise ConfigurationError(
+                "'db_lacam.motion_primitives' keys must be non-empty strings."
+            )
+        if not isinstance(path, str) or not path:
+            raise ConfigurationError(
+                f"'db_lacam.motion_primitives.{robot_type}' must be a non-empty string."
+            )
+
+        validated_motion_primitives[robot_type] = str(
+            _resolve_existing_path(
+                path,
+                field_name=f"db_lacam.motion_primitives.{robot_type}",
+                config_dir=config_dir,
+                expect_file=True,
+            )
+        )
+
+    validated_db_lacam["motion_primitives"] = validated_motion_primitives
 
     return validated_db_lacam
 

@@ -1,12 +1,10 @@
-# more search parameter examples in db-lacam/example/algorithms.yaml
-
 delta_0: 0.5
-goal_delta: 0.05
+goal_delta: 0.1
 num_primitives_0: 2000
 alpha: 0.5
-heuristic1: "reverse-search"
+heuristic1: ""
 heuristic1_delta: 0.9
-heuristic1_num_primitives_0: 10000
+heuristic1_num_primitives_0: 100
 cluster_range: 0.02
 cluster_distance: 1.0
 cluster_n: 1
