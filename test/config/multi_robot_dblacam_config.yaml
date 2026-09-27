@@ -1,6 +1,6 @@
 dt: 0.1
-d_safe: 0.25
-d_collision: 0.25
+d_safe: 0.2
+d_collision: 0.2
 inter_robot_visibility_radius: 4.0
 
 environment:
@@ -12,15 +12,15 @@ db_lacam:
   mode: open_loop
   replan_on_deviation: true
   deviation_threshold: 0.15
-  time_limit_ms: 60000
+  time_limit_ms: 10000
   algorithm_config: planning/dblacam_algorithm_default.yaml
 
   motion_primitives:
-    unicycle1_v0: /workspace/data/motion_primitives/unicycle1_v0.bin.im.bin.sp.bin
+    integrator2_2d_v0: /workspace/data/motion_primitives/integrator2_2d_v0.bin.im.bin.sp.bin
 
 robots:
   num_robots: 2
-  system: single_integrator
+  system: double_integrator
   config:
     dt: 0.1
-    max_vel: 0.5
+    max_accel: 2.0

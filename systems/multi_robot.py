@@ -88,6 +88,17 @@ class MultiRobotSimulator(DynamicsSimulator):
                 )
 
         self.dt = dt0
+        
+        # workspace bounds shared by whole multi-robot environment:
+        environment = merged_config.get("environment", {})
+        self.environment_min = np.asarray(
+            environment.get("min", [-1.0, -1.0]),
+            dtype=float,
+        )
+        self.environment_max = np.asarray(
+            environment.get("max", [1.0, 1.0]),
+            dtype=float,
+        )
 
         self.robot_state_slices: list[slice] = []
         self.robot_action_slices: list[slice] = []
@@ -420,19 +431,15 @@ class MultiRobotSimulator(DynamicsSimulator):
             split_state,
             split_action,
         ):
-            next_state = sim.step(robot_state, robot_action)
+            # keeps position inside configured multi-robot workspace:
+            position_indices = sim.position_indices
 
-            # keep position inside the configured workspace
-            if hasattr(sim, "workspace_bounds"):
-                low, high = sim.workspace_bounds
-                position_indices = sim.position_indices
-
-                next_state = next_state.copy()
-                next_state[list(position_indices)] = np.clip(
-                    next_state[list(position_indices)],
-                    low,
-                    high,
-                )
+            next_state = sim.step(robot_state, robot_action).copy()
+            next_state[list(position_indices)] = np.clip(
+                next_state[list(position_indices)],
+                self.environment_min,
+                self.environment_max,
+            )
 
             next_parts.append(next_state)
 
