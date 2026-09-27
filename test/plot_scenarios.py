@@ -16,6 +16,7 @@ distance for fixed starts).
 Usage:
     python test/plot_scenarios.py                         # the default review set
     python test/plot_scenarios.py --configs a.yaml b.yaml --episodes 6
+    python test/plot_scenarios.py --grid                  # the circle sweep, one bare 2x4 figure
 """
 
 from __future__ import annotations
@@ -56,6 +57,9 @@ DEFAULT_CONFIGS = (
     + [f"{STUDY}/density/unicycle2_n08_d{f}.yaml" for f in ("0.25", "0.5", "1", "2", "3")]
     + [f"{STUDY}/circle/unicycle2_circle_{n:02d}.yaml" for n in (2, 8, 32)]
 )
+CIRCLE_GRID_CONFIGS = [
+    f"{STUDY}/circle/unicycle2_circle_{n:02d}.yaml" for n in (2, 3, 4, 5, 8, 12, 16, 32)
+]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/plots/scenarios"
 SEED_START = 50000
 STEP_BUDGET_FACTOR = 1.5
@@ -250,9 +254,58 @@ def render_panels(panels, config, half_width, output_path: Path, title: str) -> 
     return output_path
 
 
+def first_episode(config: dict) -> tuple[np.ndarray, np.ndarray, float | None]:
+    """Starts, goals and workspace half-width of one episode of a config.
+
+    The fixed starts for a circle config and the first evaluation episode otherwise, so
+    a grid may mix the two kinds. The half-width is None where there is no box to draw.
+    """
+    fixed = config_starts_and_goals(config)
+    if fixed is not None:
+        return fixed[0], fixed[1], None
+    simulator = DynamicsFactory.create(system_name="multi_robot", config=config)
+    num_robots = int(simulator.num_robots)
+    seed_spec = evaluation_seed_specs(simulator, 1, SEED_START)[0]
+    state = sample_initial_state(simulator, seed_spec)
+    return (
+        state.reshape(num_robots, -1),
+        np.asarray(simulator.goal_state).reshape(num_robots, -1),
+        float(config["robots"][0]["config"]["workspace_bounds"][1]),
+    )
+
+
+def plot_grid(config_paths: list[str], columns: int, output_path: Path) -> Path:
+    """Every config in one figure, one panel each, with no titles and no legend.
+
+    For a figure that goes into a document, where the caption carries what the titles of
+    plot_config say. Each panel keeps its own limits, so the small rings stay readable;
+    the tick labels are what shows that the ring grows with the fleet.
+    """
+    rows = math.ceil(len(config_paths) / columns)
+    fig, axes = plt.subplots(rows, columns, figsize=(3.0 * columns, 3.0 * rows), squeeze=False)
+    for ax, config_path in zip(axes.flat, config_paths):
+        config = load_and_validate_system_config("multi_robot", config_path)
+        starts, goals, half_width = first_episode(config)
+        draw_episode(ax, starts, goals, config, half_width)
+    for ax in list(axes.flat)[len(config_paths):]:
+        ax.axis("off")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--configs", nargs="+", default=DEFAULT_CONFIGS)
+    parser.add_argument("--configs", nargs="+", default=None)
+    parser.add_argument(
+        "--grid", action="store_true",
+        help="one figure with a panel per config and no titles or legend, instead of one "
+             "figure per config; defaults to the circle sweep N=2,3,4,5,8,12,16,32",
+    )
+    parser.add_argument("--columns", type=int, default=4, help="panels per row of --grid")
+    parser.add_argument("--output", type=Path, default=None, help="output file for --grid")
     parser.add_argument(
         "--policy-configs", nargs="+", default=None,
         help="plot what these policy configs train on (workspace override + ring layouts) "
@@ -265,12 +318,17 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=6, help="panels per random-goal config")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()
+    if args.grid:
+        configs = args.configs or CIRCLE_GRID_CONFIGS
+        output_path = args.output or DEFAULT_OUTPUT_DIR / "circle_grid.png"
+        print(f"wrote {os.path.relpath(plot_grid(configs, args.columns, output_path), PROJECT_ROOT)}")
+        return
     if args.policy_configs:
         for policy_path in args.policy_configs:
             for path in plot_training(policy_path, args.expert_config, args.episodes, args.output_dir):
                 print(f"wrote {os.path.relpath(path, PROJECT_ROOT)}")
         return
-    for config_path in args.configs:
+    for config_path in args.configs or DEFAULT_CONFIGS:
         print(f"wrote {os.path.relpath(plot_config(config_path, args.episodes, args.output_dir), PROJECT_ROOT)}")
 
 

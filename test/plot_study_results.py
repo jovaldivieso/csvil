@@ -85,6 +85,10 @@ STATUS_GOOD = "#6cc76c"       # the scenario succeeded
 STATUS_WARNING = "#fbd073"    # the scenario ran out of steps
 
 SURFACE = "#fcfcfb"
+# Raster output resolution. 300 is the print/thesis standard: at these figure sizes it
+# gives ~3500 px across, which still reads when a matrix is scaled down into a column.
+# PDF is vector, so this only affects the PNG companions.
+PNG_DPI = 300
 TEXT_PRIMARY = "#0b0b0b"
 TEXT_SECONDARY = "#52514e"
 TEXT_MUTED = "#8a8983"
@@ -231,7 +235,11 @@ def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float,
     denom = 1.0 + z * z / total
     center = (p + z * z / (2 * total)) / denom
     margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denom
-    return (max(0.0, center - margin), min(1.0, center + margin))
+    # Snapped to p as well as to [0, 1]: the interval contains the observed rate by
+    # construction, but at 0 or 1 successes the two sides cancel only up to rounding,
+    # leaving a bound off by ~1e-18. Callers subtract these to get error bars, and
+    # matplotlib rejects a yerr of -7e-18.
+    return (min(p, max(0.0, center - margin)), max(p, min(1.0, center + margin)))
 
 
 def titled(label: str, title: str) -> str:
@@ -242,6 +250,31 @@ def titled(label: str, title: str) -> str:
     identical, training fleet size irrelevant) is false for flow on the ring.
     """
     return f"{label} — {title}" if label else title
+
+
+def save_figure(fig, output_path: Path, *header) -> None:
+    """Write the figure, then the same figure again without its header text, as a PNG.
+
+    A document that carries its own caption would otherwise print the title and its note
+    twice, and cropping them off by hand re-renders at a different size. The second file
+    drops every artist in `header` -- the suptitle and the note under it -- and keeps
+    everything inside the axes, including the legend, which carries meaning rather than
+    description. It is always a PNG, whatever --format the primary is, since that is what
+    a slide or a document wants to embed.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE, dpi=PNG_DPI)
+    print(f"wrote {display_path(output_path)}")
+
+    dropped = [artist for artist in header if artist is not None]
+    if dropped:
+        for artist in dropped:
+            artist.set_visible(False)
+        untitled = output_path.with_name(f"{output_path.stem}_notitle.png")
+        # bbox_inches="tight" re-crops, so the hidden header leaves no band behind.
+        fig.savefig(untitled, bbox_inches="tight", facecolor=SURFACE, dpi=PNG_DPI)
+        print(f"wrote {display_path(untitled)}")
+    plt.close(fig)
 
 
 def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "",
@@ -396,7 +429,7 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
 
     episodes = int(rows[0]["episodes"])
     # Titles sit above the panel row; panel titles own the band just under them.
-    fig.suptitle(
+    title = fig.suptitle(
         titled(label, f"{METRIC_LABELS.get(metric, metric)} by training fleet size and {axis.title}"),
         fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.10)
     note = f"{episodes} episodes per cell; outlined cells are in-distribution ({axis.note})"
@@ -416,12 +449,9 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
             frameon=False, fontsize=9, labelcolor=TEXT_SECONDARY,
             ncol=3, loc="upper center", bbox_to_anchor=(0.5, 0.02),
         )
-    fig.text(0.02, 1.045, note, fontsize=9, color=TEXT_MUTED, ha="left")
+    subtitle = fig.text(0.02, 1.045, note, fontsize=9, color=TEXT_MUTED, ha="left")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE)
-    plt.close(fig)
-    print(f"wrote {display_path(output_path)}")
+    save_figure(fig, output_path, title, subtitle)
 
 
 def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "",
@@ -482,30 +512,36 @@ def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "",
     ax.tick_params(colors=TEXT_SECONDARY, length=0)
     ax.legend(frameon=False, fontsize=10, labelcolor=TEXT_SECONDARY, loc="upper right")
 
-    fig.suptitle(titled(label, f"{METRIC_LABELS.get(metric, metric)} by {axis.title}"),
+    title = fig.suptitle(titled(label, f"{METRIC_LABELS.get(metric, metric)} by {axis.title}"),
                  fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.06)
-    fig.text(0.02, 1.0,
+    subtitle = fig.text(0.02, 1.0,
              f"Pooled over all training fleet sizes ({total_per_point} "
              f"{'robot-episodes' if per_robot else 'episodes'} per point); bars are 95% Wilson intervals",
              fontsize=9, color=TEXT_MUTED, ha="left")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE)
-    plt.close(fig)
-    print(f"wrote {display_path(output_path)}")
+    save_figure(fig, output_path, title, subtitle)
 
 
-def plot_by_axis_facets(rows, output_path: Path, axis: Axis, label: str = "") -> None:
+def plot_by_axis_facets(rows, output_path: Path, axis: Axis, label: str = "",
+                        metric: str = "success_rate") -> None:
     """One panel per training fleet size -- the un-pooled view of plot_by_fleet.
 
     Each point is a single matrix cell, so the intervals are the honest per-cell
-    ones (n=50, roughly +-0.13 at mid-range) rather than the pooled +-0.06.
+    ones rather than the pooled ones.
+
+    `metric` must be one of the two success rates. They need different denominators --
+    an episode rate is over episodes, a per-robot rate over episodes x robots -- and the
+    per-robot one is what keeps saying something once fleet success has fallen to p^N.
     """
+    per_robot = metric.startswith("robot_")
     eval_sizes = sorted({axis.value(r) for r in rows})
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
+    def trials(row) -> int:
+        return int(row["episodes"]) * (int(row["eval_fleet_size"]) if per_robot else 1)
+
     cells = {
         (r["encoder_type"], int(r["train_fleet_size"]), axis.value(r)):
-            (round(float(r["success_rate"]) * int(r["episodes"])), int(r["episodes"]))
+            (round(float(r[metric]) * trials(r)), trials(r))
         for r in rows
     }
     encoders = [e for e in ENCODER_ORDER if any(k[0] == e for k in cells)]
@@ -549,22 +585,22 @@ def plot_by_axis_facets(rows, output_path: Path, axis: Axis, label: str = "") ->
         ax.spines["bottom"].set_color(GRID)
         ax.tick_params(colors=TEXT_SECONDARY, length=0)
 
-    axes[0].set_ylabel("Success rate", fontsize=10, color=TEXT_SECONDARY)
+    axes[0].set_ylabel(METRIC_LABELS.get(metric, metric), fontsize=10, color=TEXT_SECONDARY)
 
     episodes = int(rows[0]["episodes"])
-    fig.suptitle(titled(label, f"Success rate by {axis.title}, per training fleet size"),
-                 fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.14)
-    fig.text(0.02, 1.07,
-             f"One point per matrix cell ({episodes} episodes); bars are 95% Wilson intervals",
+    unit = "robot-episodes" if per_robot else "episodes"
+    title = fig.suptitle(
+        titled(label, f"{METRIC_LABELS.get(metric, metric)} by {axis.title}, per training fleet size"),
+        fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.14)
+    subtitle = fig.text(0.02, 1.07,
+             f"One point per matrix cell ({episodes} {unit} before the per-robot factor); "
+             "bars are 95% Wilson intervals",
              fontsize=9, color=TEXT_MUTED, ha="left")
     fig.legend(handles=handles, labels=[ENCODER_LABELS.get(e, e) for e in encoders],
                frameon=False, fontsize=10, labelcolor=TEXT_SECONDARY,
                ncol=len(encoders), loc="upper right", bbox_to_anchor=(0.99, 1.11))
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE)
-    plt.close(fig)
-    print(f"wrote {display_path(output_path)}")
+    save_figure(fig, output_path, title, subtitle)
 
 
 def main() -> None:
@@ -638,12 +674,16 @@ def main() -> None:
                     args.output_dir / f"{prefix}_{args.metric}_matrix{suffix}.{args.format}",
                     axis, group_label, show_failures=not args.no_failure_modes,
                     outcome_colors=args.color_by_outcome)
+        # The line plots can only show a success rate. When --metric is something else
+        # (a distance, a latency) they fall back to episode success -- so the filename is
+        # built from the metric actually plotted, not from the one requested.
+        line_metric = args.metric if args.metric in FAILURE_COLUMNS else "success_rate"
         plot_by_axis(group,
-                     args.output_dir / f"{prefix}_by_{axis.name}{suffix}.{args.format}",
-                     axis, group_label, metric=args.metric if args.metric in FAILURE_COLUMNS else "success_rate")
+                     args.output_dir / f"{prefix}_{line_metric}_by_{axis.name}{suffix}.{args.format}",
+                     axis, group_label, metric=line_metric)
         plot_by_axis_facets(group,
-                            args.output_dir / f"{prefix}_by_{axis.name}_facets{suffix}.{args.format}",
-                            axis, group_label)
+                            args.output_dir / f"{prefix}_{line_metric}_by_{axis.name}_facets{suffix}.{args.format}",
+                            axis, group_label, metric=line_metric)
 
 
 if __name__ == "__main__":

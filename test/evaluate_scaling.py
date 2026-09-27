@@ -43,7 +43,7 @@ from learning.dagger import (
 from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from learning.models.flow_policy import FlowPolicy
 from learning.models.mlp_policy import MLPPolicy
-from learning.models.policy import ActionPolicy
+from learning.models.policy import ActionPolicy, PolicyFactory
 from systems.dynamics import DynamicsProtocol
 from systems.goal_metrics import fleet_goal_errors
 from systems.seed_utils import (
@@ -67,12 +67,36 @@ CSV_FIELDS = (
     "robot_success_rate", "robot_collision_rate", "robot_timeout_rate",
     "mean_steps", "mean_goal_position_error",
     "mean_goal_heading_error", "mean_min_pair_distance",
+    # The worst and near-worst episode, not just the average one. A mean over episodes
+    # hides the single near-miss, which is the episode a safety claim actually rests on:
+    # a policy averaging 0.15 m of clearance while one episode grazed 0.101 m is not the
+    # same policy as one that never went under 0.14 m. p05 is the robust companion, so a
+    # lone outlier does not have to speak for the whole cell.
+    "min_min_pair_distance", "p05_min_pair_distance",
     "mean_visible_neighbours", "mean_action_ms", "mean_action_ms_per_robot", "wall_time_s",
 )
 
 
-def load_policy(checkpoint_path: str, device: torch.device) -> tuple[ActionPolicy, dict[str, Any]]:
-    """Rebuild a policy from a train_dagger.py metadata checkpoint.
+def read_checkpoint(checkpoint_path: str, device: torch.device) -> dict[str, Any]:
+    """Load and sanity-check a train_dagger.py metadata checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+        raise ValueError(f"'{checkpoint_path}' is not a train_dagger.py metadata checkpoint.")
+    raw_horizon = checkpoint.get("observation_horizon", 1)
+    observation_horizon = 1 if raw_horizon is None else int(raw_horizon)
+    if observation_horizon <= 0:
+        raise ValueError("Checkpoint 'observation_horizon' must be positive.")
+    checkpoint["observation_horizon"] = observation_horizon
+    return checkpoint
+
+
+def build_policy(
+    checkpoint: dict[str, Any],
+    device: torch.device,
+    simulator: DynamicsProtocol | None = None,
+    planner_config: Mapping[str, Any] | None = None,
+) -> ActionPolicy:
+    """Rebuild a policy from checkpoint metadata.
 
     ``state_dim`` and ``neighbor_slots`` are taken from the checkpoint rather than
     from the evaluation simulator: the encoders derive their ego-feature width from
@@ -80,16 +104,9 @@ def load_policy(checkpoint_path: str, device: torch.device) -> tuple[ActionPolic
     neighbour branch itself is slot-count agnostic, so the rebuilt policy accepts
     any fleet size at rollout time.
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
-        raise ValueError(f"'{checkpoint_path}' is not a train_dagger.py metadata checkpoint.")
-
     # Observation history widens each neighbour's feature vector and the ego block,
     # so the encoder cannot be rebuilt without it. Older checkpoints predate the key.
-    raw_horizon = checkpoint.get("observation_horizon", 1)
-    observation_horizon = 1 if raw_horizon is None else int(raw_horizon)
-    if observation_horizon <= 0:
-        raise ValueError("Checkpoint 'observation_horizon' must be positive.")
+    observation_horizon = int(checkpoint.get("observation_horizon", 1))
 
     encoder_kwargs_raw = checkpoint.get("encoder_kwargs") or {}
     encoder = EncoderFactory.create(
@@ -108,17 +125,56 @@ def load_policy(checkpoint_path: str, device: torch.device) -> tuple[ActionPolic
         "hidden_dims": tuple(int(width) for width in checkpoint["hidden_dims"]),
         "prediction_horizon": int(checkpoint.get("prediction_horizon", 1)),
     }
-    if policy_type == "flow":
+    if policy_type in {"flow", "safeflow"}:
         flow_config = checkpoint.get("flow_config") or {}
-        policy = FlowPolicy(**shared, num_inference_steps=int(flow_config.get("num_inference_steps", 10)))
+        flow_kwargs: dict[str, Any] = {
+            "num_inference_steps": int(flow_config.get("num_inference_steps", 10)),
+        }
+        # FlowPolicy trains in an action space normalized by the fleet's max_action, and
+        # registers that scale as a NON-PERSISTENT buffer -- so it is absent from
+        # model_state_dict and silently defaults to ones if not supplied here. The
+        # trainer saves it into flow_config precisely so evaluation can restore it
+        # (see dagger_trainer.py), and evaluate_policy.py / evaluate_checkpoints.py both
+        # do. This file used to drop it, which scaled every flow action down by
+        # max_action -- a factor of 8 in linear and 150 in angular acceleration on the
+        # 0.1 m robot, i.e. a policy that barely moves. Older checkpoints predate the
+        # key; for those, ones is what trained them and ones is correct.
+        if flow_config.get("action_scale") is not None:
+            flow_kwargs["action_scale"] = list(flow_config["action_scale"])
+
+        if policy_type == "safeflow":
+            if simulator is None or planner_config is None:
+                raise ValueError(
+                    "policy_type 'safeflow' needs 'simulator' and 'planner_config' to "
+                    "build its CasADi projector. Its projectors are sized to the fleet "
+                    "(one Opti per robot), so it must be rebuilt per evaluation config "
+                    "rather than once per checkpoint."
+                )
+            policy = PolicyFactory.create(
+                "safeflow", **shared, **flow_kwargs,
+                simulator=simulator, planner_config=planner_config,
+            )
+        else:
+            policy = FlowPolicy(**shared, **flow_kwargs)
     elif policy_type == "mlp":
         policy = MLPPolicy(**shared)
     else:
         raise ValueError(f"Unsupported policy type '{policy_type}'.")
 
     policy.load_state_dict(checkpoint["model_state_dict"])
-    checkpoint["observation_horizon"] = observation_horizon
-    return policy.to(device).eval(), checkpoint
+    return policy.to(device).eval()
+
+
+def load_policy(
+    checkpoint_path: str,
+    device: torch.device,
+    simulator: DynamicsProtocol | None = None,
+    planner_config: Mapping[str, Any] | None = None,
+) -> tuple[ActionPolicy, dict[str, Any]]:
+    """Read a checkpoint and rebuild its policy, for callers that want both."""
+    checkpoint = read_checkpoint(checkpoint_path, device)
+    policy = build_policy(checkpoint, device, simulator, planner_config)
+    return policy, checkpoint
 
 
 def min_pair_distance(simulator: DynamicsProtocol, state: np.ndarray) -> float:
@@ -397,6 +453,8 @@ def evaluate_fleet(
         "mean_goal_position_error": float(np.mean(position_errors)),
         "mean_goal_heading_error": float(np.mean(heading_errors)),
         "mean_min_pair_distance": float(np.mean(min_distances)),
+        "min_min_pair_distance": float(np.min(min_distances)),
+        "p05_min_pair_distance": float(np.percentile(min_distances, 5)),
         "mean_visible_neighbours": float(np.mean(visible_counts)),
         # The fleet is one batched forward pass, so this is the latency of a whole
         # control step, not of a single robot deciding on its own hardware. The
@@ -461,7 +519,11 @@ def main() -> None:
     else:
         device = torch.device("cpu")
 
-    policy, checkpoint = load_policy(args.checkpoint, device)
+    checkpoint = read_checkpoint(args.checkpoint, device)
+    policy_type = str(checkpoint.get("policy_type", "mlp")).lower()
+    # safeflow builds one CasADi Opti per robot, sized to the fleet, so it is rebuilt
+    # inside the config loop. mlp and flow are fleet-size agnostic and built once.
+    policy = None if policy_type == "safeflow" else build_policy(checkpoint, device)
     train_fleet_size = int(checkpoint["neighbor_slots"]) + 1
     print(
         f"checkpoint: {args.checkpoint}\n"
@@ -480,7 +542,9 @@ def main() -> None:
         # A flow policy samples its action from noise at every step, so repeated
         # rollouts differ even from a fixed start and averaging over draws is the
         # whole point. Only a deterministic policy can be collapsed.
-        policy_is_deterministic = str(checkpoint.get("policy_type", "mlp")).lower() != "flow"
+        # safeflow samples from the same noise prior as flow (its projection is applied
+        # to each sampled trajectory), so it is stochastic too and must not be collapsed.
+        policy_is_deterministic = policy_type not in {"flow", "safeflow"}
         if (
             args.use_config_start
             and args.action_noise_std == 0.0
@@ -496,6 +560,13 @@ def main() -> None:
         for config_path in args.configs:
             config = load_and_validate_system_config("multi_robot", config_path)
             simulator = DynamicsFactory.create(system_name="multi_robot", config=config)
+            if policy_type == "safeflow":
+                # The evaluation scenario doubles as the projector's planner config: it
+                # carries the same d_safe / d_collision / R_diag / slack weight the
+                # expert used, which is what the projector reads.
+                policy = build_policy(
+                    checkpoint, device, simulator=simulator, planner_config=config
+                )
             fixed_start = config_start_state(config) if args.use_config_start else None
             if fixed_start is not None and simulator.is_collision(fixed_start):
                 raise SystemExit(f"{config_path}: configured start state is already in collision.")
