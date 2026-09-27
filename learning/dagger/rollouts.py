@@ -801,7 +801,6 @@ def collect_dagger_rollouts(
                 )
 
             for frame_data in frame_buffer:
-                print(frame_data)
                 dataset_writer.add_frame(frame_data)
 
             dataset_writer.save_episode()
