@@ -4,8 +4,13 @@ import math
 import random
 from typing import Mapping
 
+import datasets
 import numpy as np
 import torch
+from lerobot.datasets import compute_stats as _lerobot_compute_stats
+from lerobot.datasets import dataset_reader as _lerobot_dataset_reader
+from lerobot.datasets import dataset_writer as _lerobot_dataset_writer
+from lerobot.datasets import feature_utils as _lerobot_feature_utils
 
 from .metrics import DaggerEvalMetrics
 from systems.dynamics import DynamicsProtocol
@@ -175,3 +180,104 @@ def sample_initial_state(simulator: DynamicsProtocol, seed_spec: int | list[int]
     rng = rng_for_seed_spec(simulator, seed_spec)
     simulator.randomize_goal_for_reset(rng)
     return simulator.random_initial_state(rng)
+
+
+# --- LeRobot compatibility patches, applied below on import ---------------
+#
+# Some of our systems legitimately report a zero-length dataset feature (e.g.
+# observation.state for single_integrator, which has no proprioception
+# beyond position -- everything is already captured by the goal-relative
+# observation.environment_state). LeRobot's dataset-writing path doesn't
+# handle this, in two separate places:
+#
+# 1. Episode-stats computation: RunningQuantileStats.update() reshapes a
+#    batch to (-1, batch.shape[-1]), and when the array is genuinely empty
+#    (shape (N, 0)), numpy can't infer the -1 (0 total size / 0 per-row is
+#    undefined) and raises ValueError: cannot reshape array of size 0 into
+#    shape (0).
+# 2. Arrow schema construction: a zero-length 1-D feature becomes
+#    datasets.Sequence(length=0, ...), which compiles to a pyarrow
+#    FixedSizeListArray of size 0 -- pyarrow rejects this outright
+#    (ArrowInvalid: list_size needs to be a strict positive integer) the
+#    moment an episode is actually written, regardless of #1.
+#
+# Both are upstream gaps, not ours to carry a private fork for -- so we patch
+# around them here instead. Each patched function is otherwise identical to
+# LeRobot's original, with one added branch for the zero-size case.
+
+
+def _get_feature_stats_zero_size_safe(
+    array: np.ndarray,
+    axis: int | tuple[int, ...] | None,
+    keepdims: bool,
+    quantile_list: list[float] | None = None,
+) -> dict[str, np.ndarray]:
+    if quantile_list is None:
+        quantile_list = _lerobot_compute_stats.DEFAULT_QUANTILES
+
+    original_shape = array.shape
+    reshaped, sample_count = _lerobot_compute_stats._prepare_array_for_stats(array, axis)
+
+    if reshaped.shape[0] < 2 or reshaped.size == 0:
+        stats = _lerobot_compute_stats._compute_basic_stats(reshaped, sample_count, quantile_list)
+    else:
+        running_stats = _lerobot_compute_stats.RunningQuantileStats()
+        running_stats.update(reshaped)
+        stats = running_stats.get_statistics()
+        stats["count"] = np.array([sample_count])
+
+    return _lerobot_compute_stats._reshape_stats_by_axis(stats, axis, keepdims, original_shape)
+
+
+def _get_hf_features_from_features_zero_size_safe(features: dict) -> datasets.Features:
+    """Same as LeRobot's original, except a zero-length 1-D feature (e.g.
+    observation.state for a system with no proprioception beyond position)
+    becomes a variable-length Sequence instead of a fixed-length one.
+    Sequence(length=0, ...) compiles to a pyarrow FixedSizeListArray of size
+    0, which pyarrow rejects outright (list_size needs to be a strict
+    positive integer) the moment an episode with such a feature is written
+    -- there is no valid fixed-size encoding for "always empty" in this
+    version of pyarrow/datasets. Dropping the fixed length (every row for
+    this key is [] anyway) uses a variable-length list instead, which
+    pyarrow stores and reads back fine (round-trips to shape (0,), verified
+    directly).
+    """
+    hf_features = {}
+    for key, ft in features.items():
+        if ft["dtype"] == "video":
+            continue
+        elif ft["dtype"] == "image":
+            hf_features[key] = datasets.Image()
+        elif ft["shape"] == (1,):
+            hf_features[key] = datasets.Value(dtype=ft["dtype"])
+        elif len(ft["shape"]) == 1:
+            if ft["shape"][0] == 0:
+                hf_features[key] = datasets.Sequence(feature=datasets.Value(dtype=ft["dtype"]))
+            else:
+                hf_features[key] = datasets.Sequence(
+                    length=ft["shape"][0], feature=datasets.Value(dtype=ft["dtype"])
+                )
+        elif len(ft["shape"]) == 2:
+            hf_features[key] = datasets.Array2D(shape=ft["shape"], dtype=ft["dtype"])
+        elif len(ft["shape"]) == 3:
+            hf_features[key] = datasets.Array3D(shape=ft["shape"], dtype=ft["dtype"])
+        elif len(ft["shape"]) == 4:
+            hf_features[key] = datasets.Array4D(shape=ft["shape"], dtype=ft["dtype"])
+        elif len(ft["shape"]) == 5:
+            hf_features[key] = datasets.Array5D(shape=ft["shape"], dtype=ft["dtype"])
+        else:
+            raise ValueError(f"Corresponding feature is not valid: {ft}")
+
+    return datasets.Features(hf_features)
+
+
+_lerobot_compute_stats.get_feature_stats = _get_feature_stats_zero_size_safe
+
+# get_hf_features_from_features is imported with `from ... import` in
+# several LeRobot modules (a separate name binding each time, not an
+# attribute lookup on feature_utils) -- patching feature_utils's own
+# attribute alone would silently miss every one of those call sites, so
+# each importer's local binding needs patching directly too.
+_lerobot_feature_utils.get_hf_features_from_features = _get_hf_features_from_features_zero_size_safe
+_lerobot_dataset_writer.get_hf_features_from_features = _get_hf_features_from_features_zero_size_safe
+_lerobot_dataset_reader.get_hf_features_from_features = _get_hf_features_from_features_zero_size_safe
