@@ -56,17 +56,19 @@ class MpcWarmStartFailureRecoveryTests(unittest.TestCase):
 
         rng = np.random.default_rng(16927820532609799510)
         state = simulator.reset(initial_state)
+        previous_state: np.ndarray | None = None
         planner.reset()
 
         # The bare reproduction fails at step 36; 40 leaves a small margin
         # while keeping the test's real IPOPT solve count (and runtime) low.
         for step in range(40):
-            obs = simulator.observe(state)
+            obs = simulator.observe(state, previous_state)
             try:
                 action = planner(obs)
             except PlannerSolveError as exc:
                 self.fail(f"Planner failed at step={step} instead of recovering via cold restart: {exc}")
             executed_action = apply_execution_noise(simulator, action, action_noise_std=0.03, rng=rng)
+            previous_state = state
             state = simulator.step(state, executed_action)
             if simulator.should_terminate_rollout(state):
                 break

@@ -1,12 +1,8 @@
-# Flow Policy architecture config for learning/train_dagger.py -- 4-robot fleet
+# MLP architecture config for learning/train_dagger.py -- 4-robot fleet
 model:
-  policy_type: flow             # options: mlp, flow, safeflow
-
-  flow:
-    num_inference_steps: 3      # Euler integration steps for ODE sampling
-
-  prediction_horizon: 10        # number of future action steps to predict, set to 1 for single-step prediction
-  hidden_dims: [256, 256, 256]  # Velocity prediction network hidden layers
+  policy_type: mlp              # options: mlp, flow, safeflow
+  prediction_horizon: 1         # number of future action steps to predict, set to 1 for single-step prediction
+  hidden_dims: [256, 256, 256]  # Action prediction network hidden layers
 
   encoder: deepset              # options: deepset, transformer, gnn
 
@@ -20,7 +16,7 @@ training:
   dagger_iterations: 5
   trajectories_per_iteration: [200, 200, 200, 200, 200]
   steps_per_trajectory: 250
-  target_epochs_per_round: [20, 20, 20, 20, 20]
+  target_epochs_per_round: [40, 40, 40, 40, 40]
   action_noise_std: 0.03
   expert_mix_beta_start: 0.5
   expert_mix_beta_decay_rate: 0.25

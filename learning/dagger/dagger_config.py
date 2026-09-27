@@ -37,7 +37,6 @@ class DaggerConfig:
     learning_rate: float
     mlp_hidden_dims: tuple[int, ...]
     prediction_horizon: int
-    observation_horizon: int
     encoder_config: EncoderConfig
     policy_type: str
     flow_config: FlowConfig
@@ -71,8 +70,6 @@ class DaggerConfig:
             raise ValueError("Trajectory targets must be positive.")
         if self.steps_per_trajectory <= 0:
             raise ValueError("'steps_per_trajectory' must be positive.")
-        if self.observation_horizon <= 0:
-            raise ValueError("'observation_horizon' must be positive.")
         if self.action_noise_std < 0 or self.eval_action_noise_std < 0:
             raise ValueError("Action noise must be non-negative.")
         if not 0 <= self.expert_mix_beta_start <= 1 or not 0 <= self.expert_mix_beta_end <= 1:

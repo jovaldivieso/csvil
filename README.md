@@ -342,23 +342,17 @@ leaves no margin beyond the system's own worst-case braking distance for
 anything else sharing that horizon (tracking the flow policy's own proposal,
 collision avoidance), which in practice made the projector spend the whole
 horizon braking and never actually progress. This interchangeability also
-assumes the checkpoint's saved observation schema includes
-`observation.state_mask`: a checkpoint trained before that field existed
-saved a smaller `state_dim` than `resolve_checkpoint_observation_dimensions`
-now expects and is rejected outright (for either policy type, not just
-`safeflow`) -- retrain against the current schema rather than trying to
-evaluate such a checkpoint. For a multi-robot fleet specifically (more than
-one robot, so each has neighbors to forecast), `SafeFlowMPCPolicy`
-construction additionally rejects (`ValueError`) any checkpoint whose
-`model.observation_horizon` is `1` -- a neighbor's velocity can only be
-estimated by differencing two consecutive observation frames -- and any
-system with no velocity state (e.g. `single_integrator`, `unicycle1`), since
-neither can support the decentralized neighbor-velocity forecast SafeFlow's
-multi-robot coordination needs. `learning/config/multi_double_integrator_casadi_flow_config.yaml`
-sets `observation_horizon: 1` and is therefore a `flow`-only config for
-multi-robot use -- it cannot also be evaluated as `safeflow` without
-retraining at `observation_horizon >= 2`. A single robot (no neighbors) is
-unaffected by either check.
+assumes the checkpoint's saved observation schema matches what
+`resolve_checkpoint_observation_dimensions` expects: a checkpoint trained
+against an older, incompatible schema saves a different `state_dim` and is
+rejected outright (for either policy type, not just `safeflow`) -- retrain
+against the current schema rather than trying to evaluate such a checkpoint.
+For a multi-robot fleet, `SafeFlowMPCPolicy` forecasts each neighbor's future
+trajectory from its velocity, which `MultiRobotSimulator.observe()` computes
+directly as an exact finite-difference of consecutive global positions (see
+`systems/multi_robot.py`) -- there's no minimum history length or
+velocity-state requirement, so any system/fleet-size combination `flow`
+supports is also `safeflow`-compatible.
 `--initial-states`/`--goal-states` are
 optional (omit them for randomly seeded rollouts); pass them to check
 performance on a specific scenario, e.g. the same swap/crossing cases used
@@ -393,8 +387,8 @@ python test/evaluate_policy.py \
 
 Here `4_multi_unicycle2_casadi_config.yaml` sets `robots.num_robots: 4` (a
 4-way rotational swap), while the checkpoint was trained on 2 robots — the
-encoder's per-neighbor schema and observation horizon must still match, but
-`neighbor_slots` adapts automatically to the runtime fleet size.
+encoder's per-neighbor schema must still match, but `neighbor_slots` adapts
+automatically to the runtime fleet size.
 
 For Docker, prefix either command with `docker compose run --rm csvil`.
 
@@ -422,7 +416,8 @@ Optional multi-robot visibility gating can be set in the simulator config:
   per-robot list of radii (broadcast-style API)
 
 When another robot is outside the observing robot's visibility radius, its
-relative-pose features (position and periodic heading terms) are zeroed in the observation.
+relative-pose and relative-velocity features (position, periodic heading
+terms, velocity, and turn rate) are zeroed in the observation.
 
 Seed format quick reference:
 

@@ -1,6 +1,6 @@
 # Flow Policy architecture config for learning/train_dagger.py -- 4-robot fleet
 model:
-  policy_type: flow             # options: mlp, flow, safeflow
+  policy_type: safeflow         # options: mlp, flow, safeflow
 
   flow:
     num_inference_steps: 3      # Euler integration steps for ODE sampling
@@ -20,9 +20,9 @@ training:
   dagger_iterations: 5
   trajectories_per_iteration: [200, 200, 200, 200, 200]
   steps_per_trajectory: 250
-  target_epochs_per_round: [20, 20, 20, 20, 20]
+  target_epochs_per_round: [40, 40, 40, 40, 40]
   action_noise_std: 0.03
-  expert_mix_beta_start: 0.5
+  expert_mix_beta_start: 0.75
   expert_mix_beta_decay_rate: 0.25
   expert_mix_decay_after_eval_success: 0.5
   expert_mix_beta_recovery: 0.75
