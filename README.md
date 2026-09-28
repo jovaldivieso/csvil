@@ -516,6 +516,7 @@ lerobot-dataset-viz \
 
 
 ## TODO / Roadmap / Brainstorming
+- Open: Add a learned world model (`learning/models/world_model.py`) predicting next observation given the current observation and action, `p(o'|o,a)` -- SafeFlowMPCPolicy's safety projector already needs this shape of prediction for its neighbor-trajectory forecast, but currently gets it from an exact kinematic "coast at zero action" extrapolation (`predict_next_state` with a zero action, unconditioned on the ego's own action), not a learned one, so it can't capture reactive/interactive neighbor behavior. A learned version, trained on the `(o_t, a_t, o_{t+1})` triples already present in every collected rollout, could improve that forecast and, combined with an action policy `p(a|o)`, give flow/mlp an analogous joint structure `p(a,o'|o) = p(o'|o,a) * p(a|o)` -- usable as an auxiliary training signal or for learned-model-based inference-time lookahead.
 - Open: Extend protocol-level simulator metadata beyond the already-promoted `is_euclidean` field (for example, plotting metadata and coordinate semantics) to remove remaining script-local heuristics.
 - Open: Add structured benchmark suites that report success rate, terminal error, trajectory cost, safety-margin statistics, and solver wall-time across systems and policies.
 - Open: Add repeatable experiment manifests (seed bundles, config snapshots, artifact indexing) for reproducible BC/DAgger comparisons.
