@@ -67,7 +67,7 @@ BUDGET_GRID = 50
 CSV_FIELDS = (
     "run", "policy_type", "encoder_type", "train_seed",
     "config", "v0", "eval_fleet_size", "episodes", "steps", "action_noise_std",
-    "success_rate", "collision_rate", "timeout_rate",
+    "success_rate", "collision_rate", "timeout_rate", "infeasible_rate",
     "robot_success_rate", "robot_collision_rate",
     "mean_min_pair_distance", "min_min_pair_distance", "p05_min_pair_distance",
     "mean_steps", "mean_goal_position_error", "mean_goal_heading_error",
@@ -242,9 +242,13 @@ def main() -> None:
                 })
                 writer.writerow(row)
                 handle.flush()
+                infeasible_note = (
+                    f" infeasible={metrics['infeasible_rate']:.3f}"
+                    if metrics.get("infeasible_rate") else ""
+                )
                 print(f"  v0={v0:<5.2f} success={metrics['success_rate']:.3f} "
                       f"collision={metrics['collision_rate']:.3f} "
-                      f"timeout={metrics['timeout_rate']:.3f}  "
+                      f"timeout={metrics['timeout_rate']:.3f}{infeasible_note}  "
                       f"clearance worst={metrics['min_min_pair_distance']:.4f} "
                       f"mean={metrics['mean_min_pair_distance']:.4f}  "
                       f"{steps} steps  {metrics['mean_action_ms']:.1f} ms/step  ({elapsed:.0f}s)",

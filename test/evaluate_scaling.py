@@ -44,6 +44,7 @@ from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from learning.models.flow_policy import FlowPolicy
 from learning.models.mlp_policy import MLPPolicy
 from learning.models.policy import ActionPolicy, PolicyFactory
+from planning.casadi_planner import PlannerSolveError
 from systems.dynamics import DynamicsProtocol
 from systems.goal_metrics import fleet_goal_errors
 from systems.seed_utils import (
@@ -354,7 +355,7 @@ def evaluate_fleet(
     (an episode with a collision is a collision either way); only mean_steps grows, and
     with it the cost. ``stop_on_collision`` restores the cheaper behaviour.
     """
-    successes = collisions = 0
+    successes = collisions = infeasibles = 0
     robot_successes = robot_collisions = robot_total = 0
     # One entry per control step: the wall time of the policy call that produced that
     # step's joint action. Kept separate from wall_time_s, which also covers the
@@ -392,6 +393,7 @@ def evaluate_fleet(
         ever_collided = collided_robots(simulator, state)
         reached_goal = collided = False
         rollout_steps = 0
+        infeasible = False
 
         for step in range(1, steps + 1):
             observation = simulator.observe(state, validate=False)
@@ -400,10 +402,23 @@ def evaluate_fleet(
             if device.type == "cuda":
                 torch.cuda.synchronize()
             action_start = time.perf_counter()
-            action = build_decentralized_joint_action(
-                simulator, policy, observation, device,
-                observation_horizon=observation_horizon, history_buffer=history_buffer,
-            )
+            try:
+                action = build_decentralized_joint_action(
+                    simulator, policy, observation, device,
+                    observation_horizon=observation_horizon, history_buffer=history_buffer,
+                )
+            except PlannerSolveError:
+                # safeflow's projector refuses to return an action it cannot certify: if
+                # its QP is infeasible and no revalidated trajectory is cached, it raises
+                # (casadi_projector.py). That is an episode outcome -- the policy could
+                # not act -- not a reason to abandon the run, which is what an uncaught
+                # raise did: one infeasible rung killed every remaining cell.
+                #
+                # Counted separately rather than folded into timeout. "Ran out of steps"
+                # and "the safety layer gave up" are different failures, and for a head
+                # whose whole claim is its safety layer the difference is the result.
+                infeasible = True
+                break
             if device.type == "cuda":
                 torch.cuda.synchronize()
             action_times_ms.append((time.perf_counter() - action_start) * 1000.0)
@@ -429,6 +444,7 @@ def evaluate_fleet(
         # not on its own a success. The three outcomes stay mutually exclusive.
         successes += int(reached_goal and not collided)
         collisions += int(collided)
+        infeasibles += int(infeasible)
         at_goal = robots_at_goal(simulator, state)
         robot_successes += int((at_goal & ~ever_collided).sum())
         robot_collisions += int(ever_collided.sum())
@@ -446,6 +462,8 @@ def evaluate_fleet(
         "success_rate": successes / episodes,
         "collision_rate": collisions / episodes,
         "timeout_rate": (episodes - successes - collisions) / episodes,
+        # Of which this many could not produce a certified action at all.
+        "infeasible_rate": infeasibles / episodes,
         "robot_success_rate": robot_successes / robot_total,
         "robot_collision_rate": robot_collisions / robot_total,
         "robot_timeout_rate": (robot_total - robot_successes - robot_collisions) / robot_total,

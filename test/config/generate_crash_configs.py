@@ -83,8 +83,11 @@ RADIUS = 0.1732
 # stated in the units the failures actually happen in and spaced to resolve the onset
 # rather than to span the envelope. Spacing is deliberately uneven: coarse below 0.4 m/s
 # where every policy is comfortable, then 0.1 steps from 0.5 up, which is the band the
-# failures were first seen in and where the curve needs resolution.
-DEFAULT_SPEEDS = (0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+# failures were first seen in and where the curve needs resolution. Extended to 1.3 once
+# Flow turned out to still be solving 1.0 cleanly; the expert's own ceiling is between
+# 1.375 and 1.5 at this separation (see --calibrate), so 1.3 is the last rung that still
+# measures the policy rather than the task.
+DEFAULT_SPEEDS = (0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3)
 
 
 def parse_args() -> argparse.Namespace:

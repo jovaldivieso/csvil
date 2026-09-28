@@ -55,6 +55,7 @@ from core.factory import DynamicsFactory, PlannerFactory  # noqa: E402
 from evaluate_crash import crash_step_budget, initial_speed  # noqa: E402
 from evaluate_scaling import build_policy, config_start_state, read_checkpoint  # noqa: E402
 from learning.dagger import ObservationHistoryBuffer, build_decentralized_joint_action  # noqa: E402
+from planning.casadi_planner import PlannerSolveError  # noqa: E402
 from plot_crash_results import GRID, INK, INK_MUTED, SERIES_STYLE  # noqa: E402
 
 CRITICAL = "#c0362c"
@@ -80,37 +81,50 @@ def roll_out_policy(simulator, policy, device, start, steps, observation_horizon
         if observation_horizon > 1 else None
     )
     states, actions = [np.asarray(state, dtype=float).copy()], []
-    for _ in range(steps):
+    truncated_at = None
+    for step in range(steps):
         observation = simulator.observe(state, validate=False)
-        action = build_decentralized_joint_action(
-            simulator, policy, observation, device,
-            observation_horizon=observation_horizon, history_buffer=history,
-        )
+        try:
+            action = build_decentralized_joint_action(
+                simulator, policy, observation, device,
+                observation_horizon=observation_horizon, history_buffer=history,
+            )
+        except PlannerSolveError:
+            # safeflow's projector raises rather than return an action it cannot
+            # certify. Draw what happened up to that point and say so on the figure: a
+            # silently truncated trace would read as a policy that simply sat still,
+            # which is the opposite of what this is.
+            truncated_at = step
+            break
         actions.append(np.asarray(action, dtype=float).copy())
         state = simulator.step(state, action, validate=False)
         states.append(np.asarray(state, dtype=float).copy())
         if simulator.should_terminate_rollout(state):
             break
-    return np.stack(states), np.stack(actions)
+    action_dim = int(np.asarray(simulator.simulators[0].max_action).size) * simulator.num_robots
+    stacked = np.stack(actions) if actions else np.zeros((0, action_dim))
+    return np.stack(states), stacked, truncated_at
 
 
 def roll_out_expert(simulator, planner, start, steps):
-    from planning.casadi_planner import PlannerSolveError
-
     planner.reset()
     state = simulator.reset(np.asarray(start, dtype=float).copy())
     states, actions = [np.asarray(state, dtype=float).copy()], []
-    for _ in range(steps):
+    truncated_at = None
+    for step in range(steps):
         try:
             action = planner(simulator.observe(state, validate=False))
         except PlannerSolveError:
+            truncated_at = step
             break
         actions.append(np.asarray(action, dtype=float).copy())
         state = simulator.step(state, action, validate=False)
         states.append(np.asarray(state, dtype=float).copy())
         if simulator.should_terminate_rollout(state):
             break
-    return np.stack(states), np.stack(actions)
+    action_dim = int(np.asarray(simulator.simulators[0].max_action).size) * simulator.num_robots
+    stacked = np.stack(actions) if actions else np.zeros((0, action_dim))
+    return np.stack(states), stacked, truncated_at
 
 
 def style_axes(ax) -> None:
@@ -125,10 +139,11 @@ def style_axes(ax) -> None:
     ax.yaxis.label.set_color(INK)
 
 
-def plot_trajectories(ax, rollouts, simulator, d_collision, v0) -> None:
+def plot_trajectories(ax, rollouts, simulator, d_collision, v0, dt) -> None:
     slices = simulator.robot_state_slices
-    for name, (states, _actions) in rollouts.items():
+    for name, (states, _actions, truncated_at) in rollouts.items():
         color, _marker, dash, label = style_for(name)
+        label = decorate(label, truncated_at, dt)
         for robot_index, state_slice in enumerate(slices):
             xs = states[:, state_slice.start]
             ys = states[:, state_slice.start + 1]
@@ -157,6 +172,13 @@ def plot_trajectories(ax, rollouts, simulator, d_collision, v0) -> None:
         fontsize=11, color=INK, loc="left",
     )
     style_axes(ax)
+
+
+def decorate(label: str, truncated_at, dt: float) -> str:
+    """Mark a run whose projector gave up, so the short trace is not read as inaction."""
+    if truncated_at is None:
+        return label
+    return f"{label} - infeasible at {truncated_at * dt:.3f}s"
 
 
 def style_for(name: str):
@@ -191,8 +213,11 @@ def plot_actions(axes, rollouts, simulator, dt, v0) -> None:
         ax.axhline(limit, color=CRITICAL, linewidth=1.3, zorder=1)
         ax.axhline(-limit, color=CRITICAL, linewidth=1.3, zorder=1)
 
-        for name, (_states, actions) in rollouts.items():
+        for name, (_states, actions, truncated_at) in rollouts.items():
             color, _marker, dash, label = style_for(name)
+            label = decorate(label, truncated_at, dt)
+            if len(actions) == 0:
+                continue
             # Robot 0 only: the layout is exactly head-on, so robot 1 mirrors it and
             # plotting both doubles the ink without adding information.
             column = dimension if action_slices is None else action_slices[0].start + dimension
@@ -210,7 +235,7 @@ def plot_actions(axes, rollouts, simulator, dt, v0) -> None:
             # a strict test reports that as the expert demanding the impossible, which
             # is a libel on the one agent here that genuinely respects its limits.
             over = float(np.mean(np.abs(series) > limit * 1.001))
-            summary.setdefault(name, []).append((saturated, over))
+            summary.setdefault(label, []).append((saturated, over))
             extremes.append(float(np.max(np.abs(series))))
 
         # Fit the commanded values, not just the limits: cropping at the bound would hide
@@ -236,8 +261,9 @@ def summary_text(summary) -> str:
         f"{'':16}{'at limit':>12}{'over limit':>12}{'at limit':>13}{'over limit':>13}"
     )
     lines = [header]
-    for name, dims in summary.items():
-        _c, _m, _d, label = style_for(name)
+    for label, dims in summary.items():
+        if len(dims) < 2:
+            continue
         (lin_sat, lin_over), (ang_sat, ang_over) = dims
         lines.append(
             f"{label:<16}{lin_sat:>11.1%}{lin_over:>12.1%}{ang_sat:>13.1%}{ang_over:>13.1%}"
@@ -319,7 +345,7 @@ def main() -> None:
 
         fig, ax = plt.subplots(figsize=(7.2, 6.4))
         fig.patch.set_facecolor("#fcfcfb"); ax.set_facecolor("#fcfcfb")
-        plot_trajectories(ax, ordered, simulator, d_collision, v0)
+        plot_trajectories(ax, ordered, simulator, d_collision, v0, dt)
         ax.legend(frameon=False, fontsize=9, labelcolor=INK, loc="best")
         fig.tight_layout()
         stem = Path(config_path).stem
