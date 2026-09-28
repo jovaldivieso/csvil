@@ -66,6 +66,34 @@ GRID = "#d8d7d2"
 CRITICAL = "#c0362c"
 
 
+def save_figure(fig, stem: Path, titled=("pdf",), untitled=("png",), **savefig_kwargs) -> None:
+    """Write the figure once with its titles and once without.
+
+    The PDF keeps every title, so the file is self-describing when opened on its own.
+    The PNG drops them, because that is the one that goes into a paper or a slide where
+    a caption already says what the figure is and a baked-in title collides with it.
+    Axis labels, legends and annotations stay in both -- those are part of reading the
+    data, not a heading.
+    """
+    for extension in titled:
+        fig.savefig(f"{stem}.{extension}", **savefig_kwargs)
+    if not untitled:
+        return
+    suptitle = fig._suptitle.get_text() if fig._suptitle is not None else None
+    axis_titles = [ax.get_title() for ax in fig.axes]
+    if suptitle is not None:
+        fig.suptitle("")
+    for ax in fig.axes:
+        ax.set_title("")
+    for extension in untitled:
+        fig.savefig(f"{stem}.{extension}", **savefig_kwargs)
+    # Restore, so a caller that reuses the figure is not silently handed a bare one.
+    if suptitle is not None:
+        fig.suptitle(suptitle)
+    for ax, title in zip(fig.axes, axis_titles):
+        ax.set_title(title, loc="left")
+
+
 def wilson_interval(successes: float, total: int, z: float = 1.96) -> tuple[float, float]:
     """Wilson score interval - stays inside [0, 1] where the normal approximation does not.
 
@@ -138,11 +166,11 @@ def label_rungs(ax, speeds: list[float], v_max: float) -> None:
     spaced grid that implies speeds nothing was measured at.
     """
     ax.set_xticks(speeds)
-    ax.set_xticklabels([f"{v:g}\n({100 * v / v_max:.0f}%)" for v in speeds])
+    # ax.set_xticklabels([f"{v:g}\n({100 * v / v_max:.0f}%)" for v in speeds])
     # Name what a tick *is*. Every rung is a separate config that differs from its
     # neighbours in exactly one number, so a reader should not have to infer that the
     # x-axis and the config list are the same thing.
-    ax.set_xlabel("initial speed $v_0$ - one crash config per tick\n(m/s, and % of max_linear_vel)")
+    ax.set_xlabel("initial speed $v_0$")
 
 
 def plot_success(ax, by_policy: dict[str, list[dict]]) -> None:
@@ -233,27 +261,6 @@ def plot_clearance(
     style_axes(ax)
 
 
-def plot_failures(ax, by_policy: dict[str, list[dict]]) -> None:
-    """How each failure happened: a crash and a stall are not the same result."""
-    width = 0.055
-    offsets = {name: (index - 1) * width for index, name in enumerate(SERIES_ORDER)}
-    for name in SERIES_ORDER:
-        series = by_policy.get(name)
-        if not series:
-            continue
-        color, _, _, label = SERIES_STYLE[name]
-        xs = [record["v0"] + offsets[name] for record in series]
-        collision = [float(record["collision_rate"]) for record in series]
-        timeout = [float(record["timeout_rate"]) for record in series]
-        ax.bar(xs, collision, width=width * 0.9, color=color, label=f"{label} collision", zorder=3)
-        # 2px surface gap between stacked segments, so the boundary reads as a boundary.
-        ax.bar(xs, timeout, width=width * 0.9, bottom=[c + 0.012 for c in collision],
-               color=color, alpha=0.35, label=f"{label} timeout", zorder=3)
-    ax.set_ylabel("failure rate")
-    ax.set_title("Failure mode - solid: collision, pale: timeout", fontsize=11, color=INK, loc="left")
-    style_axes(ax)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -262,9 +269,6 @@ def parse_args() -> argparse.Namespace:
                         help="merged crash CSV, e.g. outputs/<exp>/eval/crash.csv")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="default: <results parent>/../plots/crash")
-    parser.add_argument("--with-failures", action="store_true",
-                        help="add a third panel splitting failures into collision vs timeout")
-    parser.add_argument("--title", default=None, help="figure suptitle")
     return parser.parse_args()
 
 
@@ -281,46 +285,35 @@ def main() -> None:
     raw = yaml.safe_load((PROJECT_ROOT / first_config).read_text())
     v_max = float(raw["robots"][0]["config"]["max_linear_vel"])
 
-    panels = 3 if args.with_failures else 2
-    fig, axes = plt.subplots(1, panels, figsize=(6.2 * panels, 5.0))
-    fig.patch.set_facecolor("#fcfcfb")
-    for ax in axes:
-        ax.set_facecolor("#fcfcfb")
-
-    plot_success(axes[0], by_policy)
-    plot_clearance(axes[1], by_policy, d_collision, d_safe)
-    if args.with_failures:
-        plot_failures(axes[2], by_policy)
     speeds = sorted({record["v0"] for series in by_policy.values() for record in series})
-    for ax in axes:
-        label_rungs(ax, speeds, v_max)
-
-    episodes = {int(row["episodes"]) for row in rows}
-    fleet = {int(row["eval_fleet_size"]) for row in rows}
-    encoders = {str(row["encoder_type"]) for row in rows}
-    rungs = len({row["config"] for row in rows})
-    subtitle = (
-        f"head-on crash ladder: {rungs} configs differing only in initial speed - "
-        f"N={'/'.join(str(n) for n in sorted(fleet))}, "
-        f"{'/'.join(sorted(encoders))} encoder, "
-        f"{'/'.join(str(n) for n in sorted(episodes))} episodes per rung"
-    )
-    fig.suptitle(args.title or subtitle, fontsize=12, color=INK, y=0.99)
-
-    # Legend present for >= 2 series even though every line is also directly labelled.
-    handles, labels = axes[0].get_legend_handles_labels()
-    if handles:
-        fig.legend(handles, labels, loc="lower center", ncol=len(handles), frameon=False,
-                   fontsize=9, labelcolor=INK, bbox_to_anchor=(0.5, -0.005))
-
-    fig.tight_layout(rect=(0, 0.05, 1, 0.94))
     output_dir = args.output_dir or (args.results.parent.parent / "plots" / "crash")
     output_dir.mkdir(parents=True, exist_ok=True)
-    for extension in ("pdf", "png"):
-        path = output_dir / f"crash_ladder.{extension}"
-        fig.savefig(path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
-        print(f"wrote {path}")
-    plt.close(fig)
+
+    # One metric per file. They answer different questions and are read at different
+    # points in an argument, so a reader who wants the clearance figure should not have
+    # to crop the success one out of it.
+    for name, draw in (
+        ("crash_success", lambda ax: plot_success(ax, by_policy)),
+        ("crash_clearance", lambda ax: plot_clearance(ax, by_policy, d_collision, d_safe)),
+    ):
+        fig, ax = plt.subplots(figsize=(7.0, 5.2))
+        fig.patch.set_facecolor("#fcfcfb")
+        ax.set_facecolor("#fcfcfb")
+        draw(ax)
+        label_rungs(ax, speeds, v_max)
+
+        # Legend present for >= 2 series even though every line is also directly
+        # labelled, so identity never rests on position alone.
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc="lower center", ncol=len(handles),
+                       frameon=False, fontsize=9, labelcolor=INK,
+                       bbox_to_anchor=(0.5, -0.005))
+        fig.tight_layout(rect=(0, 0.06, 1, 1.0))
+        save_figure(fig, output_dir / name, dpi=200, bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
+        print(f"wrote {output_dir / name}.{{pdf,png}} (png without the title)")
+        plt.close(fig)
 
 
 if __name__ == "__main__":

@@ -12,9 +12,12 @@ forgotten. Both are now derived here instead:
 distance over max speed, which covers the drive across the workspace but not the in-place
 rotation every unicycle2 episode ends with -- and that rotation is 113 of the ~200 steps
 this task needs. Getting it wrong times out every rung and reads as a policy failure. Here
-the budget is computed from the robot's own dynamics, the same traverse-plus-settle model
-test/config/generate_small_robot_configs.py sizes training episodes with, so there is no
-``STEP_BUDGET_FACTOR=6`` to forget.
+it is a single ``--steps`` flag applied to every rung, defaulting to 250: one robot and one
+separation across the whole ladder make the budget a property of the experiment rather than
+of the rung, and one number is easier to hold in your head -- and to report -- than a model.
+250 is what the traverse-plus-settle model gives for this robot and is measured to be
+enough (expert worst rung 169 steps, slowest policy episode 216). Change the robot and
+``crash_step_budget()`` is still there to re-derive it.
 
 **Action noise.** The ladder starts from fixed configured states, so a deterministic MLP
 produces one identical episode and the repeats collapse. 0.03 -- what training used -- is
@@ -58,6 +61,15 @@ DEFAULT_CONFIG_GLOB = "test/config/study/crash/unicycle2_crash_v*.yaml"
 # What training used. A fixed start plus a deterministic policy is one episode repeated,
 # so without this the MLP's success rate is pass/fail rather than a rate.
 DEFAULT_ACTION_NOISE = 0.03
+# Steps per episode. A flag rather than something derived per config: every rung shares
+# one robot and one separation, so the budget is a property of the experiment, not of the
+# rung, and a single number is easier to hold in your head than a model. 250 is what the
+# traverse+settle model produced for this robot, and it was measured to be enough -- the
+# expert's worst rung finished in 169 steps and the slowest policy episode in 216.
+# crash_step_budget() below still derives it, for plot_crash_rollouts.py and for anyone
+# changing the robot.
+DEFAULT_STEPS = 250
+
 # Margin over the modelled traverse+settle time, and the rounding grid -- the same values
 # generate_small_robot_configs.py sizes training episodes with, so an episode that fits in
 # training also fits here.
@@ -147,8 +159,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--action-noise-std", type=float, default=DEFAULT_ACTION_NOISE)
     parser.add_argument("--seed-start", type=int, default=50000)
-    parser.add_argument("--steps", type=int, default=None,
-                        help="override the derived per-config budget")
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS,
+                        help=f"steps per episode, the same for every rung (default "
+                             f"{DEFAULT_STEPS}). It has to cover the drive across the "
+                             f"workspace *and* the in-place rotation every unicycle2 "
+                             f"episode ends with -- on this robot the rotation is the "
+                             f"larger half (~113 steps against ~84), so a budget sized "
+                             f"from distance alone times out every rung and reads as a "
+                             f"policy failure.")
     parser.add_argument("--output-csv", type=Path, default=None,
                         help="default: <models>/../eval/crash.csv")
     parser.add_argument("--device", default="cpu")
@@ -212,7 +230,7 @@ def main() -> None:
                 start = config_start_state(validated)
                 if simulator.is_collision(start):
                     raise SystemExit(f"{config_path}: configured start is already in collision.")
-                steps = args.steps or crash_step_budget(raw)
+                steps = args.steps
 
                 began = time.perf_counter()
                 metrics = evaluate_fleet(

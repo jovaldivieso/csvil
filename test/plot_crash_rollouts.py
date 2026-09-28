@@ -56,7 +56,8 @@ from evaluate_crash import crash_step_budget, initial_speed  # noqa: E402
 from evaluate_scaling import build_policy, config_start_state, read_checkpoint  # noqa: E402
 from learning.dagger import ObservationHistoryBuffer, build_decentralized_joint_action  # noqa: E402
 from planning.casadi_planner import PlannerSolveError  # noqa: E402
-from plot_crash_results import GRID, INK, INK_MUTED, SERIES_STYLE  # noqa: E402
+from plot_crash_results import GRID, INK, INK_MUTED, SERIES_STYLE, save_figure  # noqa: E402
+from utils import save_xy_rollout_video  # noqa: E402
 
 CRITICAL = "#c0362c"
 EXPERT_STYLE = (INK_MUTED, "D", (0, (5, 2)), "Expert (MPC)")
@@ -282,6 +283,11 @@ def parse_args() -> argparse.Namespace:
                         help="every config in test/config/study/crash/")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="default: <models>/../plots/crash")
+    parser.add_argument("--video", action="store_true",
+                        help="also render an MP4 of the overlaid trajectories per rung")
+    parser.add_argument("--video-fps", type=int, default=12,
+                        help="video frame rate (default 12). dt is 0.005 s, so 12 fps is "
+                             "roughly 17x slow motion; pass 200 for real time.")
     parser.add_argument("--no-expert", action="store_true",
                         help="skip the CasADi reference rollout")
     parser.add_argument("--device", default="cpu")
@@ -334,7 +340,7 @@ def main() -> None:
                 planner_config=validated if policy_type == "safeflow" else None,
             )
             rollouts[policy_type] = roll_out_policy(
-                simulator, policy, device, start, steps,
+                simulator, policy, device, start, 400,
                 int(checkpoint.get("observation_horizon", 1)),
             )
             print(f"v0={v0:g}  {policy_type}: {len(rollouts[policy_type][1])} steps", flush=True)
@@ -349,9 +355,8 @@ def main() -> None:
         ax.legend(frameon=False, fontsize=9, labelcolor=INK, loc="best")
         fig.tight_layout()
         stem = Path(config_path).stem
-        for extension in ("pdf", "png"):
-            fig.savefig(output_dir / f"{stem}_trajectories.{extension}", dpi=200,
-                        facecolor=fig.get_facecolor())
+        save_figure(fig, output_dir / f"{stem}_trajectories", dpi=200,
+                    facecolor=fig.get_facecolor())
         plt.close(fig)
 
         fig, axes = plt.subplots(2, 1, figsize=(9.0, 8.0), sharex=True)
@@ -367,11 +372,34 @@ def main() -> None:
                  family="monospace", color=INK,
                  bbox=dict(boxstyle="round,pad=0.5", facecolor="#fcfcfb", edgecolor=GRID))
         fig.tight_layout(rect=(0, 0.24, 1, 0.97))
-        for extension in ("pdf", "png"):
-            fig.savefig(output_dir / f"{stem}_actions.{extension}", dpi=200,
-                        bbox_inches="tight", facecolor=fig.get_facecolor())
+        save_figure(fig, output_dir / f"{stem}_actions", dpi=200,
+                    bbox_inches="tight", facecolor=fig.get_facecolor())
         plt.close(fig)
-        print(f"  wrote {output_dir / stem}_{{trajectories,actions}}.{{pdf,png}}\n", flush=True)
+        print(f"  wrote {output_dir / stem}_{{trajectories,actions}}.{{pdf,png}} "
+              f"(png without titles)", flush=True)
+
+        if args.video:
+            # Ragged lengths are fine: save_xy_rollout_video runs to the longest and
+            # freezes the shorter ones at their last state, which is exactly right for a
+            # run whose projector gave up -- it visibly stops while the others carry on.
+            labels, colors, styles, trajectories = [], [], [], []
+            for name, (states, _actions, truncated_at) in ordered.items():
+                color, _marker, dash, label = style_for(name)
+                labels.append(decorate(label, truncated_at, dt))
+                colors.append(color)
+                styles.append(dash)
+                trajectories.append(states)
+            video = save_xy_rollout_video(
+                simulator, trajectories,
+                str(output_dir / f"{stem}_rollout.mp4"),
+                title=f"Crash ladder v0 = {v0:g} m/s",
+                show_heading=True, fps=args.video_fps,
+                path_labels=labels, trajectory_colors=colors,
+                trajectory_line_styles=styles, color_by="trajectory",
+            )
+            print(f"  wrote {video}" if video else "  video skipped (no ffmpeg writer)",
+                  flush=True)
+        print(flush=True)
 
 
 if __name__ == "__main__":

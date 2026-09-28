@@ -2,7 +2,8 @@
 
 What this experiment asks, how it is trained and what it is evaluated on. How to run
 the commands: [evaluation.md](evaluation.md). Repository orientation:
-[agent_context.md](agent_context.md).
+[agent_context.md](agent_context.md). Results and their caveats:
+[study2_findings.md](study2_findings.md).
 
 ## Question
 
@@ -187,6 +188,12 @@ Configs: `learning/config/study/data_{mid,large}_n<NN>/<encoder>_mlp.yaml`, gene
 
 - **One seed per cell.** A difference between encoders cannot be told apart from
   training noise. Any claim of an encoder ranking needs the run repeated with 3 seeds.
+- **`data_mid_best` is not budget-controlled.** Its 12 MLP checkpoints were curated from
+  different DAgger rounds (0–4), spanning 72 120 to 1 267 597 optimizer steps — an 18×
+  spread — and only 5 of the 12 are their run's argmax round on the 20-episode in-training
+  eval (SE ≈ ±10 pp). `data_mid_flow` has no such problem: all 12 are round 4 at
+  1.18–1.31 M steps. Cross-encoder comparisons on `data_mid_best` are therefore confounded
+  with training budget; see [study2_findings.md](study2_findings.md#rq2--which-encoder-works-best-for-variable-observations).
 - **The training seed currently varies only weights and batch order.** Episode layouts
   come from `initial_state_seed` in the expert config, so additional seeds would train
   on the same planned episodes until that is changed.

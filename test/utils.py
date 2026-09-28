@@ -184,7 +184,9 @@ def plot_xy_trajectories(
 
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
-            if base_color is not None:
+            if color_by == "trajectory" and base_color is not None:
+                robot_color = base_color
+            elif base_color is not None:
                 robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
@@ -302,11 +304,22 @@ def save_xy_rollout_video(
     trajectory_line_styles: Sequence[str] | None = None,
     phase_lengths: Sequence[int] | None = None,
     goal_states: Sequence[np.ndarray] | None = None,
+    color_by: str = "robot",
 ) -> str | None:
     """Save an MP4 rollout animation with the same geometry as the PDF plot.
 
+    ``color_by`` picks what a colour means. The default "robot" is the original
+    behaviour: every trajectory shares one colour per robot index, which is what you
+    want when the trajectories are repeats of the same policy. "trajectory" instead
+    gives each trajectory its own colour across all of its robots, for overlaying
+    *different* agents on one scenario -- under "robot" they would all come out
+    identical and the overlay would be unreadable. Only robot 0 is labelled in that
+    mode, so N agents give N legend entries rather than N x robots.
+
     Returns the video path when export succeeds, otherwise None.
     """
+    if color_by not in {"robot", "trajectory"}:
+        raise ValueError("'color_by' must be 'robot' or 'trajectory'.")
     if len(trajectories) == 0:
         return None
 
@@ -386,7 +399,9 @@ def save_xy_rollout_video(
 
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
-            if base_color is not None:
+            if color_by == "trajectory" and base_color is not None:
+                robot_color = base_color
+            elif base_color is not None:
                 robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
@@ -396,7 +411,10 @@ def save_xy_rollout_video(
 
             label = None
             if current_label is not None:
-                label = current_label if robot_count == 1 else f"{current_label} r{robot_idx}"
+                if robot_count == 1 or color_by == "trajectory":
+                    label = current_label if robot_idx == 0 else None
+                else:
+                    label = f"{current_label} r{robot_idx}"
             elif trajectory_index == 0:
                 label = "trajectory" if robot_count == 1 else f"robot {robot_idx}"
 
