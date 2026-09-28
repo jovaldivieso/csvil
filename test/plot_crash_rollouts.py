@@ -160,7 +160,18 @@ def plot_trajectories(ax, rollouts, simulator, d_collision, v0) -> None:
 
 
 def style_for(name: str):
-    return EXPERT_STYLE if name == "expert" else SERIES_STYLE[name]
+    """Colour and marker from the shared palette, but solid lines for every policy.
+
+    Only the expert is dashed, which is what distinguishes the reference from the three
+    things being compared. Note this drops line style as a secondary encoding: the
+    palette's tightest pair (Flow vs SafeFlow) separates by dE 9.9 under deuteranopia,
+    which clears the >= 8 target but no longer has a dash pattern backing it up, so these
+    figures should not be printed in greyscale.
+    """
+    if name == "expert":
+        return EXPERT_STYLE
+    color, marker, _dash, label = SERIES_STYLE[name]
+    return color, marker, "-", label
 
 
 def plot_actions(axes, rollouts, simulator, dt, v0) -> None:
@@ -177,8 +188,6 @@ def plot_actions(axes, rollouts, simulator, dt, v0) -> None:
     for dimension, (ax, (title, ylabel, limit_name)) in enumerate(zip(axes, titles)):
         limit = limits[dimension]
         extremes: list[float] = []
-        ax.axhspan(SATURATION * limit, limit * 1.15, color=CRITICAL, alpha=0.08, zorder=0)
-        ax.axhspan(-limit * 1.15, -SATURATION * limit, color=CRITICAL, alpha=0.08, zorder=0)
         ax.axhline(limit, color=CRITICAL, linewidth=1.3, zorder=1)
         ax.axhline(-limit, color=CRITICAL, linewidth=1.3, zorder=1)
 
@@ -215,10 +224,6 @@ def plot_actions(axes, rollouts, simulator, dt, v0) -> None:
             f"what the policy asked for; the simulator clips to this bound",
             fontsize=11, color=INK, loc="left",
         )
-        ax.annotate(f"within {100 * (1 - SATURATION):.0f}% of the limit",
-                    (0.985, limit), xycoords=("axes fraction", "data"),
-                    xytext=(0, -12), textcoords="offset points",
-                    ha="right", fontsize=8, color=CRITICAL)
         style_axes(ax)
 
     return summary
@@ -292,7 +297,7 @@ def main() -> None:
         if not args.no_expert:
             planner = PlannerFactory.create("casadi", simulator=simulator, config=validated)
             rollouts["expert"] = roll_out_expert(simulator, planner, start, steps)
-            print(f"v0={v0:g}  expert: {len(rollouts['expert'][1])} steps")
+            print(f"v0={v0:g}  expert: {len(rollouts['expert'][1])} steps", flush=True)
 
         for checkpoint_path in runs:
             checkpoint = read_checkpoint(str(checkpoint_path), device)
@@ -306,7 +311,7 @@ def main() -> None:
                 simulator, policy, device, start, steps,
                 int(checkpoint.get("observation_horizon", 1)),
             )
-            print(f"v0={v0:g}  {policy_type}: {len(rollouts[policy_type][1])} steps")
+            print(f"v0={v0:g}  {policy_type}: {len(rollouts[policy_type][1])} steps", flush=True)
 
         # Ordered so the expert draws first and the policies read on top of it.
         ordered = {name: rollouts[name] for name in ("expert", "mlp", "flow", "safeflow")
@@ -340,7 +345,7 @@ def main() -> None:
             fig.savefig(output_dir / f"{stem}_actions.{extension}", dpi=200,
                         bbox_inches="tight", facecolor=fig.get_facecolor())
         plt.close(fig)
-        print(f"  wrote {output_dir / stem}_{{trajectories,actions}}.{{pdf,png}}\n")
+        print(f"  wrote {output_dir / stem}_{{trajectories,actions}}.{{pdf,png}}\n", flush=True)
 
 
 if __name__ == "__main__":

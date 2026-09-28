@@ -128,7 +128,7 @@ def discover_checkpoints(models_dir: Path) -> list[tuple[str, Path]]:
         if found:
             runs.append((run_dir.name, found[0]))
         else:
-            print(f"[skip] {run_dir.name}: no checkpoint")
+            print(f"[skip] {run_dir.name}: no checkpoint", flush=True)
     if not runs:
         raise SystemExit(f"no checkpoints under {models_dir}")
     return runs
@@ -178,9 +178,12 @@ def main() -> None:
         raw = yaml.safe_load(Path(config_path).read_text())
         ladder.append((Path(config_path), raw, initial_speed(raw)))
     ladder.sort(key=lambda entry: entry[2])
+    # flush on every progress line: stdout is block-buffered when redirected to a file,
+    # so a multi-hour run writes nothing to its log until an 8 KB buffer fills. A working
+    # job that prints nothing is indistinguishable from a dead one.
     print(f"crash ladder: {len(ladder)} rungs, v0 = "
-          f"{[round(v, 3) for _, _, v in ladder]} m/s")
-    print(f"{len(runs)} runs: {', '.join(name for name, _ in runs)}\n")
+          f"{[round(v, 3) for _, _, v in ladder]} m/s", flush=True)
+    print(f"{len(runs)} runs: {', '.join(name for name, _ in runs)}\n", flush=True)
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     # Truncate rather than append: evaluate_scaling.py appends, which is what let a smoke
@@ -195,7 +198,7 @@ def main() -> None:
             train_seed = run_name.rsplit("_s", 1)[-1] if "_s" in run_name else ""
             policy = None if policy_type == "safeflow" else build_policy(checkpoint, device)
             print(f"=== {run_name}  ({policy_type}, "
-                  f"{checkpoint.get('encoder_type')} encoder)")
+                  f"{checkpoint.get('encoder_type')} encoder)", flush=True)
 
             for config_path, raw, v0 in ladder:
                 validated = load_and_validate_system_config("multi_robot", config_path)
@@ -244,10 +247,11 @@ def main() -> None:
                       f"timeout={metrics['timeout_rate']:.3f}  "
                       f"clearance worst={metrics['min_min_pair_distance']:.4f} "
                       f"mean={metrics['mean_min_pair_distance']:.4f}  "
-                      f"{steps} steps  {metrics['mean_action_ms']:.1f} ms/step  ({elapsed:.0f}s)")
-            print()
+                      f"{steps} steps  {metrics['mean_action_ms']:.1f} ms/step  ({elapsed:.0f}s)",
+                      flush=True)
+            print(flush=True)
 
-    print(f"wrote {output_csv}")
+    print(f"wrote {output_csv}", flush=True)
     print(f"plot it: python3 test/plot_crash_results.py --results {output_csv} --with-failures")
 
 
