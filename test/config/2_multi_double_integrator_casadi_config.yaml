@@ -4,8 +4,8 @@ d_collision: 1.0
 inter_robot_visibility_radius: 4.0
 horizon: 40
 mode: mpc
-Q_diag: [100.0, 100.0, 10.0, 100.0, 1.0,
-         100.0, 100.0, 10.0, 100.0, 1.0]
+Q_diag: [100.0, 100.0, 100.0, 100.0,
+         100.0, 100.0, 100.0, 100.0]
 R_weight: 0.1
 terminal_cost_multiplier: 1000.0
 collision_slack_penalty_weight: 1000000.0
@@ -14,10 +14,7 @@ action_noise_seed: 10
 
 robots:
   num_robots: 2
-  system: unicycle2
+  system: double_integrator
   config:
     dt: 0.05
-    max_linear_accel: 3.0
-    max_angular_accel: 3.0
-    max_linear_vel: 4.0
-    max_angular_vel: 1.0
+    max_accel: 3.0

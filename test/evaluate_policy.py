@@ -26,7 +26,7 @@ from systems.seed_utils import (
     default_seed_argument_for_simulator,
 )
 from planning.casadi_planner import PlannerSolveError
-from learning.dagger import ObservationHistoryBuffer, apply_config_overrides, build_decentralized_joint_action
+from learning.dagger import apply_config_overrides, build_decentralized_joint_action
 from learning.models.encoder import (
     DEFAULT_ENCODER_TYPE,
     EncoderFactory,
@@ -72,7 +72,7 @@ def resolve_checkpoint_observation_dimensions(
     checkpoint: Mapping[str, Any],
     simulator: DynamicsProtocol,
     requested_policy_type: str,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int]:
     """Resolve and validate checkpoint dimensions against the evaluation simulator."""
     features = simulator.get_dataset_features()
     runtime_state_dim = sum(
@@ -101,55 +101,41 @@ def resolve_checkpoint_observation_dimensions(
                 f"'{requested_policy_type}'."
             )
 
-    raw_horizon = checkpoint.get("observation_horizon", 1)
-    observation_horizon = 1 if raw_horizon is None else int(raw_horizon)
-    if observation_horizon <= 0:
-        raise ValueError("Checkpoint 'observation_horizon' must be positive.")
-
-    # observation.state (proprioception) and its companion
-    # observation.state_mask are stacked across observation_horizon like the
-    # neighbor tensors; observation.environment_state (goal-relative
-    # encoding) stays single-frame. Must match learning/train_dagger.py's
-    # identical split exactly, or a correctly-trained checkpoint gets
-    # rejected here.
+    # observation.environment_state (goal-relative encoding) and
+    # observation.state (proprioception) are both single-frame. Must match
+    # learning/dagger/dagger_trainer.py's identical split exactly, or a
+    # correctly-trained checkpoint gets rejected here.
     environment_state_dim = int(features["observation.environment_state"]["shape"][0])
     proprioception_dim = int(features["observation.state"]["shape"][0])
-    state_mask_dim = int(features["observation.state_mask"]["shape"][0])
-    ego_base_dim = environment_state_dim + (proprioception_dim + state_mask_dim) * observation_horizon
+    ego_base_dim = environment_state_dim + proprioception_dim
     checkpoint_neighbor_slots = int(checkpoint.get("neighbor_slots", neighbor_slots))
     neighbor_feature_dim = int(
-        checkpoint.get("neighbor_feature_dim", runtime_neighbor_feature_dim * observation_horizon)
+        checkpoint.get("neighbor_feature_dim", runtime_neighbor_feature_dim)
     )
     expected_neighbor_feature_dim = (
-        runtime_neighbor_feature_dim * observation_horizon
-        if neighbor_slots > 0
-        else neighbor_feature_dim
+        runtime_neighbor_feature_dim if neighbor_slots > 0 else neighbor_feature_dim
     )
     if checkpoint_neighbor_slots < 0:
         raise ValueError("Checkpoint 'neighbor_slots' must be non-negative.")
     if neighbor_feature_dim != expected_neighbor_feature_dim:
         raise ValueError(
             "Checkpoint neighbor feature schema is incompatible with the evaluation simulator: "
-            f"checkpoint=(neighbor_feature_dim={neighbor_feature_dim}, observation_horizon={observation_horizon}), "
-            f"expected=(neighbor_feature_dim={expected_neighbor_feature_dim}, observation_horizon={observation_horizon}). "
+            f"checkpoint=(neighbor_feature_dim={neighbor_feature_dim}), "
+            f"expected=(neighbor_feature_dim={expected_neighbor_feature_dim}). "
             "The policy can be evaluated with a different number of robots, but the per-neighbor feature schema "
-            "and observation horizon must match."
+            "must match."
         )
-    expected_state_dim = (
-        ego_base_dim
-        + checkpoint_neighbor_slots * neighbor_feature_dim
-        + checkpoint_neighbor_slots * observation_horizon
-    )
+    expected_state_dim = ego_base_dim + checkpoint_neighbor_slots * neighbor_feature_dim
     state_dim = int(checkpoint.get("state_dim", expected_state_dim))
     if state_dim != expected_state_dim:
         raise ValueError(
             "Checkpoint ego observation schema is incompatible with the evaluation simulator: "
             f"checkpoint=(state_dim={state_dim}, neighbor_slots={checkpoint_neighbor_slots}, "
-            f"neighbor_feature_dim={neighbor_feature_dim}, observation_horizon={observation_horizon}), "
+            f"neighbor_feature_dim={neighbor_feature_dim}), "
             f"expected_state_dim={expected_state_dim}. "
-            "Use a checkpoint trained with the same ego observation schema and horizon."
+            "Use a checkpoint trained with the same ego observation schema."
         )
-    return state_dim, neighbor_feature_dim, checkpoint_neighbor_slots, observation_horizon
+    return state_dim, neighbor_feature_dim, checkpoint_neighbor_slots
 
 
 def infer_mlp_hidden_dims_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> tuple[int, ...]:
@@ -344,7 +330,8 @@ def rollout_planner(
         return np.asarray(trajectory), solve_times
 
     for _ in range(num_steps):
-        obs = simulator.observe(state)
+        previous_state = trajectory[-2] if len(trajectory) >= 2 else None
+        obs = simulator.observe(state, previous_state)
 
         solve_start = time.perf_counter()
         try:
@@ -394,7 +381,6 @@ def rollout_policy(
     num_steps: int,
     action_noise_std: float = 0.0,
     action_noise_rng: np.random.Generator | None = None,
-    observation_horizon: int = 1,
 ) -> tuple[np.ndarray, bool, int, bool, bool, list[float]]:
     """
     Rolls out the neural policy from a given initial state.
@@ -416,7 +402,6 @@ def rollout_policy(
     state = simulator.reset(initial_state)
     trajectory = [state.copy()]
     policy.reset()
-    history_buffer = ObservationHistoryBuffer(observation_horizon, int(simulator.num_robots))
     solve_times: list[float] = []
     collided, summary = detect_collision(simulator, state)
 
@@ -430,7 +415,8 @@ def rollout_policy(
         return np.asarray(trajectory), True, 0, False, False, solve_times
 
     for step in range(1, num_steps + 1):
-        observation = simulator.observe(state)
+        previous_state = trajectory[-2] if len(trajectory) >= 2 else None
+        observation = simulator.observe(state, previous_state)
 
         _synchronize_device(device)
         solve_start = time.perf_counter()
@@ -440,8 +426,6 @@ def rollout_policy(
                 policy=policy,
                 observation=observation,
                 device=device,
-                observation_horizon=observation_horizon,
-                history_buffer=history_buffer,
             )
         except PlannerSolveError as exc:
             # No expert running alongside a policy-only rollout to fall back
@@ -493,12 +477,11 @@ def _load_checkpoint_policy_components(
     int,
     tuple[int, ...],
     int,
-    int,
 ]:
     """Load a metadata checkpoint and resolve its encoder/action/hidden-dim schema.
 
     Returns (checkpoint, state_dict, obs_encoder, action_dim, hidden_dims,
-    prediction_horizon, observation_horizon).
+    prediction_horizon).
     """
     checkpoint = torch.load(model_dir, map_location=device, weights_only=True)
     if not (isinstance(checkpoint, dict) and "model_state_dict" in checkpoint):
@@ -513,7 +496,7 @@ def _load_checkpoint_policy_components(
     hidden_dims = infer_mlp_hidden_dims_from_state_dict(state_dict)
     prediction_horizon = int(checkpoint.get("prediction_horizon", 1))
 
-    state_dim, neighbor_feature_dim, neighbor_slots, observation_horizon = resolve_checkpoint_observation_dimensions(
+    state_dim, neighbor_feature_dim, neighbor_slots = resolve_checkpoint_observation_dimensions(
         checkpoint, simulator, policy_type
     )
     action_dim = int(checkpoint.get("action_dim", int(simulator.nu)))
@@ -529,7 +512,6 @@ def _load_checkpoint_policy_components(
         state_dim=state_dim,
         neighbor_feature_dim=neighbor_feature_dim,
         neighbor_slots=neighbor_slots,
-        observation_horizon=observation_horizon,
         **encoder_kwargs,
     )
     return (
@@ -539,7 +521,6 @@ def _load_checkpoint_policy_components(
         action_dim,
         hidden_dims,
         prediction_horizon,
-        observation_horizon,
     )
 
 
@@ -580,7 +561,7 @@ def run_evaluation(
     print(f"running inference on {device}")
     print(f"action noise seed: {action_noise_seed}")
 
-    checkpoint, state_dict, obs_encoder, action_dim, hidden_dims, prediction_horizon, observation_horizon = (
+    checkpoint, state_dict, obs_encoder, action_dim, hidden_dims, prediction_horizon = (
         _load_checkpoint_policy_components(model_dir, simulator, policy_type, device)
     )
     policy_kwargs: dict[str, object] = {
@@ -626,19 +607,12 @@ def run_evaluation(
     # (this call's action is discarded) so an all-zero state is fine; reset
     # afterward so this doesn't leave the policy's own internal state
     # (e.g. a SafeFlow projector's warm-start cache) primed for it.
-    warmup_history_buffer = (
-        ObservationHistoryBuffer(observation_horizon, int(simulator.num_robots))
-        if observation_horizon > 1
-        else None
-    )
     try:
         build_decentralized_joint_action(
             simulator=simulator,
             policy=policy,
             observation=simulator.observe(np.zeros(simulator.nx)),
             device=device,
-            observation_horizon=observation_horizon,
-            history_buffer=warmup_history_buffer,
         )
     except PlannerSolveError:
         # All-zero is a valid *shape* for any system, but for multi_robot it
@@ -777,7 +751,6 @@ def run_evaluation(
             num_steps=num_steps,
             action_noise_std=action_noise_std,
             action_noise_rng=policy_action_noise_rng,
-            observation_horizon=observation_horizon,
         )
         expert_collided = simulator.is_collision(expert_trajectory[-1])
 

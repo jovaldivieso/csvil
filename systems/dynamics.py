@@ -79,7 +79,9 @@ class DynamicsProtocol(Protocol):
 
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray: ...
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray: ...
+    def observe(
+        self, state: np.ndarray, previous_state: np.ndarray | None = None, validate: bool = True
+    ) -> np.ndarray: ...
 
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray: ...
 
@@ -318,8 +320,12 @@ class DynamicsSimulator(ABC):
         pass
 
     @abstractmethod
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
-        """Get observation"""
+    def observe(
+        self, state: np.ndarray, previous_state: np.ndarray | None = None, validate: bool = True
+    ) -> np.ndarray:
+        """Get observation. ``previous_state`` (the joint state one control
+        tick ago, or None) lets a multi-robot fleet compute neighbor
+        velocity; single-robot systems accept and ignore it."""
         pass
 
     def global_vector_to_ego(self, vec: np.ndarray, state: np.ndarray) -> np.ndarray:
@@ -357,11 +363,9 @@ class DynamicsSimulator(ABC):
         frame = self.format_dataset_frame(obs, np.zeros(int(self.nu), dtype=np.float32))[0]
         environment_state = np.asarray(frame["observation.environment_state"], dtype=np.float32).reshape(-1)
         state = np.asarray(frame["observation.state"], dtype=np.float32).reshape(-1)
-        state_mask = np.asarray(frame["observation.state_mask"], dtype=np.float32).reshape(-1)
         return {
             "observation.environment_state": environment_state,
             "observation.state": state,
-            "observation.state_mask": state_mask,
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
         }
@@ -402,10 +406,12 @@ class DynamicsSimulator(ABC):
         """Simulate a trajectory"""
         states, observations, actions = [], [], []
         state = self.reset(initial_state)
+        previous_state: np.ndarray | None = None
 
         for _ in range(num_steps):
-            obs = self.observe(state)
+            obs = self.observe(state, previous_state)
             action = policy_fn(obs)  # Call your motion planner here
+            previous_state = state
             state = self.step(state, action)
             states.append(state.copy())
             observations.append(obs)

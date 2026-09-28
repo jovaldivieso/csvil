@@ -49,7 +49,6 @@ def _minimal_dagger_config(**overrides: object) -> DaggerConfig:
         learning_rate=1e-3,
         mlp_hidden_dims=(64,),
         prediction_horizon=1,
-        observation_horizon=1,
         encoder_config=EncoderConfig(encoder_type="deepset", kwargs={}),
         policy_type="mlp",
         flow_config=FlowConfig(),

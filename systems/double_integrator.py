@@ -39,7 +39,16 @@ class DoubleIntegrator(DynamicsSimulator):
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         return self.predict_next_state(state, action, validate=validate)
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def observe(
+        self,
+        state: np.ndarray,
+        previous_state: np.ndarray | None = None,
+        validate: bool = True,
+    ) -> np.ndarray:
+        """``previous_state`` is accepted for interface uniformity with
+        ``MultiRobotSimulator.observe()`` (which uses it to compute neighbor
+        velocity) but is unused here: this robot's own velocity is already
+        directly available as proprioception, nothing to difference."""
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         obs = np.concatenate([self.goal - state_array[:2], state_array[2:4]])
         return self.validate_observation(obs) if validate else obs
@@ -82,11 +91,6 @@ class DoubleIntegrator(DynamicsSimulator):
                 "shape": (2,),
                 "names": proprioception_names,
             },
-            # Companion mask for observation.state, mirroring
-            # observation.neighbor_mask: always 1.0 at collection time, so
-            # history-stacking's zero-padding for not-yet-collected frames is
-            # distinguishable from a genuine [vx=0, vy=0] reading.
-            "observation.state_mask": {"dtype": "float32", "shape": (1,), "names": ["state_mask"]},
             "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "action": {
@@ -128,7 +132,6 @@ class DoubleIntegrator(DynamicsSimulator):
         return [{
             "observation.environment_state": np.asarray(obs[:2], dtype=np.float32),
             "observation.state": np.asarray(obs[2:4], dtype=np.float32),
-            "observation.state_mask": np.array([1.0], dtype=np.float32),
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
             "action": np.asarray(action, dtype=np.float32),

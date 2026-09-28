@@ -193,12 +193,7 @@ class SimulatorContractTests(unittest.TestCase):
                         f"{name}: feature '{feature_name}' names length mismatch",
                     )
 
-                # observation.state_mask is a schema-only bookkeeping field
-                # (always 1.0 at generation time; only becomes meaningful
-                # after history-stacking's zero-padding) -- it's never
-                # actually present in the raw obs array observe() produces,
-                # unlike neighbor_mask which encodes real, varying geometry.
-                if feature_name.startswith("observation.") and feature_name != "observation.state_mask":
+                if feature_name.startswith("observation."):
                     obs_feature_dim += expected_dim
                 elif feature_name == "action" or feature_name.endswith(".action"):
                     action_feature_dim += expected_dim
@@ -432,10 +427,14 @@ class SimulatorContractTests(unittest.TestCase):
         )
 
         neighbor_state = simulator.decentralized_policy_observation(simulator.observe(state))["observation.neighbor_state"]
-        np.testing.assert_allclose(neighbor_state, [0.0, -1.0, 0.0, -1.0], atol=1e-9)
+        # No previous_state passed -> velocity/omega terms default to zero.
+        np.testing.assert_allclose(neighbor_state, [0.0, -1.0, 0.0, -1.0, 0.0, 0.0, 0.0], atol=1e-9)
         self.assertEqual(
             simulator.get_dataset_features()["observation.neighbor_state"]["names"],
-            ["neighbor_0_x", "neighbor_0_y", "neighbor_0_sin_rel_theta", "neighbor_0_cos_rel_theta"],
+            [
+                "neighbor_0_x", "neighbor_0_y", "neighbor_0_sin_rel_theta", "neighbor_0_cos_rel_theta",
+                "neighbor_0_v_x", "neighbor_0_v_y", "neighbor_0_omega_rel_theta",
+            ],
         )
 
     def test_multi_robot_neighbor_observation_supports_three_dimensional_position(self) -> None:
@@ -452,7 +451,6 @@ class SimulatorContractTests(unittest.TestCase):
                 return {
                     "observation.environment_state": {"dtype": "float32", "shape": (3,), "names": ["x", "y", "z"]},
                     "observation.state": {"dtype": "float32", "shape": (0,), "names": []},
-                    "observation.state_mask": {"dtype": "float32", "shape": (0,), "names": []},
                     "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
                     "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
                     "action": {"dtype": "float32", "shape": (1,), "names": ["action"]},
@@ -471,10 +469,11 @@ class SimulatorContractTests(unittest.TestCase):
         state = simulator.reset(np.array([0.0, 0.0, 0.0, 1.0, 2.0, 3.0]))
         neighbor_state = simulator.decentralized_policy_observation(simulator.observe(state))["observation.neighbor_state"]
 
-        np.testing.assert_allclose(neighbor_state, [1.0, 2.0, 3.0])
+        # No previous_state passed -> velocity terms default to zero.
+        np.testing.assert_allclose(neighbor_state, [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
         self.assertEqual(
             simulator.get_dataset_features()["observation.neighbor_state"]["names"],
-            ["neighbor_0_x", "neighbor_0_y", "neighbor_0_z"],
+            ["neighbor_0_x", "neighbor_0_y", "neighbor_0_z", "neighbor_0_v_x", "neighbor_0_v_y", "neighbor_0_v_z"],
         )
 
     def test_heading_system_boundary_roundtrip_preserves_so2_state(self) -> None:

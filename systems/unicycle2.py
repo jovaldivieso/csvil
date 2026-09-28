@@ -104,10 +104,20 @@ class Unicycle2(DynamicsSimulator):
         ego_y = -np.sin(theta) * vec[0] + np.cos(theta) * vec[1]
         return np.array([ego_x, ego_y], dtype=float)
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def observe(
+        self,
+        state: np.ndarray,
+        previous_state: np.ndarray | None = None,
+        validate: bool = True,
+    ) -> np.ndarray:
         """
         turns absoulte simulator state into observation,
         [goal_ego_x, goal_ego_y, sin(rel_theta), cos(rel_theta), velocity, angular velocity]
+
+        ``previous_state`` is accepted for interface uniformity with
+        ``MultiRobotSimulator.observe()`` (which uses it to compute neighbor
+        velocity) but is unused here: this robot's own velocity is already
+        directly available as proprioception, nothing to difference.
         """
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         rel_pos = self.goal[0:2] - state_array[0:2]
@@ -218,13 +228,6 @@ class Unicycle2(DynamicsSimulator):
                 "shape": (2,),
                 "names": proprioception_names,
             },
-            # Companion mask for observation.state, mirroring
-            # observation.neighbor_mask: always 1.0 at collection time (this
-            # robot's own proprioception is always genuinely available), so
-            # that history-stacking's zero-padding for not-yet-collected
-            # frames is distinguishable from a genuine [v=0, omega=0] reading
-            # instead of silently looking identical to one.
-            "observation.state_mask": {"dtype": "float32", "shape": (1,), "names": ["state_mask"]},
             "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "action": {
@@ -269,7 +272,6 @@ class Unicycle2(DynamicsSimulator):
         return [{
             "observation.environment_state": np.asarray(obs_array[:4], dtype=np.float32),
             "observation.state": np.asarray(obs_array[4:6], dtype=np.float32),
-            "observation.state_mask": np.array([1.0], dtype=np.float32),
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
             "action": np.asarray(action_array, dtype=np.float32),

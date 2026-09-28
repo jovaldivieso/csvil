@@ -52,7 +52,6 @@ class EncoderConfig:
 @dataclass(frozen=True)
 class FlowConfig:
     num_inference_steps: int = 10
-    observation_horizon: int = 1
 
 
 @lru_cache(maxsize=None)
@@ -127,7 +126,6 @@ def load_flow_config(policy_config_path: Path | None) -> FlowConfig:
 
     return FlowConfig(
         num_inference_steps=int(flow_section.get("num_inference_steps", 10)),
-        observation_horizon=int(model_section.get("observation_horizon", 1)),
     )
 
 
@@ -139,19 +137,6 @@ def load_prediction_horizon(policy_config_path: Path | None) -> int:
     if isinstance(model_section, Mapping):
         return int(model_section.get("prediction_horizon", 1))
     return 1
-
-
-def load_observation_horizon(policy_config_path: Path | None) -> int:
-    if policy_config_path is None:
-        return 1
-    raw_config = _cached_yaml_config(policy_config_path)
-    model_section = raw_config.get("model", raw_config)
-    if not isinstance(model_section, Mapping):
-        raise ValueError("Policy config model section must be a mapping.")
-    horizon = int(model_section.get("observation_horizon", 1))
-    if horizon <= 0:
-        raise ValueError("'model.observation_horizon' must be positive.")
-    return horizon
 
 
 def load_encoder_config(policy_config_path: Path | None) -> EncoderConfig:
