@@ -301,7 +301,11 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
     # one episode per cell that is the episode's own outcome; with many it is the modal
     # one, and the fill should then be read as "mostly", which the note says.
     outcomes = {}
-    if outcome_colors:
+    has_rates = all(
+        row.get(column) not in (None, "")
+        for row in rows for column in ("success_rate", "collision_rate", "timeout_rate")
+    )
+    if outcome_colors and has_rates:
         for r in rows:
             triple = (
                 ("success", float(r["success_rate"])),
@@ -619,12 +623,11 @@ def main() -> None:
                         help="density the evaluated policies trained at, in multiples of the "
                              "reference density (data_mid/data_large train at it, so 1); "
                              "decides which row of the density matrix is in-distribution")
-    parser.add_argument("--color-by-outcome", action="store_true",
+    parser.add_argument("--color-by-outcome", action=argparse.BooleanOptionalAction, default=True,
                         help="colour each matrix cell by what happened -- green success, "
                              "yellow timeout, the blue ramp for collisions shaded by the "
-                             "metric. For a continuous metric such as "
-                             "mean_min_pair_distance, which says how badly a cell failed "
-                             "but not whether it failed at all")
+                             "metric (default). --no-color-by-outcome restores a plain "
+                             "sequential ramp over the metric alone")
     parser.add_argument("--no-failure-modes", action="store_true",
                         help="only the metric per cell, without the collision/timeout split")
     parser.add_argument(

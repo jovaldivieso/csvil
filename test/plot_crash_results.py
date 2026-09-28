@@ -130,21 +130,19 @@ def style_axes(ax) -> None:
     ax.yaxis.label.set_color(INK)
 
 
-def add_speed_axis(ax, v_max: float) -> None:
-    """A second x-axis in % of max_linear_vel.
+def label_rungs(ax, speeds: list[float], v_max: float) -> None:
+    """Tick only at the rungs, each labelled in m/s and as a share of the robot's limit.
 
-    A unit restatement of the same quantity, not a second measure -- the thing a dual
-    axis is banned for.
+    A twinned top axis was tried first and collided with the panel titles; the ladder has
+    five rungs, so ticking the data itself is both cleaner and more honest than an evenly
+    spaced grid that implies speeds nothing was measured at.
     """
-    secondary = ax.twiny()
-    secondary.set_xlim(ax.get_xlim())
-    ticks = [t for t in ax.get_xticks() if ax.get_xlim()[0] <= t <= ax.get_xlim()[1]]
-    secondary.set_xticks(ticks)
-    secondary.set_xticklabels([f"{100 * t / v_max:.0f}%" for t in ticks])
-    secondary.tick_params(colors=INK_MUTED, labelsize=8)
-    for side in ("left", "right", "top"):
-        secondary.spines[side].set_visible(False)
-    secondary.set_xlabel("initial speed, % of max_linear_vel", color=INK_MUTED, fontsize=9)
+    ax.set_xticks(speeds)
+    ax.set_xticklabels([f"{v:g}\n({100 * v / v_max:.0f}%)" for v in speeds])
+    # Name what a tick *is*. Every rung is a separate config that differs from its
+    # neighbours in exactly one number, so a reader should not have to infer that the
+    # x-axis and the config list are the same thing.
+    ax.set_xlabel("initial speed $v_0$ - one crash config per tick\n(m/s, and % of max_linear_vel)")
 
 
 def plot_success(ax, by_policy: dict[str, list[dict]]) -> None:
@@ -172,7 +170,6 @@ def plot_success(ax, by_policy: dict[str, list[dict]]) -> None:
         )
     ax.set_ylim(-0.04, 1.08)
     ax.set_ylabel("success rate")
-    ax.set_xlabel("initial speed $v_0$ (m/s)")
     ax.set_title("Both robots reach their goals, no contact", fontsize=11, color=INK, loc="left")
     style_axes(ax)
 
@@ -209,18 +206,28 @@ def plot_clearance(
         ax.annotate(label, (xs[-1], endpoint), textcoords="offset points", xytext=(9, 0),
                     va="center", fontsize=9, color=INK)
 
+    # Bound to the data rather than to zero: anchoring at 0 turned the collision band
+    # into two thirds of the panel and squeezed every series into a thin strip, which is
+    # the opposite of what the panel is for.
+    finite = [v for v in ax.get_lines()[2:] for v in v.get_ydata()]
+    low = min(finite + [d_collision]) if finite else d_collision
+    high = max(finite + [d_safe]) if finite else d_safe
+    pad = max(0.06 * (high - low), 0.004)
+    ax.set_ylim(low - pad, high + pad)
     ax.set_ylabel("closest approach between robots (m)")
-    ax.set_xlabel("initial speed $v_0$ (m/s)")
     subtitle = "worst episode (solid), band up to the mean" if has_worst else "mean over episodes"
-    ax.set_title(f"Clearance - {subtitle}", fontsize=11, color=INK, loc="left")
+    ax.set_title(
+        f"Clearance - {subtitle}\nexpert holds d_safe on every rung",
+        fontsize=11, color=INK, loc="left",
+    )
     ax.annotate(
-        f"contact, d_collision = {d_collision:g} m", (0.015, d_collision),
-        xycoords=("axes fraction", "data"), xytext=(0, 4), textcoords="offset points",
+        f"contact (d_collision {d_collision:g} m)", (0.015, d_collision),
+        xycoords=("axes fraction", "data"), xytext=(0, -11), textcoords="offset points",
         fontsize=8, color=CRITICAL,
     )
     ax.annotate(
-        f"d_safe = {d_safe:g} m, the expert holds this on every rung",
-        (0.015, d_safe), xycoords=("axes fraction", "data"), xytext=(0, 4),
+        f"d_safe {d_safe:g} m",
+        (0.015, d_safe), xycoords=("axes fraction", "data"), xytext=(0, 5),
         textcoords="offset points", fontsize=8, color=INK_MUTED,
     )
     style_axes(ax)
@@ -228,7 +235,7 @@ def plot_clearance(
 
 def plot_failures(ax, by_policy: dict[str, list[dict]]) -> None:
     """How each failure happened: a crash and a stall are not the same result."""
-    width = 0.022
+    width = 0.055
     offsets = {name: (index - 1) * width for index, name in enumerate(SERIES_ORDER)}
     for name in SERIES_ORDER:
         series = by_policy.get(name)
@@ -243,7 +250,6 @@ def plot_failures(ax, by_policy: dict[str, list[dict]]) -> None:
         ax.bar(xs, timeout, width=width * 0.9, bottom=[c + 0.012 for c in collision],
                color=color, alpha=0.35, label=f"{label} timeout", zorder=3)
     ax.set_ylabel("failure rate")
-    ax.set_xlabel("initial speed $v_0$ (m/s)")
     ax.set_title("Failure mode - solid: collision, pale: timeout", fontsize=11, color=INK, loc="left")
     style_axes(ax)
 
@@ -285,14 +291,17 @@ def main() -> None:
     plot_clearance(axes[1], by_policy, d_collision, d_safe)
     if args.with_failures:
         plot_failures(axes[2], by_policy)
+    speeds = sorted({record["v0"] for series in by_policy.values() for record in series})
     for ax in axes:
-        add_speed_axis(ax, v_max)
+        label_rungs(ax, speeds, v_max)
 
     episodes = {int(row["episodes"]) for row in rows}
     fleet = {int(row["eval_fleet_size"]) for row in rows}
     encoders = {str(row["encoder_type"]) for row in rows}
+    rungs = len({row["config"] for row in rows})
     subtitle = (
-        f"head-on crash ladder, N={'/'.join(str(n) for n in sorted(fleet))}, "
+        f"head-on crash ladder: {rungs} configs differing only in initial speed - "
+        f"N={'/'.join(str(n) for n in sorted(fleet))}, "
         f"{'/'.join(sorted(encoders))} encoder, "
         f"{'/'.join(str(n) for n in sorted(episodes))} episodes per rung"
     )

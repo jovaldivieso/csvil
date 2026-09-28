@@ -76,7 +76,15 @@ RADIUS = 0.1732
 
 # Fractions of max_linear_vel. Defaults span rest to the robot's limit; --calibrate
 # reports where the expert itself stops solving, and the top rung belongs at or under it.
-DEFAULT_SPEED_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+# Absolute m/s, not fractions of max_linear_vel. The first ladder was spaced over the
+# robot's whole speed range (0 to 1.375 m/s) on the assumption that the interesting region
+# was somewhere in the middle; measured, every policy but SafeFlow was already failing by
+# the second rung at 0.4 m/s. The useful range is the bottom third, so the rungs are now
+# stated in the units the failures actually happen in and spaced to resolve the onset
+# rather than to span the envelope. Spacing is deliberately uneven: coarse below 0.4 m/s
+# where every policy is comfortable, then 0.1 steps from 0.5 up, which is the band the
+# failures were first seen in and where the curve needs resolution.
+DEFAULT_SPEEDS = (0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,8 +93,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--speeds", type=float, nargs="+", default=None,
-        help="absolute initial speeds in m/s (default: fractions "
-             f"{DEFAULT_SPEED_FRACTIONS} of the robot's max_linear_vel)",
+        help=f"absolute initial speeds in m/s (default {DEFAULT_SPEEDS})",
     )
     parser.add_argument(
         "--calibrate", action="store_true",
@@ -250,9 +257,7 @@ def main() -> None:
         print_feasibility(template, sweep)
         return
 
-    speeds = args.speeds if args.speeds else [
-        round(v_max * f, 4) for f in DEFAULT_SPEED_FRACTIONS
-    ]
+    speeds = args.speeds if args.speeds else list(DEFAULT_SPEEDS)
     print(f"crash ladder: {len(speeds)} rungs, v0 = {speeds} m/s (max {v_max})")
     print_feasibility(template, speeds)
 
