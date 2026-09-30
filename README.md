@@ -12,6 +12,11 @@ Clone the project to your local machine and navigate into the root directory:
 git clone git@github.com:jovaldivieso/csvil.git
 cd csvil
 ```
+The repository uses Git submodules for external dependencies such as db-LaCAM and Dynoplan. Initialize them with:
+
+```bash
+git submodule update --init --recursive
+```
 
 ### Install Docker
 Docker is used so every contributor runs the same dependency stack (this is particularly useful on Intel Macs, since some newer PyTorch versions required by LeRobot are not available as native macOS Intel x86_64 packages).
@@ -46,6 +51,16 @@ The db-LaCAM environment is optional and is not needed for the standard CasADi w
 docker compose build db-lacam
 ```
 The first build may take several minutes. Rebuilding is only necessary when changing the Dockerfile, compose-file or requirements-file.
+
+### Optional: VS Code Dev Container
+
+If you use VS Code with the Dev Containers extension, the project can also be opened directly inside the `csvil` Docker environment.
+
+1. Install the **Dev Containers** extension in VS Code.
+2. Open the repository in VS Code.
+3. Select **Dev Containers: Reopen in Container** from the command palette.
+
+The repository is mounted at `/workspace`, and commands can then be run directly from the VS Code terminal without prefixing them with `docker compose run --rm csvil`.
 
 ### Hugging Face authentication
 Hugging Face authentication is only needed when uploading datasets or models to the Hub.
