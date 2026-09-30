@@ -301,7 +301,7 @@ def main() -> None:
         title=args.title or default_title(checkpoint, args.config, chosen),
         show_heading=not simulator.is_euclidean,
         fps=args.fps,
-        path_labels=[f"{checkpoint.get('encoder_type')} policy"],
+        # path_labels=[f"{checkpoint.get('encoder_type')} policy"],
         goal_states=[chosen.goal_state],
     )
     if video_path is None:

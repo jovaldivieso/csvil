@@ -65,29 +65,63 @@ _spec = importlib.util.spec_from_file_location(
 _fleet = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_fleet)
 
-TEMPLATE_PATH = PROJECT_ROOT / "test/config/study/unicycle2_fleet_02_small.yaml"
-OUTPUT_DIR = PROJECT_ROOT / "test/config/study/crash"
 NUM_ROBOTS = 2
 
-# Half-width of the policy configs' training box, which is also the training ring radius.
-# Starts sit on it, so a robot's goal is 2*RADIUS away -- the same distance the ring
-# rollouts use, and inside what training produced.
-RADIUS = 0.1732
+# The 0.1 m robot is the default, but the ladder is not specific to it -- the same
+# scenario applies to any 2-robot scenario config, e.g. the 1 m study robot the
+# data_mid / data_mid_best checkpoints were trained on. Each entry is
+# (scenario template, ring radius, output directory).
+#
+# The radius is the *policy* training box half-width, not the scenario config's own box,
+# because that is what keeps the goal vectors inside the range training produced. It
+# cannot be read off the template: the pilots override the box in the policy config. Both
+# presets put the pair 3.46 x d_collision apart, so the two ladders are dimensionally the
+# same scenario and their figures can sit side by side.
+ROBOTS = {
+    "small": {
+        "template": PROJECT_ROOT / "test/config/study/unicycle2_fleet_02_small.yaml",
+        "radius": 0.1732,
+        "out_dir": PROJECT_ROOT / "test/config/study/crash",
+        # 0.1 m robot, max_linear_vel 1.5.
+        "speeds": (0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3),
+    },
+    "1m": {
+        "template": PROJECT_ROOT / "test/config/study/unicycle2_fleet_02.yaml",
+        "radius": 1.732,
+        "out_dir": PROJECT_ROOT / "test/config/study/crash_1m",
+        # 1 m robot, max_linear_vel 1.0, so the ladder tops out lower. Run --calibrate
+        # before trusting the top rungs: the expert's own ceiling has not been measured
+        # for this robot the way it was for the small one.
+        "speeds": (0.0, 0.15, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+    },
+}
+DEFAULT_ROBOT = "small"
 
-# Fractions of max_linear_vel. Defaults span rest to the robot's limit; --calibrate
-# reports where the expert itself stops solving, and the top rung belongs at or under it.
-# Absolute m/s, not fractions of max_linear_vel. The first ladder was spaced over the
-# robot's whole speed range (0 to 1.375 m/s) on the assumption that the interesting region
-# was somewhere in the middle; measured, every policy but SafeFlow was already failing by
-# the second rung at 0.4 m/s. The useful range is the bottom third, so the rungs are now
-# stated in the units the failures actually happen in and spaced to resolve the onset
-# rather than to span the envelope. Spacing is deliberately uneven: coarse below 0.4 m/s
-# where every policy is comfortable, then 0.1 steps from 0.5 up, which is the band the
-# failures were first seen in and where the curve needs resolution. Extended to 1.3 once
-# Flow turned out to still be solving 1.0 cleanly; the expert's own ceiling is between
-# 1.375 and 1.5 at this separation (see --calibrate), so 1.3 is the last rung that still
-# measures the policy rather than the task.
-DEFAULT_SPEEDS = (0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3)
+# Bound by apply_robot() from the chosen preset, so the rest of the module can go on
+# reading them as plain constants.
+TEMPLATE_PATH = ROBOTS[DEFAULT_ROBOT]["template"]
+OUTPUT_DIR = ROBOTS[DEFAULT_ROBOT]["out_dir"]
+RADIUS = ROBOTS[DEFAULT_ROBOT]["radius"]
+DEFAULT_SPEEDS = ROBOTS[DEFAULT_ROBOT]["speeds"]
+
+# Why the small ladder's rungs are where they are, since the shape carried over to the
+# 1 m preset: the first version spaced them over the robot's whole speed range on the
+# assumption the interesting region was in the middle. Measured, every policy but
+# SafeFlow was already failing by 0.4 m/s, so the rungs are now stated in absolute m/s
+# and spaced to resolve the onset -- coarse where every policy is comfortable, 0.1 steps
+# through the band where failures appear. The top rung is set by the *expert's* ceiling
+# (--calibrate), not by the robot's limit, so that the ladder measures the policy rather
+# than the task.
+
+
+def apply_robot(name: str) -> None:
+    """Point the module's constants at one robot preset."""
+    global TEMPLATE_PATH, OUTPUT_DIR, RADIUS, DEFAULT_SPEEDS
+    preset = ROBOTS[name]
+    TEMPLATE_PATH = preset["template"]
+    OUTPUT_DIR = preset["out_dir"]
+    RADIUS = preset["radius"]
+    DEFAULT_SPEEDS = preset["speeds"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,8 +129,13 @@ def parse_args() -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
+        "--robot", choices=sorted(ROBOTS), default=DEFAULT_ROBOT,
+        help=f"which scenario template and ring radius to build the ladder on "
+             f"(default {DEFAULT_ROBOT})",
+    )
+    parser.add_argument(
         "--speeds", type=float, nargs="+", default=None,
-        help=f"absolute initial speeds in m/s (default {DEFAULT_SPEEDS})",
+        help="absolute initial speeds in m/s (default: the chosen robot's preset)",
     )
     parser.add_argument(
         "--calibrate", action="store_true",
@@ -249,8 +288,12 @@ def print_feasibility(template: dict, speeds) -> None:
 
 def main() -> None:
     args = parse_args()
+    apply_robot(args.robot)
     template = yaml.safe_load(TEMPLATE_PATH.read_text())
     v_max = float(template["robots"][0]["config"]["max_linear_vel"])
+    print(f"robot preset '{args.robot}': {TEMPLATE_PATH.name}, ring radius {RADIUS} m "
+          f"-> separation {2 * RADIUS:.4f} m "
+          f"({2 * RADIUS / float(template['d_collision']):.2f} x d_collision)")
 
     if args.calibrate:
         sweep = [round(v_max * i / 12.0, 4) for i in range(13)]

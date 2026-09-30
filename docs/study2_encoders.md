@@ -65,6 +65,48 @@ Configs: `learning/config/study/data_mid_n{02,04,06,08}/<encoder>_mlp.yaml` (pol
 task while the policy config overrides the workspace to the training density. Both are
 generated; never edit them by hand.
 
+### What the encoder actually saw
+
+Holding the density fixed does **not** hold the neighbour count fixed. Measured on the
+training distribution itself, by sampling starts through the trainer's own sampler and
+weighting in the pinned ring layouts at the third of episodes they occupy
+(`test/training_neighbour_counts.py`):
+
+| train N | training box | ceiling N−1 | uniform starts | ring starts (⅓) | **training mix** |
+| --: | --: | --: | --: | --: | --: |
+| 2 | ±1.732 | 1 | 0.99 | 1.00 | **0.99** |
+| 4 | ±2.45 | 3 | 2.32 | 2.15 | **2.27** |
+| 6 | ±3.0 | 5 | 3.06 | 2.69 | **2.93** |
+| 8 | ±3.464 | 7 | 3.56 | 2.99 | **3.37** |
+
+**The neighbour count more than triples across the training grid at constant density.**
+Two traps follow:
+
+- **The expert configs' own headers do not describe training.** `unicycle2_fleet_06.yaml`
+  says "mean visible neighbours ~1.45", which is that config at its own ±5.196 bounds;
+  every `data_mid` run overrides the workspace to a 3× denser box. Those headers are
+  correct for the bounds they name (measured 0.66 / 1.22 / 1.48 / 1.63) and irrelevant to
+  what was trained.
+- **`ρ·πR²` does not apply at these sizes.** It gives 8.38 neighbours at 0.167 robots/m²,
+  but a disk of R = 4 m covers 50.3 m² while the N = 8 training box is 48 m². The sensing
+  radius spans the whole workspace, so the boundary term in
+  `visible ≈ min(N − 1, ρ·πR²·boundary)` dominates and the count is set by the fleet size,
+  not the density.
+
+The count is `(N − 1) × P(two robots land within R)`, and at constant density the box grows
+as √N, so that probability falls while N − 1 rises. The result climbs toward the
+density-implied 8.38 only asymptotically — N ≈ 256 would be needed to come within 8% of it:
+
+| N at ρ = 0.167 | 2 | 4 | 6 | 8 | 16 | 32 | 64 | 256 |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: |
+| box side L | 3.46 | 4.90 | 6.00 | 6.93 | 9.80 | 13.86 | 19.59 | 39.19 |
+| P(d < R) | 0.997 | 0.865 | 0.705 | 0.590 | 0.356 | 0.201 | 0.109 | 0.030 |
+| (N−1)·P | 1.00 | 2.59 | 3.53 | 4.13 | 5.34 | 6.22 | 6.87 | 7.71 |
+| disk ÷ box area | 4.19 | 2.09 | 1.40 | **1.05** | 0.52 | 0.26 | 0.13 | 0.03 |
+
+(The measured column above runs a little below `(N−1)·P` because `d_safe` rejection
+sampling removes the closest pairs.)
+
 ## Evaluation
 
 The policy runs **without the expert** (`test/evaluate_scaling.py`), so fleets up to 32
@@ -89,6 +131,27 @@ Three scenario sets are evaluated:
 the workspace, the goal distribution and hence the path length are identical at every
 fleet size, so nothing varies but the number of robots sharing the space. It answers the
 deployment question — how many robots fit in *this* arena before the policy breaks.
+
+Its neighbour counts, measured the same way (`mean_visible_neighbours` averaged over the
+evaluation rollouts is the third column; the headers in the generated configs describe the
+start states and are trustworthy here, since arena keeps its own ±6.5 m box):
+
+| eval N | density | ×training | config header | measured at start | rollout mean |
+| --: | --: | --: | --: | --: | --: |
+| 2 | 0.0118 | 0.07× | ~0.17 | 0.20 | 0.25 |
+| 4 | 0.0237 | 0.14× | ~0.64 | 0.62 | 0.74 |
+| 6 | 0.0355 | 0.21× | ~1.08 | 1.02 | 1.15 |
+| 8 | 0.0473 | 0.28× | ~1.39 | 1.43 | 1.62 |
+| 16 | 0.0947 | 0.57× | ~3.04 | 3.02 | 3.43 |
+| 32 | 0.1893 | 1.14× | ~6.03 | 5.97 | 6.96 |
+
+Here the geometry is fixed, so `P(d < R) = 0.224` at every N and the count is simply
+linear in N − 1. That makes the arena/training comparison counter-intuitive: **arena N = 32
+carries 1.14× the training density but 1.8× the neighbours of training N = 8** (5.97
+against 3.37), because its box is 169 m² against 48 m². At equal density a larger
+workspace yields more neighbours, since in a small box much of the sensing disk falls
+outside the walls. (At N = 32 the sampler fails to place all starts `d_safe` apart in
+roughly 1 seed in 600 — the same limit the density axis hits at 1.25×.)
 
 Two caveats attach to it. The sweep is out of distribution in two directions at once:
 density is below training everywhere except at N=32, and the goals are further away than

@@ -6,7 +6,7 @@ evaluation **density** at a fixed fleet size. ``--axis`` picks which one is plot
 ``auto`` reads it off the results, since a density sweep holds several densities per
 fleet size and a fleet sweep exactly one.
 
-Three figures per axis:
+Four figures per axis:
 
 * ``*_matrix.pdf`` - one panel per encoder, training fleet size across, the axis down,
   one metric per cell. The in-distribution cells are outlined: trained and evaluated on
@@ -17,6 +17,10 @@ Three figures per axis:
 * ``*_by_<axis>_facets.pdf`` - one panel per training fleet size, so the pooled figure's
   assumption is visible rather than implied. Pooling buys a tighter interval but would
   hide a real training-fleet effect if one existed.
+* ``*_by_train_fleet.pdf`` - the transpose of ``*_by_<axis>.pdf``: training fleet size
+  across, pooled over the axis instead of over the training fleet sizes. Where the curve
+  peaks is the fleet size that was worth training on, which is the question the other
+  three cannot answer. ``--train-fleet-pooling`` picks how the axis is pooled.
 
 On the density axis every figure is written once per evaluation fleet size, because a
 density sweep holds several fleet sizes whose rows would otherwise share a cell.
@@ -252,6 +256,12 @@ def titled(label: str, title: str) -> str:
     return f"{label} — {title}" if label else title
 
 
+# Set once by main() from --no-title. A module-level switch rather than a parameter
+# threaded through all four plot functions: every one of them builds its header the same
+# way and hands it to save_figure, so there is exactly one place that has to honour it.
+NO_TITLE = False
+
+
 def save_figure(fig, output_path: Path, *header) -> None:
     """Write the figure, then the same figure again without its header text, as a PNG.
 
@@ -261,8 +271,22 @@ def save_figure(fig, output_path: Path, *header) -> None:
     everything inside the axes, including the legend, which carries meaning rather than
     description. It is always a PNG, whatever --format the primary is, since that is what
     a slide or a document wants to embed.
+
+    Under --no-title the header never makes it into any file: the primary is written
+    already stripped, in whatever --format was asked for, and no companion is produced.
+    That is the form a thesis or paper wants, where the caption lives in the document.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if NO_TITLE:
+        for artist in header:
+            if artist is not None:
+                artist.set_visible(False)
+        fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE, dpi=PNG_DPI)
+        print(f"wrote {display_path(output_path)}")
+        plt.close(fig)
+        return
+
     fig.savefig(output_path, bbox_inches="tight", facecolor=SURFACE, dpi=PNG_DPI)
     print(f"wrote {display_path(output_path)}")
 
@@ -335,9 +359,13 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
         cmap = cmap.copy()
         cmap.set_bad(SURFACE)
 
+    # Height scales with the number of rows, or the two lines of a cell (the value and
+    # the collision/timeout split below it) overlap the neighbouring rows: at a fixed
+    # 4.6 in the six-row sweeps are fine, but the sixteen-row ring is unreadable. 0.5 in
+    # per row plus the chrome reproduces the old size at six rows.
     fig, axes = plt.subplots(
         1, len(encoders),
-        figsize=(3.5 * len(encoders) + 1.4, 4.6),
+        figsize=(3.5 * len(encoders) + 1.4, 1.6 + 0.5 * len(eval_sizes)),
         sharey=True,
     )
     fig.patch.set_facecolor(SURFACE)
@@ -607,16 +635,140 @@ def plot_by_axis_facets(rows, output_path: Path, axis: Axis, label: str = "",
     save_figure(fig, output_path, title, subtitle)
 
 
+def plot_by_train_fleet(rows, output_path: Path, axis: Axis, label: str = "",
+                        metric: str = "success_rate", pooling: str = "macro") -> None:
+    """The transpose of ``plot_by_axis``: training fleet size across, pooled over the axis.
+
+    ``plot_by_axis`` answers "how far does a policy carry?" by pooling the training fleet
+    sizes together and walking along the evaluation axis. This answers the other question --
+    "which training fleet size should I have picked?" -- by pooling the evaluation
+    conditions together and walking along the training fleet size. **Where the curve peaks
+    is the best training fleet size**, and because the expert's cost grows
+    super-quadratically in the fleet size, a peak to the left of the largest run is a
+    saving rather than a compromise.
+
+    Two ways to pool, because they weight the evaluation conditions differently and the
+    difference is not cosmetic:
+
+    * ``macro`` (default) averages the per-condition rates, so every evaluation fleet size
+      counts once -- "averaged over the deployment sizes you might face".
+    * ``micro`` sums the counts, so a condition's weight is its robot-episode count. With
+      eval N = 2..32 that hands 47% of the weight to N=32 alone, where every policy is near
+      zero, which drags the whole curve down and flattens it.
+
+    Both orderings agree on this study's data (MLP peaks at 2, flow at 4 either way), so
+    the default is the one whose values stay interpretable. The subtitle records which was
+    used, since the numbers differ by roughly 2x between them.
+
+    Error bars are sampling uncertainty only. Under ``macro`` the evaluation sizes are
+    fixed design points rather than a sample, so the variance is propagated across them
+    (``SE = sqrt(sum p_i (1 - p_i) / n_i) / k``) instead of measuring their spread -- that
+    spread is the real effect of fleet size, not noise. Under ``micro`` it is the same
+    Wilson interval the other figures use. Neither corrects for robots inside one episode
+    sharing a layout, so a per-robot interval is optimistic; the ordering is what this
+    figure is for, not the width.
+    """
+    if pooling not in {"macro", "micro"}:
+        raise ValueError("'pooling' must be 'macro' or 'micro'.")
+    per_robot = metric.startswith("robot_")
+    train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
+    axis_values = sorted({axis.value(r) for r in rows})
+
+    # (encoder, train size, axis value) -> [successes, trials]; the axis stays a separate
+    # key so macro can average over it rather than summing into it.
+    cells: dict[tuple, list[int]] = defaultdict(lambda: [0, 0])
+    for row in rows:
+        key = (row["encoder_type"], int(row["train_fleet_size"]), axis.value(row))
+        trials = int(row["episodes"]) * (int(row["eval_fleet_size"]) if per_robot else 1)
+        cells[key][0] += round(float(row[metric]) * trials)
+        cells[key][1] += trials
+
+    def pooled(encoder: str | None, train_size: int) -> tuple[float, float]:
+        """(rate, half-width of the 95% interval) over every axis value, for one column."""
+        rates, variances, successes, trials = [], [], 0, 0
+        for value in axis_values:
+            keys = ([(encoder, train_size, value)] if encoder is not None
+                    else [(e, train_size, value) for e in ENCODER_ORDER])
+            k = sum(cells[key][0] for key in keys if key in cells)
+            n = sum(cells[key][1] for key in keys if key in cells)
+            if not n:
+                continue
+            successes += k
+            trials += n
+            rate = k / n
+            rates.append(rate)
+            variances.append(rate * (1.0 - rate) / n)
+        if not rates:
+            return (np.nan, 0.0)
+        if pooling == "micro":
+            rate = successes / trials
+            low, high = wilson_interval(successes, trials)
+            return (rate, max(rate - low, high - rate))
+        mean = float(np.mean(rates))
+        return (mean, 1.96 * math.sqrt(sum(variances)) / len(rates))
+
+    encoders = [e for e in ENCODER_ORDER if any(k[0] == e for k in cells)]
+
+    fig, ax = plt.subplots(figsize=(7.6, 4.6))
+    fig.patch.set_facecolor(SURFACE)
+    ax.set_facecolor(SURFACE)
+    x = np.arange(len(train_sizes))
+
+    # All encoders together first, behind the three series: the peak is the point of the
+    # figure, and pooling the encoders is what makes it legible when they overlap. Drawn
+    # in muted ink rather than a fourth hue, so it reads as a summary and not as a rival.
+    combined = [pooled(None, t) for t in train_sizes]
+    ax.plot(x, [c[0] for c in combined], color=TEXT_SECONDARY, linewidth=2.6,
+            linestyle=(0, (5, 2)), marker="D", markersize=7, markerfacecolor=SURFACE,
+            markeredgewidth=2, label="All encoders", zorder=2)
+
+    for encoder in encoders:
+        points = [pooled(encoder, t) for t in train_sizes]
+        ax.errorbar(x, [p[0] for p in points], yerr=[p[1] for p in points],
+                    color=SERIES_COLORS[encoder], linewidth=2.0, marker="o", markersize=8,
+                    capsize=4, elinewidth=1.5, markeredgecolor=SURFACE, markeredgewidth=2,
+                    label=ENCODER_LABELS.get(encoder, encoder), zorder=3)
+
+    ax.set_xticks(x, [str(t) for t in train_sizes])
+    ax.set_xlabel("Trained on (robots)", fontsize=10, color=TEXT_SECONDARY)
+    ax.set_ylabel(METRIC_LABELS.get(metric, metric), fontsize=10, color=TEXT_SECONDARY)
+    top = max(c[0] + c[1] for c in combined if not np.isnan(c[0]))
+    ax.set_ylim(-0.03, max(0.35, min(1.03, top * 1.35)))
+    ax.set_xlim(-0.4, len(train_sizes) - 0.6 + 0.5)
+    ax.grid(axis="y", color=GRID, linewidth=1)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.tick_params(colors=TEXT_SECONDARY, length=0)
+    ax.legend(frameon=False, fontsize=10, labelcolor=TEXT_SECONDARY, loc="upper right")
+
+    unit = "robot-episodes" if per_robot else "episodes"
+    how = (f"mean of the {len(axis_values)} per-{axis.name} rates, each weighted equally"
+           if pooling == "macro" else f"weighted by {unit}")
+    title = fig.suptitle(titled(label, f"{METRIC_LABELS.get(metric, metric)} by training fleet size"),
+                         fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.06)
+    subtitle = fig.text(0.02, 1.0,
+             f"Pooled over all {len(axis_values)} {axis.name} conditions ({how}); "
+             "bars are 95% sampling intervals",
+             fontsize=9, color=TEXT_MUTED, ha="left")
+    save_figure(fig, output_path, title, subtitle)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
+    # Several files are concatenated, which is what --policy both needs: the two heads
+    # live in separate experiment directories and there is no merged CSV holding them.
+    parser.add_argument("--results", type=Path, nargs="+", default=[DEFAULT_RESULTS])
     parser.add_argument("--metric", default="success_rate", choices=sorted(METRIC_LABELS))
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--format", default="pdf", choices=["pdf", "png"])
     parser.add_argument(
-        "--policy", choices=["mlp", "flow"], default=None,
-        help="plot only this policy's rows; required when the results hold more than one",
+        "--policy", choices=["mlp", "flow", "both"], default=None,
+        help="plot only this policy's rows; required when the results hold more than one. "
+             "'both' deliberately pools the heads into one set of series -- each point then "
+             "averages the two, weighted by their episode counts",
     )
     parser.add_argument("--label", default="", help="scenario name shown in the titles, e.g. 'antipodal ring'")
     parser.add_argument("--train-density", type=float, default=1.0,
@@ -634,19 +786,48 @@ def main() -> None:
         "--axis", choices=["auto", "fleet", "density"], default="auto",
         help="what varies along the plotted axis; 'auto' reads it off the results",
     )
+    parser.add_argument(
+        "--figures", default="all",
+        help="comma-separated subset of {matrix, by_axis, facets, by_train_fleet}, "
+             "or 'all' (default)",
+    )
+    parser.add_argument(
+        "--no-title", action="store_true",
+        help="write the figures with no title or note, for a document that captions them "
+             "itself; suppresses the separate _notitle.png companion",
+    )
+    parser.add_argument(
+        "--train-fleet-pooling", choices=["macro", "micro"], default="macro",
+        help="how the by-training-fleet figure pools the evaluation conditions: 'macro' "
+             "weights each condition equally (default), 'micro' weights by robot-episodes, "
+             "which hands most of the weight to the largest fleet",
+    )
     args = parser.parse_args()
 
-    rows = load_rows(args.results)
+    known = {"matrix", "by_axis", "facets", "by_train_fleet"}
+    figures = known if args.figures == "all" else {f.strip() for f in args.figures.split(",")}
+    if unknown := figures - known:
+        raise SystemExit(f"unknown figure(s) {sorted(unknown)}; choose from {sorted(known)}")
+
+    global NO_TITLE
+    NO_TITLE = args.no_title
+
+    rows = [row for path in args.results for row in load_rows(path)]
     # Every series is keyed by encoder alone, so a file holding both policies would
-    # silently merge each encoder's mlp and flow rows into one line.
+    # silently merge each encoder's mlp and flow rows into one line. 'both' asks for
+    # exactly that, so it is opt-in rather than the default for a mixed file.
     policies = sorted({row.get("policy_type") or "mlp" for row in rows})
     if args.policy is None and len(policies) > 1:
-        raise SystemExit(f"{args.results} holds policies {policies}; pass --policy to pick one")
+        raise SystemExit(
+            f"{[str(p) for p in args.results]} holds policies {policies}; pass --policy to "
+            "pick one, or --policy both to pool them"
+        )
     prefix = "encoder_study"
     if args.policy is not None:
-        rows = [row for row in rows if (row.get("policy_type") or "mlp") == args.policy]
+        if args.policy != "both":
+            rows = [row for row in rows if (row.get("policy_type") or "mlp") == args.policy]
         if not rows:
-            raise SystemExit(f"no {args.policy} rows in {args.results}")
+            raise SystemExit(f"no {args.policy} rows in {[str(p) for p in args.results]}")
         prefix = f"encoder_study_{args.policy}"
 
     label = " · ".join(part for part in (args.policy, args.label) if part)
@@ -673,20 +854,29 @@ def main() -> None:
         group_label = label
         if suffix:
             group_label = " · ".join(part for part in (label, f"N={int(suffix[2:])}") if part)
-        plot_matrix(group, args.metric,
-                    args.output_dir / f"{prefix}_{args.metric}_matrix{suffix}.{args.format}",
-                    axis, group_label, show_failures=not args.no_failure_modes,
-                    outcome_colors=args.color_by_outcome)
+        if "matrix" in figures:
+            plot_matrix(group, args.metric,
+                        args.output_dir / f"{prefix}_{args.metric}_matrix{suffix}.{args.format}",
+                        axis, group_label, show_failures=not args.no_failure_modes,
+                        outcome_colors=args.color_by_outcome)
         # The line plots can only show a success rate. When --metric is something else
         # (a distance, a latency) they fall back to episode success -- so the filename is
         # built from the metric actually plotted, not from the one requested.
         line_metric = args.metric if args.metric in FAILURE_COLUMNS else "success_rate"
-        plot_by_axis(group,
-                     args.output_dir / f"{prefix}_{line_metric}_by_{axis.name}{suffix}.{args.format}",
-                     axis, group_label, metric=line_metric)
-        plot_by_axis_facets(group,
-                            args.output_dir / f"{prefix}_{line_metric}_by_{axis.name}_facets{suffix}.{args.format}",
-                            axis, group_label, metric=line_metric)
+        if "by_axis" in figures:
+            plot_by_axis(group,
+                         args.output_dir / f"{prefix}_{line_metric}_by_{axis.name}{suffix}.{args.format}",
+                         axis, group_label, metric=line_metric)
+        if "facets" in figures:
+            plot_by_axis_facets(group,
+                                args.output_dir / f"{prefix}_{line_metric}_by_{axis.name}_facets{suffix}.{args.format}",
+                                axis, group_label, metric=line_metric)
+        # The transpose: which training fleet size was the right one to have picked.
+        if "by_train_fleet" in figures:
+            plot_by_train_fleet(group,
+                                args.output_dir / f"{prefix}_{line_metric}_by_train_fleet{suffix}.{args.format}",
+                                axis, group_label, metric=line_metric,
+                                pooling=args.train_fleet_pooling)
 
 
 if __name__ == "__main__":

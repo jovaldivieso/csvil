@@ -61,6 +61,10 @@ CSV_FIELDS = (
     "checkpoint", "encoder_type", "policy_type", "train_seed", "train_fleet_size", "eval_fleet_size",
     "density", "config", "episodes", "steps", "action_noise_std", *TOLERANCE_FIELDS,
     "success_rate", "collision_rate", "timeout_rate",
+    # Of the timeouts, the ones where the policy could not produce an action at all --
+    # safeflow's projector refusing an uncertifiable action. rollout_metrics always
+    # returns it, so it has to be declared here or DictWriter rejects every row.
+    "infeasible_rate",
     # Per robot, as in GLAS (Riviere et al. 2020, eq. 6): a robot succeeds when it ends
     # at its goal and was never within d_collision of another. Fleet-level success needs
     # all N robots at once, so it falls off as p^N and says nothing at 32 robots even

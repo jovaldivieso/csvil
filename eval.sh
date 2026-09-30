@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Evaluate every checkpoint of an experiment on one scenario, in parallel containers.
 #
-#   ./eval.sh <experiment> [scenario]   # scenario: arena (default) | fleet | density | circle | all
+#   ./eval.sh <experiment> [scenario]   # scenario: arena (default) | fleet | density | circle |
+#                                       #           circle_wide | all
 #
 #   env: EPISODES=50  MAX_PARALLEL=8  RUNNER=docker|local  SEED_START=50000
 #        STEP_BUDGET_FACTOR=3  ACTION_NOISE=0.0  CONFIGS="<glob>"
@@ -24,6 +25,9 @@
 #            so it drags the path length along and isolates no better than 'arena' does
 #   circle   antipodal swap from the configs' fixed starts, ringed at the training
 #            density for every N -- the stress case for head-on conflicts
+#   circle_wide  the same ring with a 2.0x d_safe floor on the gap between neighbours, so
+#            the large fleets no longer start nearly touching (N<=9 is the same config as
+#            'circle'; N>=10 rings wider, below the training density). Not part of 'all'.
 #   swap     two stacks trade corners from fixed starts, packed at d_safe inside each
 #            column. Like 'circle' but the formation, not just the crossing, is the
 #            difficulty. Not part of 'all', same as 'fleet'.
@@ -60,12 +64,13 @@ declare -A SCENARIO_GLOB=(
   [fleet]="test/config/study/fleet/*.yaml"
   [density]="test/config/study/density/*.yaml"
   [circle]="test/config/study/circle/*.yaml"
+  [circle_wide]="test/config/study/circle_wide/*.yaml"
   [swap]="test/config/study/swap/*.yaml"
 )
 # The ring layouts are the configs' own 'start' entries, not sampled ones.
 declare -A SCENARIO_FLAGS=(
   [arena]="" [fleet]="" [density]=""
-  [circle]="--use-config-start" [swap]="--use-config-start"
+  [circle]="--use-config-start" [circle_wide]="--use-config-start" [swap]="--use-config-start"
 )
 
 usage() {

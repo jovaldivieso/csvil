@@ -167,11 +167,11 @@ def plot_trajectories(ax, rollouts, simulator, d_collision, v0, dt) -> None:
     ax.set_aspect("equal", adjustable="datalim")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
-    ax.set_title(
-        f"Trajectories at $v_0$ = {v0:g} m/s\n"
-        f"shaded discs: d_collision footprint at each run's closest approach",
-        fontsize=11, color=INK, loc="left",
-    )
+    # ax.set_title(
+    #     f"Trajectories at $v_0$ = {v0:g} m/s\n"
+    #     f"shaded discs: d_collision footprint at each run's closest approach",
+    #     fontsize=11, color=INK, loc="left",
+    # )
     style_axes(ax)
 
 
@@ -245,11 +245,11 @@ def plot_actions(axes, rollouts, simulator, dt, v0) -> None:
         ax.set_ylim(-span, span)
         ax.set_xlabel("time (s)")
         ax.set_ylabel(ylabel)
-        ax.set_title(
-            f"Commanded {title} - robot 0, {limit_name} = {limit:g}\n"
-            f"what the policy asked for; the simulator clips to this bound",
-            fontsize=11, color=INK, loc="left",
-        )
+        # ax.set_title(
+        #     f"Commanded {title} - robot 0, {limit_name} = {limit:g}\n"
+        #     f"what the policy asked for; the simulator clips to this bound",
+        #     fontsize=11, color=INK, loc="left",
+        # )
         style_axes(ax)
 
     return summary
@@ -340,7 +340,7 @@ def main() -> None:
                 planner_config=validated if policy_type == "safeflow" else None,
             )
             rollouts[policy_type] = roll_out_policy(
-                simulator, policy, device, start, 400,
+                simulator, policy, device, start, 300,
                 int(checkpoint.get("observation_horizon", 1)),
             )
             print(f"v0={v0:g}  {policy_type}: {len(rollouts[policy_type][1])} steps", flush=True)
@@ -367,7 +367,7 @@ def main() -> None:
         handles, labels = axes[0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=len(handles), frameon=False,
                    fontsize=9, labelcolor=INK, bbox_to_anchor=(0.5, 0.175))
-        fig.suptitle(f"Commanded acceleration at $v_0$ = {v0:g} m/s", fontsize=12, color=INK)
+        # fig.suptitle(f"Commanded acceleration at $v_0$ = {v0:g} m/s", fontsize=12, color=INK)
         fig.text(0.5, 0.145, summary_text(summary), ha="center", va="top", fontsize=8.5,
                  family="monospace", color=INK,
                  bbox=dict(boxstyle="round,pad=0.5", facecolor="#fcfcfb", edgecolor=GRID))

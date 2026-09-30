@@ -16,7 +16,10 @@ an axis:
   episode, with a band up to the mean. A mean alone is the wrong summary for a safety
   claim: a policy averaging 0.15 m while one episode grazed 0.101 m is not the same
   policy as one that never went below 0.14 m, and it is the near-miss that decides
-  whether the thing is deployable.
+  whether the thing is deployable. Rungs where the safety filter's QP went infeasible are
+  dropped rather than drawn: those episodes abort at step 1 and their logged distance is
+  the start separation, so plotting them shows SafeFlow's clearance *rising* on the rungs
+  where it has actually given up. See CLEARANCE_MAX and --clearance-max.
 
 Reference lines come from the scenario config, not from constants here: d_collision (a
 contact) and d_safe (the expert's planning buffer). The CasADi expert holds exactly d_safe
@@ -50,12 +53,36 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # CVD dE 9.9 (target >= 8, deuteranope flow/safeflow). That 9.9 clears the target but not
 # by much, which is why every series also carries its own dash pattern and marker --
 # identity never rests on hue alone, and the figure survives greyscale printing.
-SERIES_STYLE = {
+#
+# Two comparisons reuse the same three slots, because only one of them is ever on a
+# figure: the small-robot experiment varies the policy head at a fixed encoder, and the
+# 1 m experiments (data_mid_best and friends) vary the encoder at a fixed head. Each is
+# three series in a fixed order, so the validated palette applies unchanged -- what must
+# never happen is both axes at once, which would want nine hues and the skill's rule is
+# that a ninth series is never a generated colour.
+HEAD_STYLE = {
     "mlp": ("#2a78d6", "o", "-", "MLP"),
     "flow": ("#eb6834", "s", "--", "Flow"),
     "safeflow": ("#1baf7a", "^", "-.", "SafeFlow"),
 }
-SERIES_ORDER = ("mlp", "flow", "safeflow")
+ENCODER_STYLE = {
+    "deepset": ("#2a78d6", "o", "-", "DeepSet"),
+    "transformer": ("#eb6834", "s", "--", "Transformer"),
+    "gnn": ("#1baf7a", "^", "-.", "GNN"),
+}
+GROUPINGS = {"policy_type": HEAD_STYLE, "encoder_type": ENCODER_STYLE}
+
+# Rebound by main() once --group-by is known; the module-level default keeps
+# plot_crash_rollouts.py's import working for the policy-head comparison.
+SERIES_STYLE = HEAD_STYLE
+SERIES_ORDER = tuple(HEAD_STYLE)
+
+
+def use_grouping(column: str) -> None:
+    """Point the module's series style/order at whichever axis is being compared."""
+    global SERIES_STYLE, SERIES_ORDER
+    SERIES_STYLE = GROUPINGS[column]
+    SERIES_ORDER = tuple(SERIES_STYLE)
 
 # Ink, never series colour, for text (see the palette's text tokens).
 INK = "#0b0b0b"
@@ -64,6 +91,15 @@ GRID = "#d8d7d2"
 # Status colour, reserved: this marks a physical contact, not a fourth series. Ships with
 # a label so it never signals by colour alone.
 CRITICAL = "#c0362c"
+
+# Above this, a "closest approach" is not a measurement. Once the safety filter's QP goes
+# infeasible the episode aborts at step 1, and evaluate_crash.py still logs a min pair
+# distance -- the robots' *start* separation, which in this scenario is ~0.33 m, roughly
+# three times d_safe. Plotted, it becomes a line that climbs as the scenario gets harder,
+# which reads as the policy keeping more room exactly where it has in fact stopped
+# steering. Anything this far above d_safe is one of those aborts (the head-on configs
+# close the gap within a few steps), so the rung is dropped rather than drawn.
+CLEARANCE_MAX = 0.2
 
 
 def save_figure(fig, stem: Path, titled=("pdf",), untitled=("png",), **savefig_kwargs) -> None:
@@ -134,13 +170,28 @@ def read_rows(results_csv: Path) -> list[dict]:
     return rows
 
 
-def group(rows: list[dict]) -> dict[str, list[dict]]:
-    """Rows by policy type, each sorted along the ladder."""
+def group(rows: list[dict], column: str = "policy_type") -> dict[str, list[dict]]:
+    """Rows by the compared axis, each sorted along the ladder.
+
+    ``column`` is "policy_type" for the head comparison and "encoder_type" for the
+    encoder one. Grouping by the wrong column does not error -- it silently stacks every
+    run onto one series with several conflicting values per rung -- so this checks that
+    the column actually separates the rows and says so if it does not.
+    """
     by_policy: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         record = dict(row)
-        record["v0"] = initial_speed(row["config"])
-        by_policy[str(row["policy_type"]).lower()].append(record)
+        record["v0"] = float(row["v0"]) if row.get("v0") else initial_speed(row["config"])
+        by_policy[str(row[column]).lower()].append(record)
+    rungs = len({row["config"] for row in rows})
+    for name, series in by_policy.items():
+        if len(series) > rungs:
+            raise SystemExit(
+                f"'{column}' does not separate these runs: '{name}' has {len(series)} rows "
+                f"for {rungs} rungs, so several checkpoints would be drawn as one line. "
+                f"Pick a different --group-by, or filter the runs "
+                f"(e.g. evaluate only the fleet_02 checkpoints)."
+            )
     for series in by_policy.values():
         series.sort(key=lambda record: record["v0"])
     return by_policy
@@ -202,52 +253,79 @@ def plot_success(ax, by_policy: dict[str, list[dict]]) -> None:
     style_axes(ax)
 
 
+def measured(value: float, ceiling: float) -> float:
+    """``value``, or NaN if it is too large to be a real closest approach.
+
+    NaN rather than a dropped element so the x positions stay aligned: matplotlib breaks
+    a line and skips a marker at NaN, so the rung leaves a visible gap instead of a
+    segment interpolated straight across it.
+    """
+    return value if value <= ceiling else float("nan")
+
+
 def plot_clearance(
-    ax, by_policy: dict[str, list[dict]], d_collision: float, d_safe: float
+    ax, by_policy: dict[str, list[dict]], d_collision: float, d_safe: float,
+    clearance_max: float = CLEARANCE_MAX,
 ) -> None:
     ax.axhspan(0.0, d_collision, color=CRITICAL, alpha=0.10, zorder=0)
     ax.axhline(d_collision, color=CRITICAL, linewidth=1.4, linestyle="-", zorder=1)
     ax.axhline(d_safe, color=INK_MUTED, linewidth=1.2, linestyle=":", zorder=1)
 
     has_worst = False
+    dropped: list[str] = []
     for name in SERIES_ORDER:
         series = by_policy.get(name)
         if not series:
             continue
         color, marker, dash, label = SERIES_STYLE[name]
         xs = [record["v0"] for record in series]
-        means = [float(record["mean_min_pair_distance"]) for record in series]
+        means = [measured(float(record["mean_min_pair_distance"]), clearance_max)
+                 for record in series]
         worst_raw = [record.get("min_min_pair_distance") for record in series]
         if all(value not in (None, "") for value in worst_raw):
             has_worst = True
-            worst = [float(value) for value in worst_raw]
+            worst = [measured(float(value), clearance_max) for value in worst_raw]
+            # Losing the worst episode means no episode on that rung ran long enough to
+            # measure, so its mean cannot be a clearance either. The reverse is allowed:
+            # a rung where only some episodes aborted keeps its (real) worst marker and
+            # simply draws no band, since the aborts inflate the mean above it.
+            means = [float("nan") if math.isnan(w) else m for w, m in zip(worst, means)]
             ax.fill_between(xs, worst, means, color=color, alpha=0.16, linewidth=0, zorder=2)
             ax.plot(xs, worst, color=color, marker=marker, linestyle=dash, linewidth=2.0,
                     markersize=8, label=label, zorder=3)
             ax.plot(xs, means, color=color, linestyle=dash, linewidth=1.0, alpha=0.55, zorder=2)
-            endpoint = worst[-1]
+            labelled = worst
         else:
             # Older CSVs predate the worst-episode column; the mean is all there is.
             ax.plot(xs, means, color=color, marker=marker, linestyle=dash, linewidth=2.0,
                     markersize=8, label=label, zorder=3)
-            endpoint = means[-1]
-        ax.annotate(label, (xs[-1], endpoint), textcoords="offset points", xytext=(9, 0),
-                    va="center", fontsize=9, color=INK)
+            labelled = means
+        # No direct end-of-line label: the three series converge on d_safe over most of
+        # the ladder, so the labels landed on top of each other and on the d_safe line.
+        # Identity is carried by the legend plus each series' own dash pattern and marker.
+        gaps = [f"{x:g}" for x, y in zip(xs, labelled) if math.isnan(y)]
+        if gaps:
+            dropped.append(f"{label} at v0 {', '.join(gaps)}")
+    if dropped:
+        print(f"clearance: dropped rungs above {clearance_max:g} m "
+              f"(aborted episodes, distance is the start separation): "
+              f"{'; '.join(dropped)}")
 
     # Bound to the data rather than to zero: anchoring at 0 turned the collision band
     # into two thirds of the panel and squeezed every series into a thin strip, which is
     # the opposite of what the panel is for.
-    finite = [v for v in ax.get_lines()[2:] for v in v.get_ydata()]
+    finite = [value for line in ax.get_lines()[2:] for value in line.get_ydata()
+              if math.isfinite(value)]
     low = min(finite + [d_collision]) if finite else d_collision
     high = max(finite + [d_safe]) if finite else d_safe
     pad = max(0.06 * (high - low), 0.004)
     ax.set_ylim(low - pad, high + pad)
-    ax.set_ylabel("closest approach between robots (m)")
+    ax.set_ylabel("min robot distance (m)")
     subtitle = "worst episode (solid), band up to the mean" if has_worst else "mean over episodes"
-    ax.set_title(
-        f"Clearance - {subtitle}\nexpert holds d_safe on every rung",
-        fontsize=11, color=INK, loc="left",
-    )
+    # ax.set_title(
+    #     f"Clearance - {subtitle}\nexpert holds d_safe on every rung",
+    #     fontsize=11, color=INK, loc="left",
+    # )
     ax.annotate(
         f"contact (d_collision {d_collision:g} m)", (0.015, d_collision),
         xycoords=("axes fraction", "data"), xytext=(0, -11), textcoords="offset points",
@@ -269,13 +347,22 @@ def parse_args() -> argparse.Namespace:
                         help="merged crash CSV, e.g. outputs/<exp>/eval/crash.csv")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="default: <results parent>/../plots/crash")
+    parser.add_argument("--group-by", choices=sorted(GROUPINGS), default="policy_type",
+                        help="which axis the series compare: 'policy_type' for the "
+                             "mlp/flow/safeflow experiment (default), 'encoder_type' for "
+                             "an all-MLP grid like data_mid_best")
+    parser.add_argument("--clearance-max", type=float, default=CLEARANCE_MAX,
+                        help="drop clearance points above this many metres -- they are "
+                             "solver aborts logging the start separation, not a measured "
+                             f"closest approach (default: {CLEARANCE_MAX:g})")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    use_grouping(args.group_by)
     rows = read_rows(args.results)
-    by_policy = group(rows)
+    by_policy = group(rows, args.group_by)
     missing = [name for name in SERIES_ORDER if name not in by_policy]
     if missing:
         print(f"note: no rows for {', '.join(missing)} -- plotting the heads that are present")
@@ -294,7 +381,8 @@ def main() -> None:
     # to crop the success one out of it.
     for name, draw in (
         ("crash_success", lambda ax: plot_success(ax, by_policy)),
-        ("crash_clearance", lambda ax: plot_clearance(ax, by_policy, d_collision, d_safe)),
+        ("crash_clearance", lambda ax: plot_clearance(ax, by_policy, d_collision, d_safe,
+                                                       args.clearance_max)),
     ):
         fig, ax = plt.subplots(figsize=(7.0, 5.2))
         fig.patch.set_facecolor("#fcfcfb")

@@ -20,6 +20,12 @@ really be a "more crowding" curve, which is exactly what the other evaluation ax
 built to avoid. Adjacent robots sit 2*R*sin(pi/N) apart; that spacing shrinks slowly
 with N, so the generator checks it against d_safe and says how much margin is left.
 
+``--min-spacing`` puts a floor under that shrinking spacing: the radius is raised until
+neighbours sit at least that far apart (in multiples of d_safe), which only ever enlarges
+a ring, so the sizes whose density radius already clears the floor are byte-for-byte the
+configs the density-only sweep writes and stay comparable with it. Without the flag the
+sizing is density-only, as before.
+
 --density defaults to the training density of the study's runs (0.1667 robots/m^2,
 the +-1.73/2.45/3.0/3.46 boxes of learning/config/study/data_*_n<NN>), so the ring is
 in-distribution in density and differs from training only in the layout.
@@ -27,6 +33,8 @@ in-distribution in density and differs from training only in the layout.
 Usage:
     python test/config/generate_circle_configs.py
     python test/config/generate_circle_configs.py --density 0.0556 --out-subdir sparse
+    python test/config/generate_circle_configs.py --min-spacing 2.0 \
+        --out-dir test/config/study/circle_wide
 """
 
 from __future__ import annotations
@@ -74,13 +82,23 @@ RING_SPACING_PER_D_SAFE = 1.5
 DEFAULT_DENSITY = 0.1667
 
 
-def ring_radius(num_robots: int, density: float) -> float:
+def ring_radius(num_robots: int, density: float, min_spacing: float | None = None) -> float:
     """Radius that puts `num_robots` on a ring at `density` robots per m^2.
 
     The circle inscribed in the square that many robots would occupy at that density,
     so the ring's crowding matches the randomized scenarios of the same density.
+
+    `min_spacing` (metres) is a floor on the distance between neighbours. Density sizing
+    spreads the fleet over a circumference that grows as sqrt(N) while the number of gaps
+    grows as N, so neighbour spacing decays as 1/sqrt(N) -- 3.46 m at N=2 but 1.36 m at
+    N=32, only 1.13x d_safe, which decides the run in its first few steps. The floor
+    raises the radius until the gap is `min_spacing`; it never shrinks a ring, so every
+    size that already clears it keeps its density radius.
     """
-    return round(math.sqrt(num_robots / density) / 2.0, 4)
+    radius = math.sqrt(num_robots / density) / 2.0
+    if min_spacing is not None:
+        radius = max(radius, min_spacing / (2.0 * math.sin(math.pi / num_robots)))
+    return round(radius, 4)
 
 
 def ring_spacing(num_robots: int, radius: float) -> float:
@@ -106,9 +124,11 @@ def robot_endpoints(num_robots: int, radius: float, robot_idx: int):
     return start, goal
 
 
-def build_config(template: dict, num_robots: int, density: float) -> tuple[dict, float]:
+def build_config(
+    template: dict, num_robots: int, density: float, min_spacing: float | None = None
+) -> tuple[dict, float]:
     robot_template = first_robot_template(template)
-    radius = ring_radius(num_robots, density)
+    radius = ring_radius(num_robots, density, min_spacing)
 
     base_robot_config = {
         key: value
@@ -204,20 +224,36 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--density", type=float, default=DEFAULT_DENSITY,
                         help=f"robots per m^2 the rings are sized for (default {DEFAULT_DENSITY})")
+    parser.add_argument("--min-spacing", type=float, default=None,
+                        help="floor on the distance between neighbouring robots, in multiples of "
+                             "d_safe (2.0 means 2.4 m at d_safe 1.2); rings whose density radius "
+                             "already clears it are left exactly as the density-only sweep writes them")
+    parser.add_argument("--out-dir", default=None,
+                        help="write into this directory (relative to the project root) instead of "
+                             "test/config/study/circle")
     parser.add_argument("--out-subdir", default=None,
-                        help="write into test/config/study/circle/<subdir> instead of circle/")
+                        help="write into <out-dir>/<subdir> instead of <out-dir>/")
     args = parser.parse_args()
 
     template = yaml.safe_load(TEMPLATE_PATH.read_text())
     d_safe = float(template["d_safe"])
-    output_dir = OUTPUT_DIR / args.out_subdir if args.out_subdir else OUTPUT_DIR
+    base_dir = PROJECT_ROOT / args.out_dir if args.out_dir else OUTPUT_DIR
+    output_dir = base_dir / args.out_subdir if args.out_subdir else base_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    min_spacing = args.min_spacing * d_safe if args.min_spacing is not None else None
 
     print(f"template d_safe={d_safe}, visibility={template['inter_robot_visibility_radius']}, "
-          f"ring density {args.density} robots/m^2")
+          f"ring density {args.density} robots/m^2"
+          + (f", spacing floor {min_spacing:.3f} m ({args.min_spacing}x d_safe)"
+             if min_spacing is not None else ""))
+    visibility = float(template["inter_robot_visibility_radius"])
+    if min_spacing is not None and min_spacing >= visibility:
+        print(f"  warning: the floor is at or beyond the {visibility} m visibility radius, so ring "
+              "neighbours cannot see each other at t=0.")
     worst_steps = 0
     for num_robots in FLEET_SIZES:
-        config, radius = build_config(template, num_robots, args.density)
+        config, radius = build_config(template, num_robots, args.density, min_spacing)
+        floored = radius > ring_radius(num_robots, args.density)
         validated = validate_system_config(system_name="multi_robot", raw_config=config)
         stats = check_scenario(validated, num_robots, radius, d_safe)
         worst_steps = max(worst_steps, stats["straight_line_steps"])
@@ -234,8 +270,11 @@ def main() -> None:
             f"# {num_robots}x unicycle2 antipodal-circle swap for the encoder-scaling study.\n"
             f"# Generated by test/config/generate_circle_configs.py -- do not edit by hand.\n"
             f"# Robot i starts at angle 2*pi*i/{num_robots} on a circle of radius {radius},\n"
-            f"# sized for {args.density} robots/m^2 so every fleet size rings at the same density.\n"
-            f"# and targets the antipode, which is "
+            + (f"# sized for a {min_spacing:.3f} m floor ({args.min_spacing}x d_safe) on the distance\n"
+               f"# between neighbours, which {args.density} robots/m^2 would fall below at this N,\n"
+               if floored else
+               f"# sized for {args.density} robots/m^2 so every fleet size rings at the same density.\n")
+            + f"# and targets the antipode, which is "
             + (f"the start of robot i+{num_robots // 2}.\n" if num_robots % 2 == 0
                else "the gap between two starts (N is odd).\n")
             + f"# Deterministic: fixed 'start' and 'goal', randomize_goal false.\n"
@@ -247,7 +286,8 @@ def main() -> None:
         print(
             f"wrote {output_path.relative_to(PROJECT_ROOT)} "
             f"(radius {radius}, closest pair {stats['min_pair_distance']:.2f}, "
-            f"{stats['visible_neighbours']:.2f} visible, >={stats['straight_line_steps']} steps)"
+            f"{stats['visible_neighbours']:.2f} visible, >={stats['straight_line_steps']} steps"
+            + (", spacing floor" if floored else "") + ")"
         )
 
     print(f"\nRun with --steps at least {math.ceil(worst_steps * 1.6)} so the largest ring "

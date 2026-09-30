@@ -511,7 +511,7 @@ def save_xy_rollout_video(
     ax.set_xlabel("X position")
     ax.set_ylabel("Y position")
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.legend(loc="best")
+    # ax.legend(loc="best")
 
     if len(series) % robot_count != 0:
         raise ValueError(
