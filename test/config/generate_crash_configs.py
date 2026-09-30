@@ -183,7 +183,7 @@ def run_expert(raw: dict, validated: dict, steps: int = 300) -> tuple[bool, floa
     import numpy as np
 
     from core.factory import DynamicsFactory, PlannerFactory
-    from planning.casadi_planner import PlannerSolveError
+    from planning.planner import PlannerSolveError
 
     sys.path.insert(0, str(PROJECT_ROOT / "test"))
     from evaluate_scaling import config_start_state

@@ -25,7 +25,7 @@ from systems.seed_utils import (
     default_action_noise_seed_for_config,
     default_seed_argument_for_simulator,
 )
-from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerSolveError
 from learning.dagger import apply_config_overrides, build_decentralized_joint_action
 from learning.models.encoder import (
     DEFAULT_ENCODER_TYPE,
