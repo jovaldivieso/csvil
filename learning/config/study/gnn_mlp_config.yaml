@@ -1,0 +1,12 @@
+# [template-only] GNN mlp model; generate_study_policy_configs.py builds the per-fleet configs from it.
+model:
+  policy_type: mlp
+  observation_horizon: 2        # number of past observation steps to consider
+  prediction_horizon: 1
+  hidden_dims: [256, 256, 256]
+
+  encoder: gnn
+
+  gnn:
+    hidden_dim: 128
+    num_layers: 1
