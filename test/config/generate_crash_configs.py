@@ -19,7 +19,7 @@ workspace half-width, so the goal vectors stay inside the range the policies saw
 training, and the only out-of-distribution quantity in the whole ladder is the initial
 velocity. Push the robots further apart to buy room and the goal vector grows past
 anything training produced -- the policies would then degrade for a reason that has
-nothing to do with the crash (see the arena-axis caveat in docs/study2_encoders.md).
+nothing to do with the crash.
 
 Exact head-on symmetry is kept rather than broken with a lateral offset. It is solvable:
 the observations are ego-centric, so two mirrored robots that both turn the same way *in

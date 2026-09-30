@@ -1,8 +1,8 @@
 """Plot encoder-scaling study results produced by test/evaluate_scaling.py.
 
-The study evaluates on two axes, and each one varies exactly one quantity (see
-docs/study2_encoders.md): evaluation **fleet size** at the training density, and
-evaluation **density** at a fixed fleet size. ``--axis`` picks which one is plotted;
+The study evaluates on two axes, each of which varies exactly one quantity: evaluation
+**fleet size** at the training density, and evaluation **density** at a fixed fleet
+size. ``--axis`` picks which one is plotted;
 ``auto`` reads it off the results, since a density sweep holds several densities per
 fleet size and a fleet sweep exactly one.
 
@@ -37,6 +37,7 @@ import argparse
 import csv
 import math
 import os
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -162,6 +163,39 @@ def fleet_axis() -> Axis:
         title="evaluation fleet size",
         in_distribution=lambda train_size, value: float(train_size) == value,
         note="trained and evaluated on the same fleet size",
+    )
+
+
+V0_FROM_CONFIG_RE = re.compile(r"v(\d+)")
+
+
+def v0_from_config(config_path: str) -> float:
+    """Initial speed a crash config was generated with, in m/s.
+
+    The generator names files `unicycle2_crash_v0500.yaml` for v0=0.5 m/s (the trailing
+    digits are the speed times 1000). Parsing the filename avoids an extra YAML read per
+    row and mirrors how the generator writes them.
+    """
+    match = V0_FROM_CONFIG_RE.search(os.path.basename(config_path))
+    if not match:
+        raise SystemExit(f"crash config filename '{config_path}' has no v<NNNN> tag")
+    return int(match.group(1)) / 1000.0
+
+
+def v0_axis() -> Axis:
+    """Crash-ladder axis: initial speed the robots already carry at t=0.
+
+    No cell is in-distribution here -- training does not vary the initial speed -- so the
+    outline is disabled with a predicate that is always false.
+    """
+    return Axis(
+        name="v0",
+        value=lambda row: v0_from_config(row["config"]),
+        tick=lambda value: f"{value:g}",
+        axis_label="Initial speed v0 (m/s)",
+        title="crash ladder",
+        in_distribution=lambda train_size, value: False,
+        note="two-robot head-on ladder at rising initial speeds",
     )
 
 
@@ -783,8 +817,9 @@ def main() -> None:
     parser.add_argument("--no-failure-modes", action="store_true",
                         help="only the metric per cell, without the collision/timeout split")
     parser.add_argument(
-        "--axis", choices=["auto", "fleet", "density"], default="auto",
-        help="what varies along the plotted axis; 'auto' reads it off the results",
+        "--axis", choices=["auto", "fleet", "density", "v0"], default="auto",
+        help="what varies along the plotted axis; 'auto' reads it off the results. "
+             "'v0' is the crash-ladder axis and must be passed explicitly",
     )
     parser.add_argument(
         "--figures", default="all",
@@ -833,7 +868,12 @@ def main() -> None:
     label = " · ".join(part for part in (args.policy, args.label) if part)
 
     axis_name = args.axis if args.axis != "auto" else detect_axis(rows)
-    axis = density_axis(args.train_density) if axis_name == "density" else fleet_axis()
+    if axis_name == "density":
+        axis = density_axis(args.train_density)
+    elif axis_name == "v0":
+        axis = v0_axis()
+    else:
+        axis = fleet_axis()
     if axis_name == "density" and not all(row.get("density") for row in rows):
         raise SystemExit(
             f"{args.results} has no 'density' column; it predates the density axis. "
@@ -841,15 +881,20 @@ def main() -> None:
         )
 
     # On the density axis the rows of several fleet sizes would land in the same cell,
-    # so each fleet size gets its own set of figures.
-    groups = (
-        [("", rows)]
-        if axis_name == "fleet"
-        else [
+    # so each fleet size gets its own set of figures. The crash ladder is one fleet size
+    # (two robots) by construction, so it stays one group.
+    if axis_name == "density":
+        groups = [
             (f"_n{size:02d}", [r for r in rows if int(r["eval_fleet_size"]) == size])
             for size in sorted({int(r["eval_fleet_size"]) for r in rows})
         ]
-    )
+    else:
+        groups = [("", rows)]
+
+    # The crash ladder has one train fleet size (per run) and no in-distribution row, so
+    # the matrix collapses to a line and the by-train-fleet transpose is uninformative.
+    if axis_name == "v0":
+        figures = figures & {"by_axis", "facets"}
     for suffix, group in groups:
         group_label = label
         if suffix:

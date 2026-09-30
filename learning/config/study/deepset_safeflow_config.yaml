@@ -1,5 +1,5 @@
 # Encoder-scaling study: DeepSet safe-flow baseline.
-# [template-only] train.sh does not train from this file: it trains from the
+# [template-only] train_grid.py does not train from this file: it trains from the
 # [template-only] per-fleet-size configs that the generators derive from it, which is
 # [template-only] also where the 'training' section (the ring initial_states/goal_states)
 # [template-only] is added.

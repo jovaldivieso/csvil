@@ -14,7 +14,7 @@ fleet size it was generated for; hence one directory per size:
     learning/config/study/n<NN>/<encoder>_<head>.yaml
 
 Train one directory against the expert config of the same fleet size with
-``./train.sh <experiment> learning/config/study/n<NN> <expert config>``.
+``python learning/train_grid.py <experiment> learning/config/study/n<NN> <expert config>``.
 
 Episodes beyond the provided list fall back to the expert config's randomized
 sampling (see ``collect_dagger_rollouts``), so every round is part ring, part
@@ -54,7 +54,7 @@ CONFIG_DIR = Path(__file__).resolve().parent
 FLEET_CONFIG_TEMPLATE = "test/config/study/unicycle2_fleet_%02d.yaml"
 ENCODERS = ("deepset", "transformer", "gnn")
 
-# Each config carries its full DAgger schedule in its 'training' section. train.sh
+# Each config carries its full DAgger schedule in its 'training' section. train_grid.py
 # passes only the run identity (--experiment-name/--system/--expert-config/
 # --policy-config/--seed/--checkpoint-dir): train_dagger.py lets command-line flags
 # override that section, so the schedule has exactly one source -- the constants below.
@@ -457,7 +457,7 @@ def main() -> None:
             subsequent_indent="# ",
         )
 
-        # train.sh trains every YAML in the directory, so a file left over from a
+        # train_grid.py trains every YAML in the directory, so a file left over from a
         # removed template or head would silently keep being trained.
         out_dir = CONFIG_DIR / f"n{num_robots:02d}"
         out_dir.mkdir(exist_ok=True)
@@ -506,7 +506,7 @@ def format_training_value(value: object) -> str:
 
 
 SCHEDULE_NOTE = (
-    "  # DAgger schedule. train.sh passes only the run identity, so these values are\n"
+    "  # DAgger schedule. train_grid.py passes only the run identity, so these values are\n"
     "  # the single source; a flag given to train_dagger.py by hand overrides them.\n"
 )
 

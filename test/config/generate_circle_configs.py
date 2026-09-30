@@ -78,7 +78,7 @@ FLEET_SIZES = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32)
 # is in collision; 1.5 is the margin this generator prefers and warns below.
 RING_SPACING_PER_D_SAFE = 1.5
 # Robots per m^2 the ring is sized for. The default is what the study's runs train at
-# (learning/config/study/generate_data_pilot_configs.py, --density-factor 3).
+# (matches the training density used by learning/config/study/data_mid_n*/).
 DEFAULT_DENSITY = 0.1667
 
 

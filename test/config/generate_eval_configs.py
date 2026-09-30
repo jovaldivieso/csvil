@@ -67,9 +67,8 @@ _spec.loader.exec_module(_fleet)
 # generated training config rather than the raw template, which has since been retuned
 # for other work. Robots, Q_diag and the workspace are rebuilt here.
 TEMPLATE_PATH = PROJECT_ROOT / "test/config/study/unicycle2_fleet_02.yaml"
-# What the runs train at, set in learning/config/study/generate_data_pilot_configs.py
-# (--density-factor 3). Checked against a generated policy config below, so the two
-# cannot drift apart unnoticed.
+# What the runs train at (matches learning/config/study/data_mid_n*/ headers). Checked
+# against a generated policy config below, so the two cannot drift apart unnoticed.
 TRAINING_DENSITY = 0.1667
 TRAINING_DENSITY_REFERENCE = "learning/config/study/data_mid_n02/deepset_mlp.yaml"
 
@@ -178,7 +177,7 @@ def write_config(num_robots: int, density: float, out_path: Path, header_lines: 
 
 
 def clear_stale(directory: Path) -> None:
-    """eval.sh scores every YAML in a scenario directory, so leftovers would join in."""
+    """evaluate_grid.py scores every YAML in a scenario directory, so leftovers would join in."""
     for stale in directory.glob("*.yaml"):
         stale.unlink()
 

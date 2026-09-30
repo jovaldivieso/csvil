@@ -15,40 +15,6 @@ def _heading_sample_stride(num_points: int) -> int:
     return max(1, num_points // 20)
 
 
-def _heading_arrow_unit(simulator: Any, trajectories: Any = None) -> float:
-    """Length of a one-unit heading arrow, in data units.
-
-    The heading arrows used to be hardcoded absolute distances (0.25 m for a start or
-    goal, 0.18 m along a path, 0.22 m in the video). That is 4% of the workspace for a
-    1 m robot in a +-3 m box, but 72% of it -- and 2.5x the robot itself -- once the
-    fleet is scaled down to a 0.1 m robot in a +-0.1732 m box, so the arrows swallowed
-    the plot.
-
-    Anchoring to d_collision instead keeps an arrow a fixed fraction of a robot
-    diameter at any scale, and reproduces the original figures exactly at
-    d_collision = 1.0, which is what every existing 1 m figure was drawn at. Callers
-    multiply this by the same 0.25 / 0.18 / 0.22 they used before.
-
-    Systems with no collision distance (single-robot configs) fall back to the span of
-    the plotted data over 6 -- chosen because the 1 m fleet's +-3 m box spans 6 m, so
-    the fallback agrees with the d_collision path on the configs that have both.
-    """
-    collision_distance = getattr(simulator, "d_collision", None)
-    if collision_distance is None:
-        collision_distance = getattr(simulator, "config", {}).get("d_collision", None)
-    if collision_distance is not None and float(collision_distance) > 0.0:
-        return float(collision_distance)
-
-    spans = []
-    for trajectory in trajectories or []:
-        points = np.asarray(trajectory)
-        if points.ndim == 2 and points.shape[0] > 0 and points.shape[1] >= 2:
-            spans.append(float(np.ptp(points[:, 0])))
-            spans.append(float(np.ptp(points[:, 1])))
-    span = max(spans) if spans else 0.0
-    return span / 6.0 if span > 0.0 else 1.0
-
-
 def _unicycle_collision_radius(simulator: Any, collision_distance: float | None = None) -> float | None:
     """Return the plotted point-robot radius for unicycle fleet members."""
     if type(simulator).__name__ not in {"Unicycle1", "Unicycle2"}:
@@ -94,7 +60,6 @@ def plot_xy_trajectories(
         os.makedirs(output_dir, exist_ok=True)
 
     trajectories = [np.asarray(trajectory) for trajectory in trajectories]
-    arrow_unit = _heading_arrow_unit(simulator, trajectories)
 
     fig, ax = plt.subplots(figsize=(8, 8))
 
@@ -141,8 +106,8 @@ def plot_xy_trajectories(
                 ax.quiver(
                     goal_x,
                     goal_y,
-                    0.25 * arrow_unit * np.cos(goal_theta),
-                    0.25 * arrow_unit * np.sin(goal_theta),
+                    0.25 * np.cos(goal_theta),
+                    0.25 * np.sin(goal_theta),
                     color=robot_color,
                     angles="xy",
                     scale_units="xy",
@@ -184,9 +149,7 @@ def plot_xy_trajectories(
 
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
-            if color_by == "trajectory" and base_color is not None:
-                robot_color = base_color
-            elif base_color is not None:
+            if base_color is not None:
                 robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
@@ -248,8 +211,8 @@ def plot_xy_trajectories(
                 ax.quiver(
                     robot_traj[0, 0],
                     robot_traj[0, 1],
-                    0.25 * arrow_unit * np.cos(start_theta),
-                    0.25 * arrow_unit * np.sin(start_theta),
+                    0.25 * np.cos(start_theta),
+                    0.25 * np.sin(start_theta),
                     color=line.get_color(),
                     angles="xy",
                     scale_units="xy",
@@ -268,8 +231,8 @@ def plot_xy_trajectories(
                 ax.quiver(
                     sampled_states[:, 0],
                     sampled_states[:, 1],
-                    0.18 * arrow_unit * np.cos(sampled_theta),
-                    0.18 * arrow_unit * np.sin(sampled_theta),
+                    0.18 * np.cos(sampled_theta),
+                    0.18 * np.sin(sampled_theta),
                     color=line.get_color(),
                     angles="xy",
                     scale_units="xy",
@@ -304,22 +267,11 @@ def save_xy_rollout_video(
     trajectory_line_styles: Sequence[str] | None = None,
     phase_lengths: Sequence[int] | None = None,
     goal_states: Sequence[np.ndarray] | None = None,
-    color_by: str = "robot",
 ) -> str | None:
     """Save an MP4 rollout animation with the same geometry as the PDF plot.
 
-    ``color_by`` picks what a colour means. The default "robot" is the original
-    behaviour: every trajectory shares one colour per robot index, which is what you
-    want when the trajectories are repeats of the same policy. "trajectory" instead
-    gives each trajectory its own colour across all of its robots, for overlaying
-    *different* agents on one scenario -- under "robot" they would all come out
-    identical and the overlay would be unreadable. Only robot 0 is labelled in that
-    mode, so N agents give N legend entries rather than N x robots.
-
     Returns the video path when export succeeds, otherwise None.
     """
-    if color_by not in {"robot", "trajectory"}:
-        raise ValueError("'color_by' must be 'robot' or 'trajectory'.")
     if len(trajectories) == 0:
         return None
 
@@ -332,7 +284,6 @@ def save_xy_rollout_video(
         os.makedirs(output_dir, exist_ok=True)
 
     video_path = os.path.splitext(path_to_output)[0] + ".mp4"
-    arrow_unit = _heading_arrow_unit(simulator, trajectories)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     robot_state_slices = simulator.robot_state_slices
@@ -376,8 +327,8 @@ def save_xy_rollout_video(
                 ax.quiver(
                     goal_x,
                     goal_y,
-                    0.25 * arrow_unit * np.cos(goal_theta),
-                    0.25 * arrow_unit * np.sin(goal_theta),
+                    0.25 * np.cos(goal_theta),
+                    0.25 * np.sin(goal_theta),
                     color=robot_color,
                     angles="xy",
                     scale_units="xy",
@@ -399,9 +350,7 @@ def save_xy_rollout_video(
 
         for robot_idx, state_slice in enumerate(robot_state_slices):
             robot_traj = trajectory[:, state_slice]
-            if color_by == "trajectory" and base_color is not None:
-                robot_color = base_color
-            elif base_color is not None:
+            if base_color is not None:
                 robot_color = robot_color_map(robot_idx) if robot_count > 1 else base_color
             else:
                 robot_color = robot_color_map(robot_idx)
@@ -411,10 +360,7 @@ def save_xy_rollout_video(
 
             label = None
             if current_label is not None:
-                if robot_count == 1 or color_by == "trajectory":
-                    label = current_label if robot_idx == 0 else None
-                else:
-                    label = f"{current_label} r{robot_idx}"
+                label = current_label if robot_count == 1 else f"{current_label} r{robot_idx}"
             elif trajectory_index == 0:
                 label = "trajectory" if robot_count == 1 else f"robot {robot_idx}"
 
@@ -443,7 +389,7 @@ def save_xy_rollout_video(
     point_artists = []
     heading_artists = []
     footprint_artists = []
-    heading_length = 0.22 * arrow_unit
+    heading_length = 0.22
     for item in series:
         line, = ax.plot(
             [],
@@ -511,7 +457,7 @@ def save_xy_rollout_video(
     ax.set_xlabel("X position")
     ax.set_ylabel("Y position")
     ax.grid(True, linestyle="--", alpha=0.6)
-    # ax.legend(loc="best")
+    ax.legend(loc="best")
 
     if len(series) % robot_count != 0:
         raise ValueError(

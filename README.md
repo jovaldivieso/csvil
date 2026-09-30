@@ -62,12 +62,7 @@ docker compose run --rm csvil hf auth login
 ```text
 csvil/
 ├── README.md                  # End-to-end usage and experiment recipes
-├── train.sh                   # Study training driver (policy configs x expert configs)
-├── eval.sh                    # Study evaluation driver (random / density / circle)
 ├── compose.yaml               # Docker services for csvil and optional db-lacam
-├── docs/
-│   ├── experiment_plan.md     # Studies 1 and 2: design, decisions, results
-│   └── evaluation.md          # How to train, evaluate and plot both studies
 ├── requirements.txt           # Python dependencies installed in the csvil image
 ├── docker/
 │   ├── Dockerfile             # Main csvil runtime image
@@ -108,6 +103,7 @@ csvil/
 │   │   ├── rollouts.py        # Collection, evaluation, and action execution
 │   │   └── utils.py           # Seeding, step resolution, config overrides, and metric logging
 │   ├── train_dagger.py        # CLI plumbing/orchestration: parses args, builds DaggerConfig, runs DaggerTrainer
+│   ├── train_grid.py          # Grid launcher: trains every policy config x expert config x seed in parallel
 ├── planning/
 │   ├── planner.py             # Planner protocol and base class
 │   ├── casadi_planner.py      # CasADi planner implementation (expert)
@@ -136,7 +132,10 @@ csvil/
     │   └── multi_robot_dblacam_config.yaml          # Long-form robots: list example (distinct per-robot `start` states)
     ├── evaluate_policy.py           # CLI for rollout/evaluation across policy families
     ├── evaluate_checkpoints.py      # CLI to compare multiple checkpoints/policy_types head-to-head (success rates + inference-time/real-time verdict)
+    ├── evaluate_scaling.py          # Policy-only evaluation across scenario configs; writes one CSV row per checkpoint x config
+    ├── evaluate_grid.py             # Grid launcher: runs evaluate_scaling.py across every checkpoint x scenario in parallel
     ├── plot_expert_trajectories.py  # Canonical single/multi-robot expert analysis CLI (plots + optional MP4)
+    ├── plot_study_results.py        # Reads the evaluate_scaling.py CSVs and writes the study figures
     └── test_simulator_contracts.py  # Schema consistency tests
 ```
 
@@ -293,10 +292,6 @@ overrides the YAML value for a single run (see the CLI quick reference below).
 a specific scenario without touching any config file.
 
 ## Pipeline Tutorial
-
-For the two studies (policy head and horizon; neighbour encoders across fleet sizes),
-see [docs/experiment_plan.md](docs/experiment_plan.md) for the design and results and
-[docs/evaluation.md](docs/evaluation.md) for how to run them.
 
 The primary workflow is decentralized DAgger for a homogeneous multi-robot
 `unicycle2` fleet. Each robot runs the shared policy from its ego observation
@@ -528,6 +523,108 @@ lerobot-dataset-viz \
 --episode-index 0
 ```
 
+
+## Study grid: multi-config training and evaluation
+
+Three Python launchers iterate over a grid of (policy, expert, seed) or
+(checkpoint, scenario) in parallel, wrapping the underlying single-run scripts:
+
+- `learning/train_grid.py` -> `learning/train_dagger.py`
+- `test/evaluate_grid.py`  -> `test/evaluate_scaling.py`
+- `test/plot_study_results.py` reads the evaluation CSVs
+
+The CasADi expert dominates the training cost and is CPU-bound, so train on a
+many-core x86_64 machine (the amd64 image is unusably slow under emulation on
+ARM). Both launchers run each job in its own container with `-u $(id -u):$(id -g)`
+so files stay host-owned, `HOME=/tmp` and `USER=csvil` because the host uid has
+no passwd entry in the image, and `*_NUM_THREADS=1` so parallel jobs do not
+oversubscribe the cores. Pass `--runner local` to run in the current interpreter
+instead of Docker.
+
+### Training
+
+`train_grid.py` trains every policy config against every expert config,
+one container per run:
+
+```bash
+python learning/train_grid.py <experiment> <policy_dir_or_glob> <expert_dir_or_glob> \
+    [--seeds 0 1 2] [--max-parallel 8] [--runner docker|local]
+```
+
+Example -- the 4-robot cell of the encoder study:
+
+```bash
+python learning/train_grid.py study2 \
+    learning/config/study/data_mid_n04 test/config/study/unicycle2_fleet_04.yaml
+```
+
+Each run `<policy>_<expert>_s<seed>` writes to
+`outputs/<experiment>/models/<run>/` (checkpoints and saved configs) and
+`outputs/<experiment>/logs/<run>.log`. The DAgger schedule comes only from the
+policy config's `training:` section: this launcher passes `train_dagger.py`
+just the run identity, because any schedule flag would override the config.
+
+Policy configs with ring layouts (e.g. `learning/config/study/data_mid_n<NN>/`)
+only fit the fleet size they were generated for, so pair a policy dir with
+expert configs of that size. A mismatch fails inside `train_dagger.py` and shows
+up in that run's log.
+
+### Evaluation
+
+`evaluate_grid.py` walks every checkpoint under `outputs/<experiment>/models/`
+and runs `evaluate_scaling.py` on it for the requested scenario, in parallel
+containers:
+
+```bash
+python test/evaluate_grid.py <experiment> [scenario|all] \
+    [--episodes 50] [--max-parallel 8] [--runner docker|local] \
+    [--seed-start 50000] [--step-budget-factor 3] [--action-noise-std 0.0] \
+    [--configs GLOB]
+```
+
+Scenarios (each varies exactly one quantity; see the docstrings for details):
+
+| Scenario  | What varies |
+| --------- | ----------- |
+| `arena`   | N=2..32 in one fixed workspace: same box, ~7 m to drive at every N. |
+| `fleet`   | N=2..32 at the training density. Not in `all`: the box grows as sqrt(N). |
+| `density` | 0.25x..1.25x the training density at fixed N: spacing shrinks, ceiling does not. |
+| `circle`  | antipodal swap from fixed starts, ringed at the training density for every N. |
+| `crash`   | two-robot head-on ladder from fixed starts at rising initial speeds. Uses a fixed 250-step budget and action noise 0.03 (what training used), applied automatically. |
+
+The step budget is derived per config from the distances it produces
+(`--step-budget-factor`, default 3), except for `crash` which fixes 250 steps:
+every unicycle2 episode ends with an in-place settle rotation the distance model
+misses, and on the crash robot the rotation is the larger half of the budget.
+
+Each run writes `outputs/<experiment>/eval/<scenario>/<run>.csv` and the launcher
+merges them into one `outputs/<experiment>/eval/<scenario>.csv` (one row per
+checkpoint x config). Logs go to `outputs/<experiment>/eval/<scenario>/logs/<run>.log`.
+
+Training and evaluation are independent: evaluation needs only the checkpoints
+and the scenario configs, so it can run later, elsewhere, or again with other
+settings.
+
+### Plotting
+
+`plot_study_results.py` reads one or more scaling CSVs and writes the study figures:
+
+```bash
+python test/plot_study_results.py \
+    --results outputs/<experiment>/eval/<scenario>.csv \
+    --output-dir outputs/<experiment>/plots/<scenario>
+```
+
+Four figures per axis, at `--output-dir/*.pdf` (plus a `_notitle.png` companion
+for each): a matrix of encoder x train fleet x axis, a pooled line plot along
+the axis with 95% Wilson intervals, its facet-per-training-fleet variant, and
+the transpose (line plot vs training fleet size, pooled over the axis).
+
+The axis is auto-detected from the results (a density sweep holds several
+densities per fleet size, a fleet sweep holds each fleet size once); pass
+`--axis {fleet,density,v0}` to override. For the crash scenario pass `--axis v0`
+explicitly -- the ladder is one fleet size, so the matrix and by-train-fleet
+figures are skipped and the line plot uses the initial speed as the axis.
 
 ## TODO / Roadmap / Brainstorming
 - Open: Extend protocol-level simulator metadata beyond the already-promoted `is_euclidean` field (for example, plotting metadata and coordinate semantics) to remove remaining script-local heuristics.
