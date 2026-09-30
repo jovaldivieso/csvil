@@ -1,12 +1,30 @@
 dt: 0.1
-max_vel: 0.5
+
+environment:
+  min: [0.0, 0.0]
+  max: [8.0, 8.0]
+
+d_safe: 0.3
+d_collision: 0.25
+inter_robot_visibility_radius: 4.0
+
+initial_state_seed: 0
+action_noise_seed: 10
 
 db_lacam:
-  mode: replan
-  replan_freq: 10
-  time_limit_ms: 60000
+  mode: open_loop
+  replan_on_deviation: true
+  deviation_threshold: 0.2
+  time_limit_ms: 10000
   algorithm_config: planning/dblacam_algorithm_default.yaml
 
-  environment:
-    min: [-6.0, -6.0]
-    max: [6.0, 6.0]
+  motion_primitives:
+    integrator1_2d_v0: /workspace/data/motion_primitives/integrator1_2d_v0.bin.im.bin.sp.bin
+
+robots:
+  num_robots: 4
+  system: single_integrator
+  config:
+    dt: 0.1
+    max_vel: 1.0
+    error_tolerance: 0.2
