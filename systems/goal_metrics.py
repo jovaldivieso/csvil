@@ -28,17 +28,7 @@ def per_robot_goal_errors(
     state: np.ndarray,
     goal_state: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-robot (position error, heading error) between a state and a goal state.
-
-    `position_error[i]` is the Euclidean distance between robot i's position
-    coordinates and its goal's; `heading_error[i]` is the largest wrapped angular
-    residual over that robot's angular coordinates, and 0.0 for a simulator that
-    declares none. Both arrays have one entry per robot, so callers choose whether
-    the fleet summary is the mean or the worst robot.
-
-    Works for a single-robot simulator as well as a fleet: the former reports one
-    entry, since the protocol defaults `num_robots` to 1.
-    """
+    """Per-robot (position error, heading error) between a state and a goal state."""
     state_array = np.asarray(state, dtype=float)
     goal_array = np.asarray(goal_state, dtype=float)
     if state_array.shape != goal_array.shape:

@@ -35,36 +35,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.config import validate_system_config  # noqa: E402
 
-# Renamed with a 2_ prefix when the 4-robot configs arrived. Note that file has since
-# been retuned for other work (4 m/s instead of 1), so regenerating changes every study
-# scenario -- check_template_matches_existing below refuses to do that silently.
+# Retuned since the study configs were built; check_template_matches_existing guards against it.
 TEMPLATE_PATH = PROJECT_ROOT / "test/config/2_multi_unicycle2_casadi_config.yaml"
 OUTPUT_DIR = PROJECT_ROOT / "test/config/study"
 FLEET_SIZES = (2, 4, 6, 8, 16, 32)
 
-# Per-robot state-cost block for unicycle2: [x, y, theta, v, omega].
 Q_BLOCK = [100.0, 100.0, 10.0, 100.0, 1.0]
 REFERENCE_FLEET_SIZE = 2
 
-# Goal-box half-width at the reference fleet size, in units of d_safe. 2.5 is the
-# smallest value that samples reliably for every fleet size up to 32 robots;
-# lower it and the large fleets stop being placeable, raise it and the robots
-# spread out until they rarely see one another.
 GOAL_BOX_HALF_WIDTHS_PER_D_SAFE = 2.5
 
-# Convergence tolerances for the generated study scenarios, shared by the random
-# fleets and the circle rings. These belong to the *task*, not to a policy:
-# success_rate is only comparable across policies if every one of them is judged by
-# the same criterion, and the scenario config is the file they all share. So the
-# study policy configs carry no `tolerance_overrides` -- there is exactly one source,
-# and it is here.
-#
-# unicycle2.is_done() requires all four simultaneously: within pos_tol of the goal
-# position, within theta_tol of the goal heading (wrapped), and nearly stopped
-# (|v| < vel_tol and |omega| < omega_tol). Absent from a config, each falls back to
-# the simulator default of 0.05, which is a 22x stricter heading criterion -- that
-# silent fallback is why these keys are injected explicitly rather than inherited
-# from the canonical template.
 TASK_TOLERANCES = {
     "pos_tol": 0.1,
     "theta_tol": 1.1,
@@ -72,18 +52,11 @@ TASK_TOLERANCES = {
     "omega_tol": 0.05,
 }
 
-# Seeds drawn per config to prove the fleet is actually placeable.
 SAMPLING_CHECK_EPISODES = 20
 
 
 def first_robot_template(template: dict) -> dict:
-    """The per-robot entry of a template, in either 'robots' form.
-
-    core/config.py accepts both the homogeneous-fleet shorthand
-    ({num_robots, system, config}) and the long list form, and the canonical
-    template has since switched to the shorthand. Indexing ["robots"][0] therefore
-    raises KeyError on it, which is what silently froze these generated configs.
-    """
+    """The per-robot entry of a template, in either 'robots' form."""
     robots = template["robots"]
     if isinstance(robots, list):
         return robots[0]
@@ -96,12 +69,7 @@ def goal_half_width(num_robots: int, d_safe: float) -> float:
 
 
 def assert_fleet_is_placeable(config: dict, num_robots: int) -> float:
-    """Draw seeded episodes so an unplaceable fleet fails here, not mid-training.
-
-    Returns the mean number of visible neighbours, which is what the neighbour
-    encoders actually get to encode -- near zero means the fleet is so spread out
-    that the study would compare encoders on empty inputs.
-    """
+    """Draw seeded episodes so an unplaceable fleet fails here, not mid-training."""
     import numpy as np
 
     from core.factory import DynamicsFactory
@@ -139,7 +107,7 @@ def build_config(template: dict, num_robots: int, half_width: float | None = Non
     robot_config = {
         key: value
         for key, value in robot_template["config"].items()
-        if key != "goal"  # goals are randomized per episode
+        if key != "goal"
     }
     robot_config["randomize_goal"] = True
     robot_config.update(TASK_TOLERANCES)
@@ -151,9 +119,7 @@ def build_config(template: dict, num_robots: int, half_width: float | None = Non
         if key not in {"robots", "Q_diag"}
     }
     config["Q_diag"] = Q_BLOCK * num_robots
-    # deepcopy per robot: a shallow copy would share the bounds *lists* between
-    # entries, and yaml.safe_dump renders repeated objects as &anchor/*alias
-    # references instead of writing the values out at each robot.
+    # deepcopy: shared lists would be dumped as YAML &anchor/*alias references.
     config["robots"] = [
         {"system": robot_template["system"], "config": copy.deepcopy(robot_config)}
         for _ in range(num_robots)
@@ -162,11 +128,7 @@ def build_config(template: dict, num_robots: int, half_width: float | None = Non
 
 
 class _FlowListDumper(yaml.SafeDumper):
-    """Renders lists of plain scalars inline, so bound pairs stay on one line.
-
-    Only scalar lists: the robot list holds mappings, and forcing that inline
-    collapses the whole fleet into one unreadable wrapped blob.
-    """
+    """Renders lists of plain scalars inline, so bound pairs stay on one line."""
 
 
 def _represent_list(dumper: yaml.Dumper, data: list) -> yaml.Node:
@@ -178,11 +140,7 @@ _FlowListDumper.add_representer(list, _represent_list)
 
 
 def format_q_diag(num_robots: int) -> str:
-    """Emit Q_diag as one line per robot, matching the hand-written configs.
-
-    The default block style would put all 5*N entries on their own lines (160 of
-    them at N=32) and hide the per-robot block structure.
-    """
+    """Emit Q_diag as one line per robot, matching the hand-written configs."""
     lines = []
     for robot_idx in range(num_robots):
         values = ", ".join(str(value) for value in Q_BLOCK)
@@ -202,12 +160,7 @@ def render_config(config: dict, num_robots: int) -> str:
 
 
 def check_template_matches_existing(template: dict) -> None:
-    """Refuse to regenerate when the template would change the robots themselves.
-
-    The generated configs define the task every policy is trained and scored on, so a
-    template edit that changes the dynamics silently makes new runs incomparable with
-    every existing checkpoint. Tolerances and the box are set here and may differ.
-    """
+    """Refuse to regenerate when the template would change the robots themselves."""
     existing_path = OUTPUT_DIR / "unicycle2_fleet_02.yaml"
     if not existing_path.exists():
         return
@@ -242,11 +195,9 @@ def main() -> None:
         half_width = goal_half_width(num_robots, d_safe)
         output_path = OUTPUT_DIR / f"unicycle2_fleet_{num_robots:02d}.yaml"
         header = (
-            f"# {num_robots}x unicycle2 fleet for the encoder-scaling study.\n"
+            f"# {num_robots}x unicycle2 expert config, +-{half_width} m box, "
+            f"~{mean_visible:.2f} visible neighbours.\n"
             f"# Generated by test/config/generate_fleet_configs.py -- do not edit by hand.\n"
-            f"# Per-robot task is identical across fleet sizes; only 'robots', 'Q_diag' and\n"
-            f"# 'workspace_bounds' (+-{half_width}, starts and goals) vary with the fleet size.\n"
-            f"# Sized for d_safe={d_safe}; mean visible neighbours ~{mean_visible:.2f}.\n"
         )
         output_path.write_text(header + render_config(config, num_robots))
         print(

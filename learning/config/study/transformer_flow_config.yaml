@@ -1,11 +1,4 @@
-# Encoder-scaling study: transformer flow baseline.
-# [template-only] train_grid.py does not train from this file: it trains from the
-# [template-only] per-fleet-size configs that generate_study_policy_configs.py derives
-# [template-only] from it, which is also where the 'training' section (tolerances and
-# [template-only] the ring initial_states/goal_states) is added.
-# Identical to the deepset/gnn flow study configs except for the neighbour encoder,
-# and to transformer_mlp_config.yaml except for the policy head.
-# Context width is 128 in all three.
+# [template-only] Transformer flow model; generate_study_policy_configs.py builds the per-fleet configs from it.
 model:
   policy_type: flow
 
@@ -19,7 +12,7 @@ model:
   encoder: transformer
 
   transformer:
-    hidden_dim: 128        # -> context width 128
+    hidden_dim: 128
     num_heads: 4
     num_layers: 1
     dropout: 0.1

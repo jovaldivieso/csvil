@@ -56,7 +56,6 @@ from matplotlib.colors import LinearSegmentedColormap
 PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# The 1x level of both evaluation axes: the density the policies train at.
 REFERENCE_FLEET_CONFIG = "test/config/study/fleet/unicycle2_n02.yaml"
 DEFAULT_RESULTS = PROJECT_ROOT / "outputs/study2/eval/random/encoder_scaling.csv"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/study2/plots/random"
@@ -64,35 +63,16 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/study2/plots/random"
 ENCODER_ORDER = ("deepset", "transformer", "gnn")
 ENCODER_LABELS = {"deepset": "DeepSet", "transformer": "Transformer", "gnn": "GNN"}
 
-# Sequential blue ramp (light -> dark) for magnitude; one hue, never a rainbow.
 SEQUENTIAL_STEPS = [
     "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
     "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
 ]
-# Categorical slots 1-3, validated for CVD separation against the light surface.
 SERIES_COLORS = {"deepset": "#2a78d6", "transformer": "#eb6834", "gnn": "#1baf7a"}
 
-# Status palette: reserved for the outcome of a cell, never reused as a series colour.
-# Used by --color-by-outcome, where the number in a cell is a continuous metric but the
-# fill says which of the three outcomes produced it.
-#
-# These are the status steps (#0ca30c good, #fab219 warning) at 60% over the surface: a
-# full-strength fill behind a whole grid of cells reads louder than the numbers it is
-# meant to support. Near-black ink sits at 9.4:1 on the green and 13.5:1 on the yellow.
-#
-# The cost is colour-blind separation. The pair measures OKLab dE 18.6 in normal vision
-# and 13.5 deutan, both comfortable, but 6.7 protan -- inside the 6-8 band, so a protan
-# reader may not separate a success cell from a timeout cell by fill. The legend names
-# all three states, and the paler the tint the worse this gets: at 50% protan falls to
-# 5.5 and normal vision to 15.7, which is the hard floor. Raise the factor toward 1.0
-# (protan 10.6) if the distinction has to survive protanopia unaided.
-STATUS_GOOD = "#6cc76c"       # the scenario succeeded
-STATUS_WARNING = "#fbd073"    # the scenario ran out of steps
+STATUS_GOOD = "#6cc76c"
+STATUS_WARNING = "#fbd073"
 
 SURFACE = "#fcfcfb"
-# Raster output resolution. 300 is the print/thesis standard: at these figure sizes it
-# gives ~3500 px across, which still reads when a matrix is scaled down into a column.
-# PDF is vector, so this only affects the PNG companions.
 PNG_DPI = 300
 TEXT_PRIMARY = "#0b0b0b"
 TEXT_SECONDARY = "#52514e"
@@ -117,9 +97,6 @@ RATE_METRICS = {
     "success_rate", "collision_rate", "timeout_rate",
     "robot_success_rate", "robot_collision_rate", "robot_timeout_rate",
 }
-# The two failure modes belonging to a success metric, shown under the value in each
-# matrix cell. Episode rates and per-robot rates must not be mixed: they have different
-# denominators (episodes against robots), so a cell would not add up.
 FAILURE_COLUMNS = {
     "success_rate": ("collision_rate", "timeout_rate"),
     "robot_success_rate": ("robot_collision_rate", "robot_timeout_rate"),
@@ -127,12 +104,7 @@ FAILURE_COLUMNS = {
 
 
 def training_density() -> float:
-    """Robots per m^2 the policies train at, and the 1x level of the density axis.
-
-    Read off the reference fleet config rather than written down here, so the unit the
-    density axis is expressed in cannot drift from the scenarios themselves. The 1x
-    density level of test/config/study/density/ is generated from the same file.
-    """
+    """Robots per m^2 the policies train at, and the 1x level of the density axis."""
     config = yaml.safe_load((PROJECT_ROOT / REFERENCE_FLEET_CONFIG).read_text())
     num_robots = len(config["robots"])
     half_width = float(config["robots"][0]["config"]["workspace_bounds"][1])
@@ -148,8 +120,6 @@ class Axis:
     tick: Callable[[float], str]
     axis_label: str
     title: str
-    # A cell is in-distribution when the policy is scored under the condition it trained
-    # on: its own fleet size on the fleet axis, the training density on the density axis.
     in_distribution: Callable[[int, float], bool]
     note: str
 
@@ -170,12 +140,7 @@ V0_FROM_CONFIG_RE = re.compile(r"v(\d+)")
 
 
 def v0_from_config(config_path: str) -> float:
-    """Initial speed a crash config was generated with, in m/s.
-
-    The generator names files `unicycle2_crash_v0500.yaml` for v0=0.5 m/s (the trailing
-    digits are the speed times 1000). Parsing the filename avoids an extra YAML read per
-    row and mirrors how the generator writes them.
-    """
+    """Initial speed a crash config was generated with, in m/s."""
     match = V0_FROM_CONFIG_RE.search(os.path.basename(config_path))
     if not match:
         raise SystemExit(f"crash config filename '{config_path}' has no v<NNNN> tag")
@@ -183,11 +148,7 @@ def v0_from_config(config_path: str) -> float:
 
 
 def v0_axis() -> Axis:
-    """Crash-ladder axis: initial speed the robots already carry at t=0.
-
-    No cell is in-distribution here -- training does not vary the initial speed -- so the
-    outline is disabled with a predicate that is always false.
-    """
+    """Crash-ladder axis: initial speed the robots already carry at t=0."""
     return Axis(
         name="v0",
         value=lambda row: v0_from_config(row["config"]),
@@ -200,21 +161,10 @@ def v0_axis() -> Axis:
 
 
 def density_axis(train_density_factor: float = 1.0) -> Axis:
-    """`train_density_factor` in units of the reference density: the row to outline.
-
-    Which row is in-distribution depends on the runs the results came from, not on the
-    axis, so it has to be passed in. data_mid and data_large train at 0.167 robots/m^2,
-    which is the reference density itself, hence the default of 1; an earlier grid trained
-    at a third of it and needed 3.
-    """
+    """`train_density_factor` in units of the reference density: the row to outline."""
     reference = training_density()
     return Axis(
         name="density",
-        # As a multiple of the training density: the absolute value (0.0139 robots/m^2)
-        # says nothing without it, and the sweep is defined in those multiples. Rounded
-        # to two decimals so the sweep's levels come out as the round numbers they are:
-        # the CSV stores the density rounded to four decimals, which would otherwise
-        # turn 3x into 3.0006x and leave the 1x level just off the in-distribution test.
         value=lambda row: round(float(row["density"]) / reference, 2),
         tick=lambda value: f"{value:g}x",
         axis_label="Evaluated at (x training density)",
@@ -225,12 +175,7 @@ def density_axis(train_density_factor: float = 1.0) -> Axis:
 
 
 def detect_axis(rows: list[dict[str, str]]) -> str:
-    """'density' when a fleet size appears at several densities, else 'fleet'.
-
-    The two scenarios are distinguishable in the data itself: a density sweep holds one
-    fleet size at five densities, a fleet sweep holds every fleet size at the training
-    density. Results without a 'density' column predate it and can only be the latter.
-    """
+    """'density' when a fleet size appears at several densities, else 'fleet'."""
     per_fleet_densities = defaultdict(set)
     for row in rows:
         if not row.get("density"):
@@ -252,7 +197,6 @@ def load_rows(results_path: Path) -> list[dict[str, str]]:
         rows = list(csv.DictReader(results_path.open()))
         if rows:
             return rows
-    # Fall back to the per-policy CSVs when the merged file is missing or empty.
     rows = []
     for csv_path in sorted(results_path.parent.glob("*_n??.csv")):
         rows.extend(csv.DictReader(csv_path.open()))
@@ -262,54 +206,27 @@ def load_rows(results_path: Path) -> list[dict[str, str]]:
 
 
 def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson score interval - stays inside [0, 1] where the normal approximation does not.
-
-    Matters here because several cells sit at 0.02, where a normal interval would
-    dip below zero and imply precision the 50 episodes cannot support.
-    """
+    """Wilson score interval - stays inside [0, 1] where the normal approximation does not."""
     if total == 0:
         return (0.0, 0.0)
     p = successes / total
     denom = 1.0 + z * z / total
     center = (p + z * z / (2 * total)) / denom
     margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denom
-    # Snapped to p as well as to [0, 1]: the interval contains the observed rate by
-    # construction, but at 0 or 1 successes the two sides cancel only up to rounding,
-    # leaving a bound off by ~1e-18. Callers subtract these to get error bars, and
-    # matplotlib rejects a yerr of -7e-18.
+    # Snap to p: at 0 or 1 successes rounding can give a negative yerr, which matplotlib rejects.
     return (min(p, max(0.0, center - margin)), max(p, min(1.0, center + margin)))
 
 
 def titled(label: str, title: str) -> str:
-    """Prefix a figure title with what it shows, e.g. 'flow · antipodal ring'.
-
-    Titles describe rather than conclude: the same functions now plot two policies
-    and two scenarios, and a conclusion that held for the first MLP data (encoders
-    identical, training fleet size irrelevant) is false for flow on the ring.
-    """
+    """Prefix a figure title with its label, e.g. 'flow · antipodal ring'."""
     return f"{label} — {title}" if label else title
 
 
-# Set once by main() from --no-title. A module-level switch rather than a parameter
-# threaded through all four plot functions: every one of them builds its header the same
-# way and hands it to save_figure, so there is exactly one place that has to honour it.
 NO_TITLE = False
 
 
 def save_figure(fig, output_path: Path, *header) -> None:
-    """Write the figure, then the same figure again without its header text, as a PNG.
-
-    A document that carries its own caption would otherwise print the title and its note
-    twice, and cropping them off by hand re-renders at a different size. The second file
-    drops every artist in `header` -- the suptitle and the note under it -- and keeps
-    everything inside the axes, including the legend, which carries meaning rather than
-    description. It is always a PNG, whatever --format the primary is, since that is what
-    a slide or a document wants to embed.
-
-    Under --no-title the header never makes it into any file: the primary is written
-    already stripped, in whatever --format was asked for, and no companion is produced.
-    That is the form a thesis or paper wants, where the caption lives in the document.
-    """
+    """Write the figure, then the same figure again without its header text, as a PNG."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if NO_TITLE:
@@ -329,7 +246,6 @@ def save_figure(fig, output_path: Path, *header) -> None:
         for artist in dropped:
             artist.set_visible(False)
         untitled = output_path.with_name(f"{output_path.stem}_notitle.png")
-        # bbox_inches="tight" re-crops, so the hidden header leaves no band behind.
         fig.savefig(untitled, bbox_inches="tight", facecolor=SURFACE, dpi=PNG_DPI)
         print(f"wrote {display_path(untitled)}")
     plt.close(fig)
@@ -355,9 +271,6 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
             }
     encoders = [e for e in ENCODER_ORDER if any(k[0] == e for k in values)]
 
-    # Which outcome produced each cell: whichever of the three rates is largest. With
-    # one episode per cell that is the episode's own outcome; with many it is the modal
-    # one, and the fill should then be read as "mostly", which the note says.
     outcomes = {}
     has_rates = all(
         row.get(column) not in (None, "")
@@ -378,10 +291,6 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
     if metric in RATE_METRICS:
         vmin, vmax = 0.0, 1.0
     elif outcomes:
-        # The ramp now describes the collision cells alone, so it is scaled to them. Over
-        # the whole range the successes -- which are far apart by definition -- would push
-        # vmax up and flatten the failures into the palest steps, which is the opposite of
-        # what this figure is for.
         collided = [v for key, v in values.items() if outcomes.get(key) == "collision"]
         vmin, vmax = (min(collided), max(collided)) if collided else (min(all_values), max(all_values))
     else:
@@ -389,14 +298,9 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
 
     cmap = LinearSegmentedColormap.from_list("seq_blue", SEQUENTIAL_STEPS)
     if outcomes:
-        # Non-collision cells are masked out of the mesh and painted as status fills.
         cmap = cmap.copy()
         cmap.set_bad(SURFACE)
 
-    # Height scales with the number of rows, or the two lines of a cell (the value and
-    # the collision/timeout split below it) overlap the neighbouring rows: at a fixed
-    # 4.6 in the six-row sweeps are fine, but the sixteen-row ring is unreadable. 0.5 in
-    # per row plus the chrome reproduces the old size at six rows.
     fig, axes = plt.subplots(
         1, len(encoders),
         figsize=(3.5 * len(encoders) + 1.4, 1.6 + 0.5 * len(eval_sizes)),
@@ -429,21 +333,14 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
                     continue
                 outcome = outcomes.get((encoder, train_size, eval_size))
                 if outcome in ("success", "timeout"):
-                    # Painted here rather than through the mesh: these two are states,
-                    # not magnitudes, so they get a flat status fill under the value.
                     ax.add_patch(mpatches.Rectangle(
                         (col_idx - 0.5, row_idx - 0.5), 1, 1, zorder=1,
                         facecolor=STATUS_GOOD if outcome == "success" else STATUS_WARNING,
                         edgecolor="none"))
                     ink = TEXT_PRIMARY
                 else:
-                    # Flip ink to stay legible as the cell darkens.
                     shade = (value - vmin) / (vmax - vmin) if vmax > vmin else 0.0
                     ink = "#ffffff" if shade > 0.55 else TEXT_PRIMARY
-                # Two decimals on a small scale: mean_min_pair_distance is read against
-                # d_collision = 1.0 m, and at one decimal 0.94 and 1.04 both print as
-                # ~1.0, hiding the only boundary that matters. Large scales (mean_steps,
-                # in the hundreds) do not need the extra digit.
                 if metric in RATE_METRICS or vmax < 10.0:
                     text = f"{value:.2f}"
                 else:
@@ -453,9 +350,6 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
                     ax.text(col_idx, row_idx, text, ha="center", va="center",
                             fontsize=10, color=ink, zorder=4)
                 else:
-                    # Value and failure split on two lines: the split is the secondary
-                    # reading, so it sits smaller and below, and the pair stays centred
-                    # in the cell rather than the value alone.
                     collision, timeout = cell
                     ax.text(col_idx, row_idx - 0.13, text, ha="center", va="center",
                             fontsize=10, color=ink, zorder=4)
@@ -477,7 +371,6 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
         ax.tick_params(colors=TEXT_SECONDARY, length=0)
         for spine in ax.spines.values():
             spine.set_visible(False)
-        # 2px surface gap between cells, per mark specs.
         ax.set_xticks(np.arange(-0.5, len(train_sizes), 1), minor=True)
         ax.set_yticks(np.arange(-0.5, len(eval_sizes), 1), minor=True)
         ax.grid(which="minor", color=SURFACE, linewidth=2)
@@ -494,7 +387,6 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
     colorbar.outline.set_visible(False)
 
     episodes = int(rows[0]["episodes"])
-    # Titles sit above the panel row; panel titles own the band just under them.
     title = fig.suptitle(
         titled(label, f"{METRIC_LABELS.get(metric, metric)} by training fleet size and {axis.title}"),
         fontsize=13, color=TEXT_PRIMARY, x=0.02, ha="left", y=1.10)
@@ -503,8 +395,6 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
         note += "; C = collision rate, T = timeout rate"
     if outcomes:
         note += "; fill is the outcome" + ("" if episodes == 1 else " of most episodes")
-        # Below the panels, not in the header: the note already spans most of the width
-        # there, and a right-aligned legend lands on top of its tail.
         fig.legend(
             handles=[
                 mpatches.Patch(facecolor=STATUS_GOOD, edgecolor="none", label="success"),
@@ -522,18 +412,12 @@ def plot_matrix(rows, metric: str, output_path: Path, axis: Axis, label: str = "
 
 def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "",
                  metric: str = "success_rate") -> None:
-    """Success rate along the axis, pooled over training fleet size.
-
-    Pooling is what makes the comparison readable: per cell there are only 50
-    episodes, so any single row of the matrix is dominated by sampling noise.
-    """
+    """Success rate along the axis, pooled over training fleet size."""
     per_robot = metric.startswith("robot_")
     eval_sizes = sorted({axis.value(r) for r in rows})
     pooled = defaultdict(lambda: [0, 0])
     for row in rows:
         key = (row["encoder_type"], axis.value(row))
-        # Wilson intervals need counts, and the denominator differs per metric: an
-        # episode rate is over episodes, a per-robot rate over episodes x robots.
         trials = int(row["episodes"]) * (int(row["eval_fleet_size"]) if per_robot else 1)
         pooled[key][0] += round(float(row[metric]) * trials)
         pooled[key][1] += trials
@@ -559,10 +443,6 @@ def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "",
                     marker="o", markersize=8, capsize=4, elinewidth=1.5,
                     markeredgecolor=SURFACE, markeredgewidth=2,
                     label=ENCODER_LABELS.get(encoder, encoder), zorder=3)
-        # No direct end-labels: the three series converge at both ends, so labels
-        # there land on top of each other. The legend carries identity instead --
-        # marker + text, never color alone, which is what aqua's sub-3:1 contrast
-        # against this surface requires.
 
     total_per_point = pooled[(encoders[0], eval_sizes[0])][1]
     ax.set_xticks(x, [axis.tick(e) for e in eval_sizes])
@@ -590,15 +470,7 @@ def plot_by_axis(rows, output_path: Path, axis: Axis, label: str = "",
 
 def plot_by_axis_facets(rows, output_path: Path, axis: Axis, label: str = "",
                         metric: str = "success_rate") -> None:
-    """One panel per training fleet size -- the un-pooled view of plot_by_fleet.
-
-    Each point is a single matrix cell, so the intervals are the honest per-cell
-    ones rather than the pooled ones.
-
-    `metric` must be one of the two success rates. They need different denominators --
-    an episode rate is over episodes, a per-robot rate over episodes x robots -- and the
-    per-robot one is what keeps saying something once fleet success has fallen to p^N.
-    """
+    """One panel per training fleet size -- the un-pooled view of plot_by_fleet."""
     per_robot = metric.startswith("robot_")
     eval_sizes = sorted({axis.value(r) for r in rows})
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
@@ -671,45 +543,13 @@ def plot_by_axis_facets(rows, output_path: Path, axis: Axis, label: str = "",
 
 def plot_by_train_fleet(rows, output_path: Path, axis: Axis, label: str = "",
                         metric: str = "success_rate", pooling: str = "macro") -> None:
-    """The transpose of ``plot_by_axis``: training fleet size across, pooled over the axis.
-
-    ``plot_by_axis`` answers "how far does a policy carry?" by pooling the training fleet
-    sizes together and walking along the evaluation axis. This answers the other question --
-    "which training fleet size should I have picked?" -- by pooling the evaluation
-    conditions together and walking along the training fleet size. **Where the curve peaks
-    is the best training fleet size**, and because the expert's cost grows
-    super-quadratically in the fleet size, a peak to the left of the largest run is a
-    saving rather than a compromise.
-
-    Two ways to pool, because they weight the evaluation conditions differently and the
-    difference is not cosmetic:
-
-    * ``macro`` (default) averages the per-condition rates, so every evaluation fleet size
-      counts once -- "averaged over the deployment sizes you might face".
-    * ``micro`` sums the counts, so a condition's weight is its robot-episode count. With
-      eval N = 2..32 that hands 47% of the weight to N=32 alone, where every policy is near
-      zero, which drags the whole curve down and flattens it.
-
-    Both orderings agree on this study's data (MLP peaks at 2, flow at 4 either way), so
-    the default is the one whose values stay interpretable. The subtitle records which was
-    used, since the numbers differ by roughly 2x between them.
-
-    Error bars are sampling uncertainty only. Under ``macro`` the evaluation sizes are
-    fixed design points rather than a sample, so the variance is propagated across them
-    (``SE = sqrt(sum p_i (1 - p_i) / n_i) / k``) instead of measuring their spread -- that
-    spread is the real effect of fleet size, not noise. Under ``micro`` it is the same
-    Wilson interval the other figures use. Neither corrects for robots inside one episode
-    sharing a layout, so a per-robot interval is optimistic; the ordering is what this
-    figure is for, not the width.
-    """
+    """The transpose of ``plot_by_axis``: training fleet size across, pooled over the axis."""
     if pooling not in {"macro", "micro"}:
         raise ValueError("'pooling' must be 'macro' or 'micro'.")
     per_robot = metric.startswith("robot_")
     train_sizes = sorted({int(r["train_fleet_size"]) for r in rows})
     axis_values = sorted({axis.value(r) for r in rows})
 
-    # (encoder, train size, axis value) -> [successes, trials]; the axis stays a separate
-    # key so macro can average over it rather than summing into it.
     cells: dict[tuple, list[int]] = defaultdict(lambda: [0, 0])
     for row in rows:
         key = (row["encoder_type"], int(row["train_fleet_size"]), axis.value(row))
@@ -748,9 +588,6 @@ def plot_by_train_fleet(rows, output_path: Path, axis: Axis, label: str = "",
     ax.set_facecolor(SURFACE)
     x = np.arange(len(train_sizes))
 
-    # All encoders together first, behind the three series: the peak is the point of the
-    # figure, and pooling the encoders is what makes it legible when they overlap. Drawn
-    # in muted ink rather than a fourth hue, so it reads as a summary and not as a rival.
     combined = [pooled(None, t) for t in train_sizes]
     ax.plot(x, [c[0] for c in combined], color=TEXT_SECONDARY, linewidth=2.6,
             linestyle=(0, (5, 2)), marker="D", markersize=7, markerfacecolor=SURFACE,
@@ -792,8 +629,6 @@ def plot_by_train_fleet(rows, output_path: Path, axis: Axis, label: str = "",
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    # Several files are concatenated, which is what --policy both needs: the two heads
-    # live in separate experiment directories and there is no merged CSV holding them.
     parser.add_argument("--results", type=Path, nargs="+", default=[DEFAULT_RESULTS])
     parser.add_argument("--metric", default="success_rate", choices=sorted(METRIC_LABELS))
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -848,9 +683,6 @@ def main() -> None:
     NO_TITLE = args.no_title
 
     rows = [row for path in args.results for row in load_rows(path)]
-    # Every series is keyed by encoder alone, so a file holding both policies would
-    # silently merge each encoder's mlp and flow rows into one line. 'both' asks for
-    # exactly that, so it is opt-in rather than the default for a mixed file.
     policies = sorted({row.get("policy_type") or "mlp" for row in rows})
     if args.policy is None and len(policies) > 1:
         raise SystemExit(
@@ -880,9 +712,6 @@ def main() -> None:
             "Re-run test/evaluate_scaling.py, or pass --axis fleet."
         )
 
-    # On the density axis the rows of several fleet sizes would land in the same cell,
-    # so each fleet size gets its own set of figures. The crash ladder is one fleet size
-    # (two robots) by construction, so it stays one group.
     if axis_name == "density":
         groups = [
             (f"_n{size:02d}", [r for r in rows if int(r["eval_fleet_size"]) == size])
@@ -891,8 +720,6 @@ def main() -> None:
     else:
         groups = [("", rows)]
 
-    # The crash ladder has one train fleet size (per run) and no in-distribution row, so
-    # the matrix collapses to a line and the by-train-fleet transpose is uninformative.
     if axis_name == "v0":
         figures = figures & {"by_axis", "facets"}
     for suffix, group in groups:
@@ -904,9 +731,6 @@ def main() -> None:
                         args.output_dir / f"{prefix}_{args.metric}_matrix{suffix}.{args.format}",
                         axis, group_label, show_failures=not args.no_failure_modes,
                         outcome_colors=args.color_by_outcome)
-        # The line plots can only show a success rate. When --metric is something else
-        # (a distance, a latency) they fall back to episode success -- so the filename is
-        # built from the metric actually plotted, not from the one requested.
         line_metric = args.metric if args.metric in FAILURE_COLUMNS else "success_rate"
         if "by_axis" in figures:
             plot_by_axis(group,
@@ -916,7 +740,6 @@ def main() -> None:
             plot_by_axis_facets(group,
                                 args.output_dir / f"{prefix}_{line_metric}_by_{axis.name}_facets{suffix}.{args.format}",
                                 axis, group_label, metric=line_metric)
-        # The transpose: which training fleet size was the right one to have picked.
         if "by_train_fleet" in figures:
             plot_by_train_fleet(group,
                                 args.output_dir / f"{prefix}_{line_metric}_by_train_fleet{suffix}.{args.format}",

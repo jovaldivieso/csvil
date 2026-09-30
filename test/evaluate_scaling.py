@@ -51,32 +51,16 @@ from systems.seed_utils import (
     action_noise_rng_for_rollout, default_action_noise_seed_for_config,
 )
 
-# Convergence tolerances are written into every row so a result is self-describing:
-# they define what "success" means, and a silent change to them moves success_rate
-# without moving anything about the policy. unicycle2's four; a system that uses a
-# single 'error_tolerance' instead leaves these blank.
 TOLERANCE_FIELDS = ("pos_tol", "theta_tol", "vel_tol", "omega_tol")
 
 CSV_FIELDS = (
     "checkpoint", "encoder_type", "policy_type", "train_seed", "train_fleet_size", "eval_fleet_size",
     "density", "config", "episodes", "steps", "action_noise_std", *TOLERANCE_FIELDS,
     "success_rate", "collision_rate", "timeout_rate",
-    # Of the timeouts, the ones where the policy could not produce an action at all --
-    # safeflow's projector refusing an uncertifiable action. rollout_metrics always
-    # returns it, so it has to be declared here or DictWriter rejects every row.
     "infeasible_rate",
-    # Per robot, as in GLAS (Riviere et al. 2020, eq. 6): a robot succeeds when it ends
-    # at its goal and was never within d_collision of another. Fleet-level success needs
-    # all N robots at once, so it falls off as p^N and says nothing at 32 robots even
-    # when most robots did their job.
     "robot_success_rate", "robot_collision_rate", "robot_timeout_rate",
     "mean_steps", "mean_goal_position_error",
     "mean_goal_heading_error", "mean_min_pair_distance",
-    # The worst and near-worst episode, not just the average one. A mean over episodes
-    # hides the single near-miss, which is the episode a safety claim actually rests on:
-    # a policy averaging 0.15 m of clearance while one episode grazed 0.101 m is not the
-    # same policy as one that never went under 0.14 m. p05 is the robust companion, so a
-    # lone outlier does not have to speak for the whole cell.
     "min_min_pair_distance", "p05_min_pair_distance",
     "mean_visible_neighbours", "mean_action_ms", "mean_action_ms_per_robot", "wall_time_s",
 )
@@ -101,16 +85,7 @@ def build_policy(
     simulator: DynamicsProtocol | None = None,
     planner_config: Mapping[str, Any] | None = None,
 ) -> ActionPolicy:
-    """Rebuild a policy from checkpoint metadata.
-
-    ``state_dim`` and ``neighbor_slots`` are taken from the checkpoint rather than
-    from the evaluation simulator: the encoders derive their ego-feature width from
-    that pair, and only the training-time pair reproduces the trained shapes. The
-    neighbour branch itself is slot-count agnostic, so the rebuilt policy accepts
-    any fleet size at rollout time.
-    """
-    # Observation history widens each neighbour's feature vector and the ego block,
-    # so the encoder cannot be rebuilt without it. Older checkpoints predate the key.
+    """Rebuild a policy from checkpoint metadata."""
     observation_horizon = int(checkpoint.get("observation_horizon", 1))
 
     encoder_kwargs_raw = checkpoint.get("encoder_kwargs") or {}
@@ -135,15 +110,7 @@ def build_policy(
         flow_kwargs: dict[str, Any] = {
             "num_inference_steps": int(flow_config.get("num_inference_steps", 10)),
         }
-        # FlowPolicy trains in an action space normalized by the fleet's max_action, and
-        # registers that scale as a NON-PERSISTENT buffer -- so it is absent from
-        # model_state_dict and silently defaults to ones if not supplied here. The
-        # trainer saves it into flow_config precisely so evaluation can restore it
-        # (see dagger_trainer.py), and evaluate_policy.py / evaluate_checkpoints.py both
-        # do. This file used to drop it, which scaled every flow action down by
-        # max_action -- a factor of 8 in linear and 150 in angular acceleration on the
-        # 0.1 m robot, i.e. a policy that barely moves. Older checkpoints predate the
-        # key; for those, ones is what trained them and ones is correct.
+        # action_scale is a non-persistent buffer, so it is missing from model_state_dict.
         if flow_config.get("action_scale") is not None:
             flow_kwargs["action_scale"] = list(flow_config["action_scale"])
 
@@ -193,12 +160,7 @@ def min_pair_distance(simulator: DynamicsProtocol, state: np.ndarray) -> float:
 
 
 def collided_robots(simulator: DynamicsProtocol, state: np.ndarray) -> np.ndarray:
-    """Per-robot mask: is this robot within d_collision of any other right now?
-
-    simulator.is_collision answers the same question for the fleet as a whole. Per
-    robot it is what a per-robot success rate needs: the two robots of a collision are
-    the ones that failed, and the rest of the fleet may still complete its task.
-    """
+    """Per-robot mask: is this robot within d_collision of any other right now?"""
     positions = np.stack([
         np.asarray(robot_state)[list(simulator.simulators[0].position_indices)]
         for robot_state in np.split(np.asarray(state), simulator.num_robots)
@@ -218,13 +180,7 @@ def robots_at_goal(simulator: DynamicsProtocol, state: np.ndarray) -> np.ndarray
 
 
 def visible_neighbours(simulator: DynamicsProtocol, state: np.ndarray) -> float:
-    """Mean number of neighbours inside the sensing radius, over the fleet.
-
-    This is what the encoder actually receives, and it is what the two evaluation axes
-    move: the fleet size caps it at N-1, the density lifts its ceiling (density * pi * R^2).
-    Recorded per step so a scenario is described by what the policy saw, not only by the
-    configured geometry.
-    """
+    """Mean number of neighbours inside the sensing radius, over the fleet."""
     positions = np.stack([
         np.asarray(robot_state)[list(simulator.simulators[0].position_indices)]
         for robot_state in np.split(np.asarray(state), simulator.num_robots)
@@ -241,15 +197,6 @@ def tolerance_columns(simulator: DynamicsProtocol) -> dict[str, float | str]:
     return {name: getattr(robot_simulator, name, "") for name in TOLERANCE_FIELDS}
 
 
-# Step budget per config, as a multiple of the time a robot needs to drive the longest
-# distance the scenario produces in a straight line at full speed. A fixed budget across
-# configs would score the sparse ones as timeouts purely because their workspace is
-# larger, which is the opposite of what the density sweep is meant to measure.
-#
-# 3 rather than something tighter because avoiding costs time: on the antipodal ring the
-# CasADi expert needs ~1.7x the straight-line time (197 steps at N=4, 204 at N=8, against
-# 120), and a learned policy is slower than the expert. An episode that succeeds ends when
-# it succeeds, so a generous budget only costs time on the failures.
 STEP_BUDGET_FACTOR = 2.5
 
 
@@ -257,17 +204,7 @@ def robot_density(
     simulator: DynamicsProtocol,
     fixed_initial_state: np.ndarray | None,
 ) -> float:
-    """Robots per m^2 of the area the scenario places them in.
-
-    The density axis varies this at a fixed fleet size, and the fleet-size axis holds it
-    constant, so a result row is only interpretable with it: without this column the five
-    density levels of one fleet size are indistinguishable in the CSV.
-
-    Sampled starts and goals come from the workspace box. With a fixed start (the ring)
-    that box is meaningless -- the circle configs do not even set one, so the simulator
-    default would report the crowding of a +-1 m arena -- and the area the layout actually
-    spans is used instead.
-    """
+    """Robots per m^2 of the area the scenario places them in."""
     robot_simulator = simulator.simulators[0]
     if fixed_initial_state is not None:
         positions = np.concatenate([
@@ -294,11 +231,7 @@ def step_budget(
     factor: float,
     fixed_initial_state: np.ndarray | None,
 ) -> int:
-    """Steps allowed per episode, from the longest distance the config can produce.
-
-    With a fixed start that is the longest start-to-goal distance; otherwise the
-    workspace diagonal, since starts and goals are drawn from that box.
-    """
+    """Steps allowed per episode, from the longest distance the config can produce."""
     robot_simulator = simulator.simulators[0]
     position_indices = list(robot_simulator.position_indices)
     if fixed_initial_state is not None:
@@ -347,23 +280,9 @@ def evaluate_fleet(
     observation_horizon: int = 1,
     stop_on_collision: bool = False,
 ) -> dict[str, float]:
-    """Roll the policy out over seeded episodes and summarize the outcomes.
-
-    With ``fixed_initial_state`` the layout is identical every episode, so the only
-    thing separating episodes is the action-noise draw. Without noise the scenario
-    is fully deterministic and one episode is the whole result.
-
-    An episode runs on after a collision, which is what makes the per-robot rates
-    meaningful: stopping at the first one would score every robot of a 32-robot fleet as
-    failed because two of them touched at step 10. The fleet-level rates are unaffected
-    (an episode with a collision is a collision either way); only mean_steps grows, and
-    with it the cost. ``stop_on_collision`` restores the cheaper behaviour.
-    """
+    """Roll the policy out over seeded episodes and summarize the outcomes."""
     successes = collisions = infeasibles = 0
     robot_successes = robot_collisions = robot_total = 0
-    # One entry per control step: the wall time of the policy call that produced that
-    # step's joint action. Kept separate from wall_time_s, which also covers the
-    # simulator, the collision checks and the observation construction.
     action_times_ms: list[float] = []
     steps_taken: list[int] = []
     position_errors: list[float] = []
@@ -372,19 +291,13 @@ def evaluate_fleet(
     visible_counts: list[float] = []
 
     for episode_index, seed_spec in enumerate(evaluation_seed_specs(simulator, episodes, seed_start)):
-        # Flow policies draw their action from noise (flow_policy.py:130), so without a
-        # seed here the same checkpoint scores differently on every run -- measured
-        # 0.54 / 0.52 / 0.46 across three identical runs, a spread as large as the
-        # effects this study is trying to detect. Seeding per episode keeps episodes
-        # different from one another while making the whole evaluation reproducible.
-        # Deterministic policies are unaffected.
+        # Flow samples actions from noise; seeding per episode makes runs reproducible.
         torch.manual_seed(seed_start + episode_index)
         if fixed_initial_state is not None:
             state = simulator.reset(fixed_initial_state.copy())
         else:
             state = simulator.reset(sample_initial_state(simulator, seed_spec))
         goal_state = simulator.goal_state.copy()
-        # Fresh per episode: history must not leak across rollouts.
         history_buffer = (
             ObservationHistoryBuffer(observation_horizon, int(simulator.num_robots))
             if observation_horizon > 1 else None
@@ -392,8 +305,6 @@ def evaluate_fleet(
         noise_rng = action_noise_rng_for_rollout(action_noise_seed, seed_spec=seed_spec)
         episode_min_distance = min_pair_distance(simulator, state)
         episode_visible = [visible_neighbours(simulator, state)]
-        # Accumulated over the episode: a robot that touches another at any point has
-        # failed, even if it is clear of everyone at the end.
         ever_collided = collided_robots(simulator, state)
         reached_goal = collided = False
         rollout_steps = 0
@@ -401,8 +312,7 @@ def evaluate_fleet(
 
         for step in range(1, steps + 1):
             observation = simulator.observe(state, validate=False)
-            # CUDA launches are async, so the timer would measure queueing rather than
-            # compute without a sync on either side.
+            # CUDA launches are async; sync so the timer measures compute, not queueing.
             if device.type == "cuda":
                 torch.cuda.synchronize()
             action_start = time.perf_counter()
@@ -412,15 +322,7 @@ def evaluate_fleet(
                     observation_horizon=observation_horizon, history_buffer=history_buffer,
                 )
             except PlannerSolveError:
-                # safeflow's projector refuses to return an action it cannot certify: if
-                # its QP is infeasible and no revalidated trajectory is cached, it raises
-                # (casadi_projector.py). That is an episode outcome -- the policy could
-                # not act -- not a reason to abandon the run, which is what an uncaught
-                # raise did: one infeasible rung killed every remaining cell.
-                #
-                # Counted separately rather than folded into timeout. "Ran out of steps"
-                # and "the safety layer gave up" are different failures, and for a head
-                # whose whole claim is its safety layer the difference is the result.
+                # safeflow's projector could not certify an action: an outcome, not a crash.
                 infeasible = True
                 break
             if device.type == "cuda":
@@ -443,9 +345,6 @@ def evaluate_fleet(
                 reached_goal = True
                 break
 
-        # An episode that collided is a collision even if every robot later reached its
-        # goal: episodes no longer stop at the first collision, so reaching the goals is
-        # not on its own a success. The three outcomes stay mutually exclusive.
         successes += int(reached_goal and not collided)
         collisions += int(collided)
         infeasibles += int(infeasible)
@@ -454,8 +353,6 @@ def evaluate_fleet(
         robot_collisions += int(ever_collided.sum())
         robot_total += int(simulator.num_robots)
         steps_taken.append(rollout_steps)
-        # Split by coordinate geometry: a raw L2 over the state vector scores a
-        # correct-but-wrapped heading as an error of 2*pi. See systems/goal_metrics.py.
         position_error, heading_error = fleet_goal_errors(simulator, state, goal_state)
         position_errors.append(position_error)
         heading_errors.append(heading_error)
@@ -466,7 +363,6 @@ def evaluate_fleet(
         "success_rate": successes / episodes,
         "collision_rate": collisions / episodes,
         "timeout_rate": (episodes - successes - collisions) / episodes,
-        # Of which this many could not produce a certified action at all.
         "infeasible_rate": infeasibles / episodes,
         "robot_success_rate": robot_successes / robot_total,
         "robot_collision_rate": robot_collisions / robot_total,
@@ -478,11 +374,6 @@ def evaluate_fleet(
         "min_min_pair_distance": float(np.min(min_distances)),
         "p05_min_pair_distance": float(np.percentile(min_distances, 5)),
         "mean_visible_neighbours": float(np.mean(visible_counts)),
-        # The fleet is one batched forward pass, so this is the latency of a whole
-        # control step, not of a single robot deciding on its own hardware. The
-        # per-robot figure divides that batch cost evenly and therefore understates
-        # true decentralized latency -- use it to compare policies, not to size a
-        # real controller.
         "mean_action_ms": float(np.mean(action_times_ms)),
         "mean_action_ms_per_robot": float(np.mean(action_times_ms)) / float(simulator.num_robots),
     }
@@ -543,8 +434,7 @@ def main() -> None:
 
     checkpoint = read_checkpoint(args.checkpoint, device)
     policy_type = str(checkpoint.get("policy_type", "mlp")).lower()
-    # safeflow builds one CasADi Opti per robot, sized to the fleet, so it is rebuilt
-    # inside the config loop. mlp and flow are fleet-size agnostic and built once.
+    # safeflow builds one CasADi Opti per robot, so it is rebuilt per config below.
     policy = None if policy_type == "safeflow" else build_policy(checkpoint, device)
     train_fleet_size = int(checkpoint["neighbor_slots"]) + 1
     print(
@@ -561,11 +451,6 @@ def main() -> None:
             writer.writeheader()
 
         episodes = args.episodes
-        # A flow policy samples its action from noise at every step, so repeated
-        # rollouts differ even from a fixed start and averaging over draws is the
-        # whole point. Only a deterministic policy can be collapsed.
-        # safeflow samples from the same noise prior as flow (its projection is applied
-        # to each sampled trajectory), so it is stochastic too and must not be collapsed.
         policy_is_deterministic = policy_type not in {"flow", "safeflow"}
         if (
             args.use_config_start
@@ -583,9 +468,6 @@ def main() -> None:
             config = load_and_validate_system_config("multi_robot", config_path)
             simulator = DynamicsFactory.create(system_name="multi_robot", config=config)
             if policy_type == "safeflow":
-                # The evaluation scenario doubles as the projector's planner config: it
-                # carries the same d_safe / d_collision / R_diag / slack weight the
-                # expert used, which is what the projector reads.
                 policy = build_policy(
                     checkpoint, device, simulator=simulator, planner_config=config
                 )

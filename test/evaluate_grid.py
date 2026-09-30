@@ -38,22 +38,12 @@ import glob
 import os
 import re
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# scenario -> (config glob, extra flags for evaluate_scaling.py).
-#
-# 'circle' fires from the configs' own 'start' entries; that also gates deterministic
-# episode collapse for a fixed-start MLP, which is why 'crash' additionally sets
-# --action-noise-std 0.03 (what training used).
-#
-# 'crash' fixes the step budget rather than deriving it from distance: every unicycle2
-# episode ends with an in-place settle rotation the distance model misses -- on the
-# 0.1 m robot ~113 of the ~200 steps this task needs. 250 was measured to be enough
-# for this robot (expert worst rung 169 steps, slowest policy episode 216).
+# scenario -> (config glob, extra evaluate_scaling.py flags)
 SCENARIOS: dict[str, tuple[str, list[str]]] = {
     "arena":   ("test/config/study/arena/*.yaml",   []),
     "fleet":   ("test/config/study/fleet/*.yaml",   []),
@@ -87,8 +77,7 @@ def local_env() -> dict[str, str]:
 
 
 def find_checkpoint(run_dir: Path) -> Path | None:
-    """train_dagger.py names the file <policy_type>_dagger_checkpoint.pt and the run
-    directory does not always carry the type, so take whichever is there."""
+    """The run's <policy_type>_dagger_checkpoint.pt, whichever policy type it is."""
     found = sorted(run_dir.glob("*_dagger_checkpoint.pt"))
     return found[0] if found else None
 
@@ -137,7 +126,6 @@ def eval_one(
         "--output-csv", str(per_run_csv.relative_to(REPO_ROOT)),
         *extra,
     ]
-    # Only pass --step-budget-factor if the scenario didn't already fix --steps.
     if "--steps" not in extra:
         inner_cmd += ["--step-budget-factor", str(args.step_budget_factor)]
 

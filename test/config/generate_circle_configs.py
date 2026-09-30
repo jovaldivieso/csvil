@@ -53,8 +53,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.config import validate_system_config  # noqa: E402
 
-# Loaded by path: test/config is not a package, and the name "test" would shadow
-# the standard library's own module.
+# Loaded by path: test/config is not a package, and "test" would shadow the stdlib module.
 _spec = importlib.util.spec_from_file_location(
     "_generate_fleet_configs", Path(__file__).resolve().parent / "generate_fleet_configs.py"
 )
@@ -64,37 +63,16 @@ Q_BLOCK, _FlowListDumper, format_q_diag = _fleet.Q_BLOCK, _fleet._FlowListDumper
 first_robot_template = _fleet.first_robot_template
 TASK_TOLERANCES = _fleet.TASK_TOLERANCES
 
-# The 2-robot fleet config rather than test/config/2_multi_unicycle2_casadi_config.yaml:
-# the rings must match the scenarios the policies are actually trained and scored on,
-# and the raw template has since been retuned (4 m/s instead of 1) for other work.
-# Everything taken from here is fleet-size independent -- dt, d_safe, d_collision,
-# visibility, horizon, cost weights and the per-robot dynamics; the ring writes its own
-# starts, goals and Q_diag.
 TEMPLATE_PATH = PROJECT_ROOT / "test/config/study/unicycle2_fleet_02.yaml"
 OUTPUT_DIR = PROJECT_ROOT / "test/config/study/circle"
 FLEET_SIZES = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32)
 
-# Neighbour spacing on the ring, in units of d_safe. Below 1.0 the starting formation
-# is in collision; 1.5 is the margin this generator prefers and warns below.
 RING_SPACING_PER_D_SAFE = 1.5
-# Robots per m^2 the ring is sized for. The default is what the study's runs train at
-# (matches the training density used by learning/config/study/data_mid_n*/).
 DEFAULT_DENSITY = 0.1667
 
 
 def ring_radius(num_robots: int, density: float, min_spacing: float | None = None) -> float:
-    """Radius that puts `num_robots` on a ring at `density` robots per m^2.
-
-    The circle inscribed in the square that many robots would occupy at that density,
-    so the ring's crowding matches the randomized scenarios of the same density.
-
-    `min_spacing` (metres) is a floor on the distance between neighbours. Density sizing
-    spreads the fleet over a circumference that grows as sqrt(N) while the number of gaps
-    grows as N, so neighbour spacing decays as 1/sqrt(N) -- 3.46 m at N=2 but 1.36 m at
-    N=32, only 1.13x d_safe, which decides the run in its first few steps. The floor
-    raises the radius until the gap is `min_spacing`; it never shrinks a ring, so every
-    size that already clears it keeps its density radius.
-    """
+    """Radius that puts `num_robots` on a ring at `density` robots per m^2."""
     radius = math.sqrt(num_robots / density) / 2.0
     if min_spacing is not None:
         radius = max(radius, min_spacing / (2.0 * math.sin(math.pi / num_robots)))
@@ -107,17 +85,9 @@ def ring_spacing(num_robots: int, radius: float) -> float:
 
 
 def robot_endpoints(num_robots: int, radius: float, robot_idx: int):
-    """Start state and goal for one robot: the goal is the point opposite the start.
-
-    At even N that point is another robot's start, so the ring is a mutual swap. At odd
-    N it is the gap between two starts -- nobody is vacating it -- which makes the odd
-    sizes a slightly easier problem than their neighbours, and the reason to read the
-    sweep as a curve rather than to compare an odd cell against an even one.
-    """
+    """Start state and goal for one robot: the goal is the point opposite the start."""
     angle = 2.0 * math.pi * robot_idx / num_robots
     x, y = radius * math.cos(angle), radius * math.sin(angle)
-    # Face straight across the circle: the goal lies at (-x, -y), so the heading
-    # is the start angle turned by pi.
     heading = math.atan2(-y - y, -x - x)
     start = [round(x, 6), round(y, 6), round(heading, 6), 0.0, 0.0]
     goal = [round(-x, 6), round(-y, 6), round(heading, 6)]
@@ -172,8 +142,6 @@ def check_scenario(config: dict, num_robots: int, radius: float, d_safe: float) 
     from core.factory import DynamicsFactory
 
     simulator = DynamicsFactory.create(system_name="multi_robot", config=config)
-    # validate_system_config lifts 'start' to the robot-entry top level, so read
-    # whichever spelling this config carries.
     def entry_start(entry):
         start = entry.get("start")
         if start is None:
@@ -193,9 +161,6 @@ def check_scenario(config: dict, num_robots: int, radius: float, d_safe: float) 
     distances = np.linalg.norm(positions[:, None] - positions[None, :], axis=-1)
     np.fill_diagonal(distances, np.inf)
 
-    # At even N every goal must coincide with some other robot's start -- the mutual-swap
-    # property the scenario is for. At odd N the antipode of a start falls in the gap
-    # between two starts, so the check would always fail and is not the contract there.
     if num_robots % 2 == 0:
         starts = {(round(p[0], 4), round(p[1], 4)) for p in positions}
         for robot_idx, entry in enumerate(config["robots"]):
@@ -259,28 +224,15 @@ def main() -> None:
         worst_steps = max(worst_steps, stats["straight_line_steps"])
 
         spacing = ring_spacing(num_robots, radius)
-        # Above d_safe the ring is feasible, but a thin margin means the robots start
-        # nearly touching, so the run is decided in the first few steps.
         if spacing < RING_SPACING_PER_D_SAFE * d_safe:
             print(f"  note: {num_robots} robots sit {spacing:.3f} apart on the ring, "
                   f"{spacing / d_safe:.2f}x d_safe (preferred >= {RING_SPACING_PER_D_SAFE})")
 
         output_path = output_dir / f"unicycle2_circle_{num_robots:02d}.yaml"
         header = (
-            f"# {num_robots}x unicycle2 antipodal-circle swap for the encoder-scaling study.\n"
+            f"# {num_robots}x unicycle2 antipodal swap on a radius-{radius} ring, closest pair "
+            f"{stats['min_pair_distance']:.3f} m.\n"
             f"# Generated by test/config/generate_circle_configs.py -- do not edit by hand.\n"
-            f"# Robot i starts at angle 2*pi*i/{num_robots} on a circle of radius {radius},\n"
-            + (f"# sized for a {min_spacing:.3f} m floor ({args.min_spacing}x d_safe) on the distance\n"
-               f"# between neighbours, which {args.density} robots/m^2 would fall below at this N,\n"
-               if floored else
-               f"# sized for {args.density} robots/m^2 so every fleet size rings at the same density.\n")
-            + f"# and targets the antipode, which is "
-            + (f"the start of robot i+{num_robots // 2}.\n" if num_robots % 2 == 0
-               else "the gap between two starts (N is odd).\n")
-            + f"# Deterministic: fixed 'start' and 'goal', randomize_goal false.\n"
-            f"# Closest starting pair {stats['min_pair_distance']:.3f} (d_safe={d_safe}); "
-            f"{stats['visible_neighbours']:.2f} visible neighbours at t=0;\n"
-            f"# needs >= {stats['straight_line_steps']} steps even in a straight line.\n"
         )
         output_path.write_text(header + render_config(config, num_robots))
         print(

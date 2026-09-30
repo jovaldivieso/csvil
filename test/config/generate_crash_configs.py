@@ -67,51 +67,26 @@ _spec.loader.exec_module(_fleet)
 
 NUM_ROBOTS = 2
 
-# The 0.1 m robot is the default, but the ladder is not specific to it -- the same
-# scenario applies to any 2-robot scenario config, e.g. the 1 m study robot the
-# data_mid / data_mid_best checkpoints were trained on. Each entry is
-# (scenario template, ring radius, output directory).
-#
-# The radius is the *policy* training box half-width, not the scenario config's own box,
-# because that is what keeps the goal vectors inside the range training produced. It
-# cannot be read off the template: the pilots override the box in the policy config. Both
-# presets put the pair 3.46 x d_collision apart, so the two ladders are dimensionally the
-# same scenario and their figures can sit side by side.
 ROBOTS = {
     "small": {
         "template": PROJECT_ROOT / "test/config/study/unicycle2_fleet_02_small.yaml",
         "radius": 0.1732,
         "out_dir": PROJECT_ROOT / "test/config/study/crash",
-        # 0.1 m robot, max_linear_vel 1.5.
         "speeds": (0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3),
     },
     "1m": {
         "template": PROJECT_ROOT / "test/config/study/unicycle2_fleet_02.yaml",
         "radius": 1.732,
         "out_dir": PROJECT_ROOT / "test/config/study/crash_1m",
-        # 1 m robot, max_linear_vel 1.0, so the ladder tops out lower. Run --calibrate
-        # before trusting the top rungs: the expert's own ceiling has not been measured
-        # for this robot the way it was for the small one.
         "speeds": (0.0, 0.15, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     },
 }
 DEFAULT_ROBOT = "small"
 
-# Bound by apply_robot() from the chosen preset, so the rest of the module can go on
-# reading them as plain constants.
 TEMPLATE_PATH = ROBOTS[DEFAULT_ROBOT]["template"]
 OUTPUT_DIR = ROBOTS[DEFAULT_ROBOT]["out_dir"]
 RADIUS = ROBOTS[DEFAULT_ROBOT]["radius"]
 DEFAULT_SPEEDS = ROBOTS[DEFAULT_ROBOT]["speeds"]
-
-# Why the small ladder's rungs are where they are, since the shape carried over to the
-# 1 m preset: the first version spaced them over the robot's whole speed range on the
-# assumption the interesting region was in the middle. Measured, every policy but
-# SafeFlow was already failing by 0.4 m/s, so the rungs are now stated in absolute m/s
-# and spaced to resolve the onset -- coarse where every policy is comfortable, 0.1 steps
-# through the band where failures appear. The top rung is set by the *expert's* ceiling
-# (--calibrate), not by the robot's limit, so that the ladder measures the policy rather
-# than the task.
 
 
 def apply_robot(name: str) -> None:
@@ -159,12 +134,11 @@ def build_config(template: dict, initial_speed: float) -> dict:
     for robot_idx in range(NUM_ROBOTS):
         sign = -1.0 if robot_idx == 0 else 1.0
         x = sign * RADIUS
-        # Facing straight at the other robot, which is also straight at the goal.
         heading = 0.0 if robot_idx == 0 else math.pi
         robot_config = copy.deepcopy(base)
         robot_config["randomize_goal"] = False
         robot_config["workspace_bounds"] = [-RADIUS, RADIUS]
-        # state = [x, y, theta, v, omega]; the ladder varies v and nothing else.
+        # state = [x, y, theta, v, omega]; the ladder varies v only.
         robot_config["start"] = [round(x, 6), 0.0, round(heading, 6), round(initial_speed, 6), 0.0]
         robot_config["goal"] = [round(-x, 6), 0.0, round(heading, 6)]
         robots.append({"system": "unicycle2", "config": robot_config})
@@ -178,13 +152,7 @@ def build_config(template: dict, initial_speed: float) -> dict:
 
 
 def format_q_diag(block: list[float], num_robots: int) -> str:
-    """One line per robot, from the block actually in the config.
-
-    Deliberately not generate_fleet_configs.format_q_diag: that one renders its own
-    module-level Q_BLOCK (the 1 m robot's weights) and ignores whatever config it is
-    called for, so reusing it silently wrote the wrong cost weights into every rung
-    while the in-memory validation saw the right ones.
-    """
+    """One line per robot, from the block actually in the config."""
     lines = []
     for robot_idx in range(num_robots):
         values = ", ".join(str(value) for value in block)
@@ -195,36 +163,11 @@ def format_q_diag(block: list[float], num_robots: int) -> str:
 
 
 def render(config: dict, initial_speed: float, template: dict) -> str:
-    robot = template["robots"][0]["config"]
-    v_max = float(robot["max_linear_vel"])
-    a_v = float(robot["max_linear_accel"])
-    w_max = float(robot["max_angular_vel"])
-    d_collision = float(template["d_collision"])
-    separation = 2.0 * RADIUS
-    brake_closure = initial_speed ** 2 / a_v          # both robots braking, combined
-    turn_radius = initial_speed / w_max if initial_speed > 0 else 0.0
-    gap_if_only_braking = separation - brake_closure
-
+    v_max = float(template["robots"][0]["config"]["max_linear_vel"])
     header = (
-        f"# Head-on crash course, 2x unicycle2, initial speed {initial_speed:.3f} m/s "
-        f"({initial_speed / v_max:.0%} of max).\n"
+        f"# Head-on crash rung, 2x unicycle2 {2.0 * RADIUS:.4f} m apart, initial speed "
+        f"{initial_speed:.3f} m/s ({initial_speed / v_max:.0%} of max).\n"
         f"# Generated by test/config/generate_crash_configs.py -- do not edit by hand.\n"
-        f"#\n"
-        f"# Rung of a ladder in which ONLY the initial speed changes: both robots start\n"
-        f"# {separation:.4f} m apart ({separation / d_collision:.2f} x d_collision) on the x-axis,\n"
-        f"# each facing and already driving straight at the other, each one's goal being\n"
-        f"# the other's start. Same layout as the training ring and the circle scenario.\n"
-        f"#\n"
-        f"# If both robots only brake they still close {brake_closure:.4f} m, leaving\n"
-        f"# {gap_if_only_braking:.4f} m of the {separation:.4f} m gap -- "
-        f"{'ENOUGH' if gap_if_only_braking > d_collision else 'NOT enough'} against "
-        f"d_collision {d_collision}.\n"
-        f"# Turn radius at this speed is {turn_radius:.4f} m "
-        f"({turn_radius / d_collision:.2f} x d_collision).\n"
-        f"#\n"
-        f"# Evaluate with --use-config-start. The step budget must cover the final\n"
-        f"# in-place rotation, not just the drive: use STEP_BUDGET_FACTOR=6 (~278 steps),\n"
-        f"# since the distance-derived default of 3 stops short at ~139.\n"
     )
     scalars = {k: v for k, v in config.items() if k not in {"Q_diag", "robots"}}
     return (
@@ -236,12 +179,7 @@ def render(config: dict, initial_speed: float, template: dict) -> str:
 
 
 def run_expert(raw: dict, validated: dict, steps: int = 300) -> tuple[bool, float, int | None]:
-    """(solved, closest approach / d_collision, steps used) for the centralized expert.
-
-    The start state comes from the *raw* config, the way test/evaluate_scaling.py's
-    --use-config-start reads it: validation folds 'start' into the simulator rather than
-    leaving it on the robot entries, so reading it back off the validated dict fails.
-    """
+    """(solved, closest approach / d_collision, steps used) for the centralized expert."""
     import numpy as np
 
     from core.factory import DynamicsFactory, PlannerFactory
@@ -318,15 +256,12 @@ def main() -> None:
     for speed in speeds:
         config = build_config(template, speed)
         validate_system_config(system_name="multi_robot", raw_config=config)
-        # Speed in mm/s, zero padded, so the glob sorts into ladder order.
+        # Speed in zero-padded mm/s, so the files sort in ladder order.
         name = f"unicycle2_crash_v{int(round(speed * 1000)):04d}.yaml"
         (OUTPUT_DIR / name).write_text(render(config, speed, template))
         written.append((OUTPUT_DIR / name, speed))
         print(f"wrote {(OUTPUT_DIR / name).relative_to(PROJECT_ROOT)}")
 
-    # Re-read every file and roll the expert out on it. The in-memory dict validating is
-    # not the same claim as the YAML on disk being right -- a rendering bug put the 1 m
-    # robot's Q_diag into these files while the in-memory check was passing.
     from core.config import load_and_validate_system_config
     print("\nfrom disk:")
     for path, speed in written:
