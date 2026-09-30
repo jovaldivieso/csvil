@@ -4,7 +4,7 @@ from typing import Any, Mapping
 import casadi as ca
 import numpy as np
 
-from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerSolveError
 from systems.dynamics import DynamicsProtocol
 
 

@@ -480,6 +480,7 @@ def _validate_db_lacam_config(
     *,
     config_dir: Path | None = None,
 ) -> dict[str, Any] | None:
+    
     raw_db_lacam = raw_config.get("db_lacam")
     if raw_db_lacam is None:
         return None
@@ -492,13 +493,26 @@ def _validate_db_lacam_config(
     mode = mode.lower()
     if mode not in {"replan", "open_loop"}:
         raise ConfigurationError("'db_lacam.mode' must be one of {'replan', 'open_loop'}.")
-
     validated_db_lacam: dict[str, Any] = {"mode": mode}
 
     replan_freq = raw_db_lacam.get("replan_freq", 5)
     if not isinstance(replan_freq, int) or isinstance(replan_freq, bool) or replan_freq <= 0:
         raise ConfigurationError("'db_lacam.replan_freq' must be a positive integer.")
     validated_db_lacam["replan_freq"] = int(replan_freq)
+    
+    replan_on_deviation = raw_db_lacam.get("replan_on_deviation", False)
+    if not isinstance(replan_on_deviation, bool):
+        raise ConfigurationError("'db_lacam.replan_on_deviation' must be bool.")
+    validated_db_lacam["replan_on_deviation"] = replan_on_deviation
+
+    deviation_threshold = raw_db_lacam.get("deviation_threshold", 0.15)
+    if (
+        not isinstance(deviation_threshold, (int, float))
+        or isinstance(deviation_threshold, bool)
+        or deviation_threshold <= 0
+    ):
+        raise ConfigurationError("'db_lacam.deviation_threshold' must be a positive number.")
+    validated_db_lacam["deviation_threshold"] = float(deviation_threshold)
 
     time_limit_ms = raw_db_lacam.get("time_limit_ms", 60_000)
     if not isinstance(time_limit_ms, int) or isinstance(time_limit_ms, bool) or time_limit_ms <= 0:
@@ -553,6 +567,34 @@ def _validate_db_lacam_config(
             raw_db_lacam["environment"],
             key_name="db_lacam.environment",
         )
+        
+    motion_primitives = raw_db_lacam.get("motion_primitives", {})
+
+    if not isinstance(motion_primitives, Mapping):
+        raise ConfigurationError("'db_lacam.motion_primitives' must be a mapping.")
+
+    validated_motion_primitives = {}
+
+    for robot_type, path in motion_primitives.items():
+        if not isinstance(robot_type, str) or not robot_type:
+            raise ConfigurationError(
+                "'db_lacam.motion_primitives' keys must be non-empty strings."
+            )
+        if not isinstance(path, str) or not path:
+            raise ConfigurationError(
+                f"'db_lacam.motion_primitives.{robot_type}' must be a non-empty string."
+            )
+
+        validated_motion_primitives[robot_type] = str(
+            _resolve_existing_path(
+                path,
+                field_name=f"db_lacam.motion_primitives.{robot_type}",
+                config_dir=config_dir,
+                expect_file=True,
+            )
+        )
+
+    validated_db_lacam["motion_primitives"] = validated_motion_primitives
 
     return validated_db_lacam
 

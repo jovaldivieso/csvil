@@ -19,6 +19,17 @@ services:
     working_dir: /workspace
     volumes:
       - .:/workspace
+      - ./planning/dynobench/models:/opt/db-lacam/dynoplan/dynobench/models:ro
+    stdin_open: true
+    tty: true
+  motion-primitives:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.motion-primitives
+    platform: linux/amd64
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
     stdin_open: true
     tty: true
 

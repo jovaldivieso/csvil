@@ -92,6 +92,17 @@ class MultiRobotSimulator(DynamicsSimulator):
                 )
 
         self.dt = dt0
+        
+        # workspace bounds shared by whole multi-robot environment:
+        environment = merged_config.get("environment", {})
+        self.environment_min = np.asarray(
+            environment.get("min", [-1.0, -1.0]),
+            dtype=float,
+        )
+        self.environment_max = np.asarray(
+            environment.get("max", [1.0, 1.0]),
+            dtype=float,
+        )
 
         self.robot_state_slices: list[slice] = []
         self.robot_action_slices: list[slice] = []
@@ -418,13 +429,30 @@ class MultiRobotSimulator(DynamicsSimulator):
     def step(self, state: np.ndarray, action: np.ndarray, validate: bool = True) -> np.ndarray:
         split_state = self._split_state(state, validate=validate)
         split_action = self._split_action(action, validate=validate)
-        next_parts = [
-            sim.step(robot_state, robot_action)
-            for sim, robot_state, robot_action in zip(self.simulators, split_state, split_action)
-        ]
+        next_parts = []
+
+        for sim, robot_state, robot_action in zip(
+            self.simulators,
+            split_state,
+            split_action,
+        ):
+            # keeps position inside configured multi-robot workspace:
+            position_indices = sim.position_indices
+
+            next_state = sim.step(robot_state, robot_action).copy()
+            next_state[list(position_indices)] = np.clip(
+                next_state[list(position_indices)],
+                self.environment_min,
+                self.environment_max,
+            )
+
+            next_parts.append(next_state)
+
         next_state = np.concatenate(next_parts)
+
         self.state = next_state.copy()
         self.time += 1
+
         return next_state
 
     def observe(

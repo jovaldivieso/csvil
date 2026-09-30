@@ -12,6 +12,11 @@ Clone the project to your local machine and navigate into the root directory:
 git clone git@github.com:jovaldivieso/csvil.git
 cd csvil
 ```
+The repository uses Git submodules for external dependencies such as db-LaCAM and Dynoplan. Initialize them with:
+
+```bash
+git submodule update --init --recursive
+```
 
 ### Install Docker
 Docker is used so every contributor runs the same dependency stack (this is particularly useful on Intel Macs, since some newer PyTorch versions required by LeRobot are not available as native macOS Intel x86_64 packages).
@@ -23,7 +28,7 @@ docker --version
 docker compose version
 ```
 
-`compose.yaml` defines the runnable services. The `csvil` service is the main Python environment and runs the project in a Linux amd64 container. The `db-lacam` service is a separate environment for db-LaCAM and its C++ dependencies.
+`compose.yaml` defines three runnable services. The `csvil` service provides the main Python environment, the `db-lacam` service contains db-LaCAM and its C++ dependencies, and the `motion-primitives` service provides the Dynoplan environment used to generate motion primitives.
 
 ### Build the project environment
 
@@ -47,6 +52,16 @@ docker compose build db-lacam
 ```
 The first build may take several minutes. Rebuilding is only necessary when changing the Dockerfile, compose-file or requirements-file.
 
+### Optional: VS Code Dev Container
+
+If you use VS Code with the Dev Containers extension, the project can also be opened directly inside the `csvil` Docker environment.
+
+1. Install the **Dev Containers** extension in VS Code.
+2. Open the repository in VS Code.
+3. Select **Dev Containers: Reopen in Container** from the command palette.
+
+The repository is mounted at `/workspace`, and commands can then be run directly from the VS Code terminal without prefixing them with `docker compose run --rm csvil`.
+
 ### Hugging Face authentication
 Hugging Face authentication is only needed when uploading datasets or models to the Hub.
 1. Create an account at [huggingface.co](https://huggingface.co/).
@@ -62,11 +77,12 @@ docker compose run --rm csvil hf auth login
 ```text
 csvil/
 ├── README.md                  # End-to-end usage and experiment recipes
-├── compose.yaml               # Docker services for csvil and optional db-lacam
+├── compose.yaml               # Docker services for csvil, db-lacam and motion primitives
 ├── requirements.txt           # Python dependencies installed in the csvil image
 ├── docker/
 │   ├── Dockerfile             # Main csvil runtime image
-│   └── Dockerfile.db-lacam    # Optional db-lacam image
+│   ├── Dockerfile.db-lacam    # Optional db-lacam image
+│   └── Dockerfile.motion-primitives    # Optional image for motion primitive generation
 ├── core/
 │   ├── config.py             # Typed validation and normalized YAML loading
 │   ├── factory.py            # DynamicsFactory + PlannerFactory registries
@@ -108,7 +124,12 @@ csvil/
 │   ├── planner.py             # Planner protocol and base class
 │   ├── casadi_planner.py      # CasADi planner implementation (expert)
 │   ├── casadi_projector.py    # Per-robot CasADi safety projection for SafeFlowMPC
-│   └── dblacam_planner.py     # db-LaCAM planner implementation
+│   ├── dblacam_planner.py     # db-LaCAM planner implementation
+│   ├── dblacam_algorithm_default.yaml    # Default db-LaCAM search parameters
+│   ├── generate_motion_primitives.py     # CLI for generating motion primitives
+│   └── dynobench/
+│       └── models/
+│           └── integrator1_2d_v0.yaml    # Dynobench model config for first-order integrator primitive
 ├── systems/
 │   ├── dynamics.py            # Base simulator protocol and validation
 │   ├── single_integrator.py   # Example simulator subclass (holonomic, first-order)
@@ -154,7 +175,7 @@ These cover different dynamics classes under one pipeline shape: holonomic syste
 Available planners are:
 
 - `casadi` (single- and multi-robot)
-- `dblacam` (currently wired for selected workflows/systems; see db-lacam configs and plotting helpers)
+- `dblacam` (single- and multi-robot)
 
 ### Expert configs (`test/config/`)
 
@@ -450,6 +471,84 @@ LeRobot DAgger checkpoints are discovered under `--train-output-root`
 If a DAgger run crashes mid-write and later reports parquet footer errors,
 recreate the dataset directory before restarting. The trainer now finalizes
 LeRobot writer state per iteration to keep appended parquet chunks readable.
+
+### db-LaCAM and motion primitives
+
+db-LaCAM is available as an alternative expert planner for supported multi-robot systems and runs in the db-lacam Docker environment because it depends on the db-LaCAM and Dynoplan C++ toolchains.
+
+db-LaCAM plans over precomputed motion primitives. Motion primitives can be generated using the separate `motion-primitives` Docker service:
+
+```bash
+docker compose build motion-primitives
+```
+
+For example, to generate 2000 primitives for the first-order single-integrator model:
+
+```bash
+docker compose run --rm motion-primitives \
+python planning/generate_motion_primitives.py \
+  --config integrator1_2d_v0.yaml \
+  --num-primitives 2000
+```
+
+The corresponding Dynobench model configurations are stored in `planning/dynobench/models/`. Currently included models are:
+
+- `integrator1_2d_v0.yaml`
+- `integrator2_2d_v0.yaml`
+- `unicycle1_v0.yaml`
+- `unicycle2_v0.yaml`
+
+The generation script generates and post-processes the primitive library before writing the final output file. The resulting file is written to:
+
+```text
+data/motion_primitives/<dynamics>.bin.im.bin.sp.bin
+```
+
+For the example above:
+
+```textV
+data/motion_primitives/integrator1_2d_v0.bin.im.bin.sp.bin
+```
+
+The generated primitive library is then referenced from the corresponding db-LaCAM expert configuration:
+
+```yaml
+db_lacam:
+  mode: open_loop
+  replan_on_deviation: true
+  deviation_threshold: 0.2
+  time_limit_ms: 10000
+  algorithm_config: planning/dblacam_algorithm_default.yaml
+
+  motion_primitives:
+    integrator1_2d_v0: /workspace/data/motion_primitives/integrator1_2d_v0.bin.im.bin.sp.bin
+```
+
+The robot dynamics configuration must be compatible with the Dynobench model used to generate the primitives. In the current integration, the db-LaCAM models and motion primitives use a simulation time step of `dt: 0.1`; the wrapper rejects incompatible simulator time steps.
+
+`mode: open_loop` caches the trajectory returned by db-LaCAM and executes its actions sequentially. With `replan_on_deviation: true`, a new plan is computed if the executed state differs from the corresponding cached state by more than `deviation_threshold`. The internal db-LaCAM search parameters are configured separately in `planning/dblacam_algorithm_default.yaml`.
+
+For example, expert trajectories can be generated with:
+
+```bash
+docker compose run --rm db-lacam \
+python test/plot_expert_trajectories.py \
+  --system multi_robot \
+  --planner dblacam \
+  --config test/config/single_integrator_dblacam_config.yaml \
+  --num-steps 200
+```
+
+The same planner can be selected for DAgger training with:
+
+```bash
+python learning/train_dagger.py \
+  --system multi_robot \
+  --planner dblacam \
+  --expert-config test/config/single_integrator_dblacam_config.yaml \
+  --policy-config <policy-config.yaml> \
+  --experiment-name <experiment-name>
+```
 
 ### CLI argument quick reference
 

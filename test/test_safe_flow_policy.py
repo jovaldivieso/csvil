@@ -15,7 +15,7 @@ from core.factory import DynamicsFactory
 from learning.models.encoder import EncoderFactory
 from learning.models.policy import PolicyFactory
 from learning.models.safe_flow_policy import SafeFlowMPCPolicy
-from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerSolveError
 from planning.casadi_projector import CasadiTrajectoryProjector
 
 DT = 0.05

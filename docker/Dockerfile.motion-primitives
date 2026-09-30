@@ -1,0 +1,44 @@
+FROM --platform=linux/amd64 mambaorg/micromamba:2.3.2-ubuntu22.04
+
+ARG MAMBA_DOCKERFILE_ACTIVATE=1
+ARG DYNOPLAN_REF=cb84cf8f7b493f5319287d21390a6419d7d10df7
+ARG OMPL_REF=e2994e5
+
+RUN micromamba install -y -n base -c conda-forge \
+    boost-cpp=1.78 cmake crocoddyl=1.8.1 cxx-compiler eigen \
+    fcl=0.7.0 git ipopt lz4-c ninja pinocchio=2.6.19 \
+    pkg-config python=3.9 yaml-cpp \
+    && micromamba clean -a -y
+
+ENV DYNOPLAN_ROOT=/home/mambauser/dynoplan
+ENV LD_LIBRARY_PATH=/opt/conda/lib
+
+RUN git clone https://github.com/ompl/ompl /tmp/ompl \
+    && cd /tmp/ompl \
+    && git checkout "$OMPL_REF" \
+    && cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/conda \
+        -DCMAKE_PREFIX_PATH=/opt/conda \
+        -DEIGEN3_INCLUDE_DIR=/opt/conda/include/eigen3 \
+        -DCMAKE_DISABLE_FIND_PACKAGE_ODE=TRUE \
+        -DOMPL_BUILD_TESTS=OFF \
+        -DOMPL_BUILD_DEMOS=OFF \
+        -DOMPL_REGISTRATION=OFF \
+    && cmake --build build --target ompl --parallel 2 \
+    && cmake --install build \
+    && rm -rf /tmp/ompl
+
+RUN git config --global url."https://github.com/".insteadOf "git@github.com:" \
+    && git clone https://github.com/quimortiz/dynoplan.git "$DYNOPLAN_ROOT" \
+    && cd "$DYNOPLAN_ROOT" \
+    && git checkout "$DYNOPLAN_REF" \
+    && git submodule update --init --recursive \
+    && cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/opt/conda \
+    && cmake --build build --target main_primitives --parallel 2 \
+    && test -x build/main_primitives
+
+WORKDIR /workspace
+CMD ["bash"]

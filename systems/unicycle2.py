@@ -58,6 +58,8 @@ class Unicycle2(DynamicsSimulator):
             [np.inf, np.inf, np.inf, self.max_linear_vel, self.max_angular_vel],
             dtype=float,
         )
+        
+        self.db_lacam_robot_type = "unicycle2_v0"
 
     @property
     def is_euclidean(self) -> bool:

@@ -25,8 +25,7 @@ from systems.seed_utils import (
     default_action_noise_seed_for_config,
     default_seed_argument_for_simulator,
 )
-from planning.casadi_planner import PlannerSolveError
-from planning.planner import PlannerProtocol
+from planning.planner import PlannerProtocol, PlannerSolveError
 from systems.dynamics import DynamicsProtocol
 from utils import plot_xy_trajectories, save_xy_rollout_video
 

@@ -13,7 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from core.config import validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.dagger.rollouts import apply_execution_noise
-from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerSolveError
 
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "test", "config", "2_multi_unicycle2_casadi_config.yaml")
 

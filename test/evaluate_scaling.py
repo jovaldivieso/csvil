@@ -44,7 +44,7 @@ from learning.models.encoder import DEFAULT_ENCODER_TYPE, EncoderFactory
 from learning.models.flow_policy import FlowPolicy
 from learning.models.mlp_policy import MLPPolicy
 from learning.models.policy import ActionPolicy, PolicyFactory
-from planning.casadi_planner import PlannerSolveError
+from planning.planner import PlannerSolveError
 from systems.dynamics import DynamicsProtocol
 from systems.goal_metrics import fleet_goal_errors
 from systems.seed_utils import (
