@@ -1,8 +1,8 @@
 delta_0: 0.5
 goal_delta: 0.1
-num_primitives_0: 2000
+num_primitives_0: 500
 alpha: 0.5
-heuristic1: ""
+heuristic1: ""  # e.g. "reverse-search" 
 heuristic1_delta: 0.9
 heuristic1_num_primitives_0: 100
 cluster_range: 0.02
