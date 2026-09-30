@@ -7,7 +7,6 @@ from .rollouts import (
     build_decentralized_joint_action,
     collect_dagger_rollouts,
     evaluate_policy_rollouts,
-    ObservationHistoryBuffer,
     rollout_policy_with_action_fn,
 )
 from .utils import (
@@ -29,7 +28,6 @@ __all__ = [
     "scheduled_expert_mix_beta",
     "apply_config_overrides",
     "apply_execution_noise",
-    "ObservationHistoryBuffer",
     "build_decentralized_joint_action",
     "collect_dagger_rollouts",
     "evaluate_policy_rollouts",

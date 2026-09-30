@@ -48,7 +48,6 @@ class DeepSetEncoderTests(unittest.TestCase):
         output = encoder({
             "observation.environment_state": ego,
             "observation.state": torch.zeros((3, 0)),
-            "observation.state_mask": torch.zeros((3, 0)),
             "observation.neighbor_state": x.reshape(3, -1),
             "observation.neighbor_mask": mask.reshape(3, -1),
         })
@@ -63,9 +62,8 @@ class DeepSetEncoderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, r"Canonical neighbor tensors"):
             encoder({
-                "observation.environment_state": torch.zeros((2, 1)),
+                "observation.environment_state": torch.zeros((2, 4)),
                 "observation.state": torch.zeros((2, 2)),
-                "observation.state_mask": torch.ones((2, 1)),
                 "observation.neighbor_state": x.reshape(2, -1),
                 "observation.neighbor_mask": invalid_mask,
             })
@@ -90,11 +88,10 @@ class DeepSetEncoderTests(unittest.TestCase):
         visible_mask = torch.tensor([[[1.0], [1.0]]], dtype=torch.float32)
         hidden_mask = torch.tensor([[[1.0], [0.0]]], dtype=torch.float32)
 
-        ego = torch.zeros((1, 3), dtype=torch.float32)
+        ego = torch.zeros((1, 5), dtype=torch.float32)
         visible_input = {
             "observation.environment_state": ego,
             "observation.state": torch.zeros((1, 0)),
-            "observation.state_mask": torch.zeros((1, 0)),
             "observation.neighbor_state": x.reshape(1, -1),
             "observation.neighbor_mask": visible_mask.reshape(1, -1),
         }
@@ -122,15 +119,14 @@ class DeepSetEncoderTests(unittest.TestCase):
             ]
         )
 
-        ego = torch.randn((2, 2))
+        ego = torch.randn((2, 5))
         output = encoder({
             "observation.environment_state": ego,
             "observation.state": torch.zeros((2, 0)),
-            "observation.state_mask": torch.zeros((2, 0)),
             "observation.neighbor_state": x.reshape(2, -1),
             "observation.neighbor_mask": mask.reshape(2, -1),
         })
-        self.assertTrue(torch.equal(output[0, 2:], torch.zeros_like(output[0, 2:])))
+        self.assertTrue(torch.equal(output[0, 5:], torch.zeros_like(output[0, 5:])))
         self.assertTrue(torch.isfinite(output).all())
 
         output.sum().backward()
@@ -147,51 +143,43 @@ class DeepSetEncoderTests(unittest.TestCase):
         )
         output = encoder(
             {
-                "observation.environment_state": torch.zeros((2, 3)),
-                "observation.state": torch.zeros((2, 3)),
-                "observation.state_mask": torch.ones((2, 1)),
+                "observation.environment_state": torch.zeros((2, 4)),
+                "observation.state": torch.zeros((2, 4)),
                 "observation.neighbor_state": torch.zeros((2, 6)),
                 "observation.neighbor_mask": torch.ones((2, 3)),
             }
         )
-        self.assertEqual(tuple(output.shape), (2, 11))
+        self.assertEqual(tuple(output.shape), (2, 12))
 
-    def test_stacked_neighbor_history_is_not_scrambled_across_time(self) -> None:
-        """Regression guard: DeepSet must reshape via the shared, time-major-aware helper
-        and pool over neighbors using only the current-timestep mask, not a naive
-        view() that would mix different neighbors' per-timestep features together."""
-        neighbor_slots, observation_horizon = 2, 2
-        neighbor_feature_dim = 1 * observation_horizon
+    def test_neighbor_slots_are_not_scrambled(self) -> None:
+        """Regression guard: DeepSet must reshape neighbor-major via the shared
+        helper and pool using each neighbor's own mask, not a naive view()
+        that would mix different neighbors' features together."""
+        neighbor_slots, neighbor_feature_dim = 2, 1
 
-        # Time-major flat layout (oldest frame first, neighbor-minor within each frame):
-        # frame0 = [neighbor0=10.0, neighbor1=20.0], frame1 = [neighbor0=11.0, neighbor1=21.0]
-        raw_neighbor_state = torch.tensor([[10.0, 20.0, 11.0, 21.0]])
-        # neighbor0 visible at both frames; neighbor1 visible only at the earlier
-        # frame -- invisible at the current (most recent) frame.
-        raw_neighbor_mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+        raw_neighbor_state = torch.tensor([[10.0, 20.0]])
+        # neighbor0 visible; neighbor1 invisible.
+        raw_neighbor_mask = torch.tensor([[1.0, 0.0]])
 
         neighbor_obs, neighbor_mask = ObservationEncoder._split_neighbor_tensors(
-            raw_neighbor_state, raw_neighbor_mask, neighbor_feature_dim, observation_horizon
+            raw_neighbor_state, raw_neighbor_mask, neighbor_feature_dim
         )
-        torch.testing.assert_close(neighbor_obs[0, 0], torch.tensor([10.0, 11.0]))
-        torch.testing.assert_close(neighbor_obs[0, 1], torch.tensor([20.0, 21.0]))
-        torch.testing.assert_close(neighbor_mask[0, 0], torch.tensor([1.0, 1.0]))
-        torch.testing.assert_close(neighbor_mask[0, 1], torch.tensor([1.0, 0.0]))
+        torch.testing.assert_close(neighbor_obs[0, 0], torch.tensor([10.0]))
+        torch.testing.assert_close(neighbor_obs[0, 1], torch.tensor([20.0]))
+        torch.testing.assert_close(neighbor_mask[0], torch.tensor([1.0, 0.0]))
 
-        state_dim = 3 + neighbor_slots * (neighbor_feature_dim + observation_horizon)
+        state_dim = 3 + neighbor_slots * neighbor_feature_dim
         encoder = DeepSetEncoder(
             state_dim=state_dim,
             neighbor_feature_dim=neighbor_feature_dim,
             neighbor_slots=neighbor_slots,
-            observation_horizon=observation_horizon,
             phi_dims=[8, 8],
             rho_dims=[4],
             pool_type="max",
         )
         observation = {
             "observation.environment_state": torch.zeros(1, 1),
-            "observation.state": torch.zeros(1, 1),
-            "observation.state_mask": torch.ones(1, 1),
+            "observation.state": torch.zeros(1, 2),
             "observation.neighbor_state": raw_neighbor_state,
             "observation.neighbor_mask": raw_neighbor_mask,
         }
@@ -199,12 +187,11 @@ class DeepSetEncoderTests(unittest.TestCase):
         self.assertEqual(tuple(out.shape), (1, encoder.out_dim))
         self.assertFalse(torch.isnan(out).any())
 
-        # neighbor1 is masked out at the current timestep, so its entire packed
-        # (feature, mask) history must be excluded from max-pooling regardless of
-        # its value -- changing it must not move the output at all.
+        # neighbor1 is masked out, so its value must be excluded from
+        # max-pooling regardless of its value -- changing it must not move
+        # the output at all.
         alternate_neighbor_state = raw_neighbor_state.clone()
         alternate_neighbor_state[0, 1] = 999.0
-        alternate_neighbor_state[0, 3] = 999.0
         alternate_out = encoder({**observation, "observation.neighbor_state": alternate_neighbor_state})
         torch.testing.assert_close(out, alternate_out)
 
@@ -267,12 +254,12 @@ class MultiRobotMaskSemanticsTests(unittest.TestCase):
         colliding_robot_obs = simulator.decentralized_policy_observation(colliding_obs, 0)
         invisible_robot_obs = simulator.decentralized_policy_observation(invisible_obs, 0)
 
-        self.assertEqual(tuple(colliding_robot_obs["observation.neighbor_state"].shape), (2,))
+        self.assertEqual(tuple(colliding_robot_obs["observation.neighbor_state"].shape), (4,))
         self.assertEqual(tuple(colliding_robot_obs["observation.neighbor_mask"].shape), (1,))
-        self.assertEqual(tuple(invisible_robot_obs["observation.neighbor_state"].shape), (2,))
+        self.assertEqual(tuple(invisible_robot_obs["observation.neighbor_state"].shape), (4,))
         self.assertEqual(tuple(invisible_robot_obs["observation.neighbor_mask"].shape), (1,))
-        np.testing.assert_allclose(colliding_robot_obs["observation.neighbor_state"], np.zeros(2, dtype=np.float32))
-        np.testing.assert_allclose(invisible_robot_obs["observation.neighbor_state"], np.zeros(2, dtype=np.float32))
+        np.testing.assert_allclose(colliding_robot_obs["observation.neighbor_state"], np.zeros(4, dtype=np.float32))
+        np.testing.assert_allclose(invisible_robot_obs["observation.neighbor_state"], np.zeros(4, dtype=np.float32))
         self.assertEqual(float(colliding_robot_obs["observation.neighbor_mask"][0]), 1.0)
         self.assertEqual(float(invisible_robot_obs["observation.neighbor_mask"][0]), 0.0)
 

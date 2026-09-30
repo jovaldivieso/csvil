@@ -12,7 +12,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.factory import DynamicsFactory
-from learning.dagger import ObservationHistoryBuffer
 from learning.models.encoder import EncoderFactory
 from learning.models.policy import PolicyFactory
 from learning.models.safe_flow_policy import SafeFlowMPCPolicy
@@ -50,16 +49,17 @@ def _build_two_robot_simulator(goal0: list[float], goal1: list[float]):
 
 
 def _build_safe_flow_policy(simulator) -> SafeFlowMPCPolicy:
-    # For 2 unicycle2 robots at observation_horizon=2: ego packs
-    # environment_state(4, single-frame) + state(2*2=4, stacked) +
-    # state_mask(1*2=2, stacked) = 10. DeepSetEncoder derives ego_dim as
-    # state_dim - neighbor_slots*(neighbor_feature_dim + observation_horizon)
-    # = state_dim - 1*(8+2), so state_dim must be 20 for ego_dim to equal
-    # the actual 10 -- a mismatch here would only surface once something
-    # actually calls select_action with this policy, not at construction.
+    # For 2 unicycle2 robots: ego packs environment_state(4) + state(2) = 6.
+    # Each neighbor packs position(2) + (sin,cos) heading(2) + velocity(2) +
+    # turn-rate(1) = 7 (see MultiRobotSimulator._relative_feature_names).
+    # DeepSetEncoder derives ego_dim as state_dim - neighbor_slots *
+    # neighbor_feature_dim = state_dim - 1*7, so state_dim must be 13 for
+    # ego_dim to equal the actual 6 -- a mismatch here would only surface
+    # once something actually calls select_action with this policy, not at
+    # construction.
     encoder = EncoderFactory.create(
-        "deepset", state_dim=20, neighbor_feature_dim=8, neighbor_slots=1,
-        observation_horizon=2, phi_dims=[8], rho_dims=[4],
+        "deepset", state_dim=13, neighbor_feature_dim=7, neighbor_slots=1,
+        phi_dims=[8], rho_dims=[4],
     )
     policy = PolicyFactory.create(
         "safeflow",
@@ -94,8 +94,8 @@ class ProjectorInheritsFleetCollisionDistancesTests(unittest.TestCase):
     def test_explicit_planner_config_override_still_wins(self) -> None:
         simulator = _build_two_robot_simulator(goal0=[5.0, 0.0, 0.0], goal1=[-5.0, 0.0, 0.0])
         encoder = EncoderFactory.create(
-            "deepset", state_dim=20, neighbor_feature_dim=8, neighbor_slots=1,
-            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+            "deepset", state_dim=13, neighbor_feature_dim=7, neighbor_slots=1,
+            phi_dims=[8], rho_dims=[4],
         )
         policy = PolicyFactory.create(
             "safeflow",
@@ -492,21 +492,18 @@ class PolicySolveFailureRecoveryTests(unittest.TestCase):
         self.assertEqual(failure_reason, "solve_failure")
 
 
-class FirstOrderMultiRobotRejectionTests(unittest.TestCase):
-    """A velocity-less system (single_integrator, unicycle1) gives
+class FirstOrderMultiRobotSupportTests(unittest.TestCase):
+    """A velocity-less system (single_integrator, unicycle1) used to give
     _build_neighbor_trajectories no state from which to recover the ego's
-    own previous absolute position, so it could only ever report every
-    neighbor as momentarily stationary -- never bounding an actually
-    approaching neighbor's motion, regardless of how close or fast it's
-    closing. That's a silent, unconditional safety gap for the entire
-    episode, not a one-tick warm-up artifact, so SafeFlowMPCPolicy rejects
-    this combination outright at construction time rather than shipping a
-    policy whose neighbor forecast cannot back its own hard d_collision
-    constraint. A lone first-order robot (no neighbors to forecast at all)
-    is unaffected.
+    own previous absolute position (it worked from stacked *relative*
+    observations, which needed the ego's own proprioception to correctly
+    back out). Now that observe() computes neighbor velocity directly from
+    the previous *joint* state, no proprioception reconstruction is needed
+    at all -- position differencing alone is enough, so a velocity-less
+    fleet is fully supported, not rejected.
     """
 
-    def test_multi_robot_first_order_fleet_is_rejected_at_construction(self) -> None:
+    def test_multi_robot_first_order_fleet_constructs_and_forecasts_neighbor_motion(self) -> None:
         simulator = DynamicsFactory.create(
             system_name="multi_robot",
             config={
@@ -522,25 +519,43 @@ class FirstOrderMultiRobotRejectionTests(unittest.TestCase):
                 ],
             },
         )
+        # Each neighbor packs position(2) + velocity(2) = 4 (no heading, so
+        # no (sin, cos)/turn-rate terms); ego packs environment_state(2) = 2.
         encoder = EncoderFactory.create(
-            "deepset", state_dim=10, neighbor_feature_dim=4, neighbor_slots=1,
-            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+            "deepset", state_dim=6, neighbor_feature_dim=4, neighbor_slots=1,
+            phi_dims=[8], rho_dims=[4],
         )
+        policy = PolicyFactory.create(
+            "safeflow",
+            action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=3,
+            num_inference_steps=2, simulator=simulator, planner_config={},
+        )
+        self.assertIsInstance(policy, SafeFlowMPCPolicy)
+        self.assertEqual(policy.neighbor_slots, 1)
 
-        with self.assertRaises(ValueError):
-            PolicyFactory.create(
-                "safeflow",
-                action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=3,
-                num_inference_steps=2, simulator=simulator, planner_config={},
-            )
+        x0_batch = np.array([[0.0, 0.0], [2.0, 0.0]])
+        observation_dict = {
+            # Neighbor of robot 0 (robot 1) moving at (1.0, 0.0); neighbor of
+            # robot 1 (robot 0) stationary.
+            "observation.neighbor_state": torch.tensor(
+                [[[2.0, 0.0, 1.0, 0.0]], [[-2.0, 0.0, 0.0, 0.0]]], dtype=torch.float32
+            ).reshape(2, 4),
+            "observation.neighbor_mask": torch.tensor([[1.0], [1.0]], dtype=torch.float32),
+        }
+        neighbor_trajs, neighbor_active = policy._build_neighbor_trajectories(observation_dict, x0_batch)
+        np.testing.assert_allclose(neighbor_active, [[1.0], [1.0]])
+        # Robot 0's neighbor (robot 1) moves from x=2.0 at v=1.0.
+        np.testing.assert_allclose(neighbor_trajs[0, 0, 0, :2], [2.0, 2.0 + 1.0 * DT], atol=1e-9)
+        # Robot 1's neighbor (robot 0) stays put.
+        np.testing.assert_allclose(neighbor_trajs[1, 0, 0, :2], [0.0, 0.0], atol=1e-9)
 
     def test_single_first_order_robot_is_unaffected(self) -> None:
-        # Exercises SafeFlowMPCPolicy.__init__'s guard directly (bypassing
-        # PolicyFactory.create, which would otherwise need a real FlowPolicy
-        # + neighbor-aware encoder just to reach it) since DeepSetEncoder
-        # itself always requires neighbor_feature_dim > 0, independent of
-        # this policy's own neighbor_slots -- an unrelated constraint that a
-        # single-robot config wouldn't pair with "deepset" in practice.
+        # Exercises SafeFlowMPCPolicy directly (bypassing PolicyFactory.create,
+        # which would otherwise need a real FlowPolicy + neighbor-aware
+        # encoder just to reach it) since DeepSetEncoder itself always
+        # requires neighbor_feature_dim > 0, independent of this policy's
+        # own neighbor_slots -- an unrelated constraint that a single-robot
+        # config wouldn't pair with "deepset" in practice.
         sim = DynamicsFactory.create(
             system_name="single_integrator",
             config={"dt": DT, "max_vel": 5.0, "goal": [0.0, 0.0], "randomize_goal": False},
@@ -549,41 +564,6 @@ class FirstOrderMultiRobotRejectionTests(unittest.TestCase):
 
         policy = SafeFlowMPCPolicy(inner_policy=None, projectors=[projector], local_sims=[sim])
         self.assertEqual(policy.neighbor_slots, 0)
-
-    def test_multi_robot_fleet_with_single_observation_frame_is_rejected(self) -> None:
-        # A velocity-having fleet hits the exact same gap if observation_
-        # horizon == 1: _build_neighbor_trajectories can only estimate a
-        # neighbor's velocity by differencing two consecutive frames, so one
-        # frame alone forecasts every neighbor as stationary regardless of
-        # this robot's own velocity_state_indices.
-        simulator = DynamicsFactory.create(
-            system_name="multi_robot",
-            config={
-                "dt": DT,
-                "d_safe": 0.1,
-                "robots": [
-                    {"system": "unicycle2", "config": {
-                        "dt": DT, "max_linear_accel": 2.0, "max_angular_accel": 2.0, "max_angular_vel": 2.0, "max_linear_vel": 2.0,
-                        "goal": [0.0, 0.0, 0.0], "randomize_goal": False,
-                    }},
-                    {"system": "unicycle2", "config": {
-                        "dt": DT, "max_linear_accel": 2.0, "max_angular_accel": 2.0, "max_angular_vel": 2.0, "max_linear_vel": 2.0,
-                        "goal": [0.0, 0.0, 0.0], "randomize_goal": False,
-                    }},
-                ],
-            },
-        )
-        encoder = EncoderFactory.create(
-            "deepset", state_dim=10, neighbor_feature_dim=4, neighbor_slots=1,
-            observation_horizon=1, phi_dims=[8], rho_dims=[4],
-        )
-
-        with self.assertRaises(ValueError):
-            PolicyFactory.create(
-                "safeflow",
-                action_dim=2, obs_encoder=encoder, hidden_dims=[16], prediction_horizon=22,
-                num_inference_steps=2, simulator=simulator, planner_config={},
-            )
 
 
 class OneRobotMultiRobotFleetUnwrappingTests(unittest.TestCase):
@@ -613,8 +593,8 @@ class OneRobotMultiRobotFleetUnwrappingTests(unittest.TestCase):
         )
         self.assertEqual(simulator.num_robots, 1)
         encoder = EncoderFactory.create(
-            "deepset", state_dim=10, neighbor_feature_dim=4, neighbor_slots=1,
-            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+            "deepset", state_dim=13, neighbor_feature_dim=7, neighbor_slots=1,
+            phi_dims=[8], rho_dims=[4],
         )
 
         policy = PolicyFactory.create(
@@ -630,17 +610,15 @@ class OneRobotMultiRobotFleetUnwrappingTests(unittest.TestCase):
 
 
 class VelocityHavingNeighborVelocityUnderAccelerationTests(unittest.TestCase):
-    """Regression test: for velocity-having systems (double_integrator,
-    unicycle2), _build_neighbor_trajectories previously back-propagated the
-    ego's own previous position/heading using its *current* frame's
-    velocity/turn-rate, e.g. pos_prev = pos_now - dt * v_now for
-    double_integrator. DoubleIntegrator.predict_next_state actually advances
-    position via next_pos = pos + v*dt + 0.5*a*dt**2 using the *previous*
-    frame's velocity, so whenever the ego genuinely accelerates between
-    frames, that shortcut folds part of the ego's own acceleration into a
-    supposedly-stationary neighbor's estimated velocity. Fixed by reading
-    the actual previous frame from the already-stacked observation.state
-    instead of re-deriving it from the current one.
+    """Regression test: neighbor velocity is now an exact finite difference
+    of the neighbor's own true position between the previous and current
+    joint state (systems/multi_robot.py's observe()), independent of
+    whatever the ego itself is doing between those two ticks -- unlike the
+    old stacked-relative-observation reconstruction, which had to back-
+    propagate the ego's own previous position from its own proprioception
+    and could leak the ego's own acceleration into a stationary neighbor's
+    estimated velocity if that reconstruction used the wrong frame's
+    velocity. Verifies the new, simpler mechanism still gets this right.
     """
 
     def test_stationary_neighbor_velocity_unbiased_by_egos_own_acceleration(self) -> None:
@@ -659,9 +637,11 @@ class VelocityHavingNeighborVelocityUnderAccelerationTests(unittest.TestCase):
                 ],
             },
         )
+        # Ego packs environment_state(2) + state(2) = 4; each neighbor packs
+        # position(2) + velocity(2) = 4 (double_integrator has no heading).
         encoder = EncoderFactory.create(
-            "deepset", state_dim=10, neighbor_feature_dim=4, neighbor_slots=1,
-            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+            "deepset", state_dim=8, neighbor_feature_dim=4, neighbor_slots=1,
+            phi_dims=[8], rho_dims=[4],
         )
         policy = PolicyFactory.create(
             "safeflow",
@@ -669,35 +649,25 @@ class VelocityHavingNeighborVelocityUnderAccelerationTests(unittest.TestCase):
             simulator=simulator, planner_config={},
         )
 
-        history_buffer = ObservationHistoryBuffer(2, 2)
-
-        def observe_and_stack(ego_state: np.ndarray, neighbor_state: np.ndarray):
-            state = np.concatenate([ego_state, neighbor_state])
-            simulator.reset(state)
-            full_obs = simulator.observe(state)
-            return [
-                history_buffer.append_and_stack(r, simulator.decentralized_policy_observation(full_obs, r))
-                for r in range(2)
-            ]
-
         # Tick 1: ego (robot 0) at (-1, 0) moving at (2, 0). Applying a
         # genuine acceleration of (4, 0) for one step -- computed via the
-        # real dynamics, not by hand, so tick 2 is exactly consistent with
-        # predict_next_state's own update rule -- takes it to tick 2 with a
-        # *different* velocity (2.2, 0), not merely a different position.
-        # The neighbor (robot 1) stays fixed at (3, 0), v=(0, 0) throughout.
+        # real dynamics, not by hand -- takes it to tick 2 with a *different*
+        # velocity (2.2, 0), not merely a different position. The neighbor
+        # (robot 1) stays fixed at (3, 0), v=(0, 0) throughout.
         ego_tick1 = np.array([-1.0, 0.0, 2.0, 0.0])
         ego_tick2 = simulator.simulators[0].predict_next_state(
             ego_tick1, np.array([4.0, 0.0]), validate=False
         )
         neighbor_state = np.array([3.0, 0.0, 0.0, 0.0])
 
-        observe_and_stack(ego_tick1, neighbor_state)
-        stacked = observe_and_stack(ego_tick2, neighbor_state)
+        state_tick1 = np.concatenate([ego_tick1, neighbor_state])
+        state_tick2 = np.concatenate([ego_tick2, neighbor_state])
+        full_obs = simulator.observe(state_tick2, previous_state=state_tick1)
+        per_robot = [simulator.decentralized_policy_observation(full_obs, r) for r in range(2)]
 
         observation_dict = {
-            name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
-            for name in stacked[0]
+            name: torch.as_tensor(np.stack([per_robot[r][name] for r in range(2)]), dtype=torch.float32)
+            for name in per_robot[0]
         }
         ego_obs_np = policy._extract_ego_observation(observation_dict)
         x0_batch = np.stack([policy.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(2)])
@@ -706,9 +676,7 @@ class VelocityHavingNeighborVelocityUnderAccelerationTests(unittest.TestCase):
 
         # Robot 0 (the accelerating one) sees a genuinely stationary
         # neighbor -- its extrapolated trajectory must stay at (3, 0)
-        # throughout, not drift at ~0.5*a*dt = 0.1 m/s the way back-
-        # propagating with the current (not previous) frame's velocity
-        # would have produced.
+        # throughout.
         robot0_neighbor_traj = neighbor_trajs[0, 0]
         np.testing.assert_allclose(robot0_neighbor_traj[0], 3.0, atol=1e-9)
         np.testing.assert_allclose(robot0_neighbor_traj[1], 0.0, atol=1e-9)
@@ -743,9 +711,11 @@ class HeterogeneousFleetNeighborForwardSimulationTests(unittest.TestCase):
                 ],
             },
         )
+        # Ego packs environment_state(4) + state(2) = 6; each neighbor packs
+        # position(2) + (sin, cos) heading(2) + velocity(2) + turn-rate(1) = 7.
         encoder = EncoderFactory.create(
-            "deepset", state_dim=20, neighbor_feature_dim=8, neighbor_slots=1,
-            observation_horizon=2, phi_dims=[8], rho_dims=[4],
+            "deepset", state_dim=13, neighbor_feature_dim=7, neighbor_slots=1,
+            phi_dims=[8], rho_dims=[4],
         )
         # Generously long: robot 1's max_linear_vel=10.0 is much faster than
         # robot 0's, and this test isolates neighbor-forecast correctness,
@@ -756,20 +726,8 @@ class HeterogeneousFleetNeighborForwardSimulationTests(unittest.TestCase):
             simulator=simulator, planner_config={},
         )
 
-        history_buffer = ObservationHistoryBuffer(2, 2)
-
-        def observe_and_stack(robot0_state: np.ndarray, robot1_state: np.ndarray):
-            state = np.concatenate([robot0_state, robot1_state])
-            simulator.reset(state)
-            full_obs = simulator.observe(state)
-            return [
-                history_buffer.append_and_stack(r, simulator.decentralized_policy_observation(full_obs, r))
-                for r in range(2)
-            ]
-
         # Robot 0 (the observer, max_linear_vel=2.0) sits still at the origin
-        # the whole time, isolating this from its own pos_prev
-        # reconstruction. Robot 1 (max_linear_vel=10.0) travels in a
+        # the whole time. Robot 1 (max_linear_vel=10.0) travels in a
         # straight line at v=8.0 -- only possible under its *own* limit,
         # never robot 0's.
         robot0_state = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
@@ -778,12 +736,14 @@ class HeterogeneousFleetNeighborForwardSimulationTests(unittest.TestCase):
             robot1_tick1, np.array([0.0, 0.0]), validate=False
         )
 
-        observe_and_stack(robot0_state, robot1_tick1)
-        stacked = observe_and_stack(robot0_state, robot1_tick2)
+        state_tick1 = np.concatenate([robot0_state, robot1_tick1])
+        state_tick2 = np.concatenate([robot0_state, robot1_tick2])
+        full_obs = simulator.observe(state_tick2, previous_state=state_tick1)
+        per_robot = [simulator.decentralized_policy_observation(full_obs, r) for r in range(2)]
 
         observation_dict = {
-            name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
-            for name in stacked[0]
+            name: torch.as_tensor(np.stack([per_robot[r][name] for r in range(2)]), dtype=torch.float32)
+            for name in per_robot[0]
         }
         ego_obs_np = policy._extract_ego_observation(observation_dict)
         x0_batch = np.stack([policy.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(2)])
@@ -816,46 +776,38 @@ class EgoRotationNeighborVelocityConsistencyTests(unittest.TestCase):
     def test_stationary_neighbor_stays_stationary_while_ego_only_rotates(self) -> None:
         simulator = _build_two_robot_simulator(goal0=[0.0, 0.0, 0.0], goal1=[0.0, 0.0, 0.0])
         policy = _build_safe_flow_policy(simulator)
-        history_buffer = ObservationHistoryBuffer(2, 2)
-
-        def observe_and_stack(ego_state: np.ndarray, neighbor_state: np.ndarray):
-            state = np.concatenate([ego_state, neighbor_state])
-            simulator.reset(state)
-            full_obs = simulator.observe(state)
-            return [
-                history_buffer.append_and_stack(r, simulator.decentralized_policy_observation(full_obs, r))
-                for r in range(2)
-            ]
 
         # Ego (robot 0) spins in place -- v=0 throughout, so its position
         # never moves, but omega=2.0 turns its heading by omega*dt=0.1 rad
         # between the two frames. The neighbor (robot 1) is genuinely
         # stationary at (5, 0). Any use of a single shared heading to
-        # interpret both frames' ego-relative readings would misattribute
-        # that 0.1 rad of pure ego rotation to neighbor motion.
+        # interpret both frames' readings would misattribute that 0.1 rad of
+        # pure ego rotation to neighbor motion.
         ego_tick1 = np.array([0.0, 0.0, 0.0, 0.0, 2.0])
         ego_tick2 = simulator.simulators[0].predict_next_state(
             ego_tick1, np.array([0.0, 0.0]), validate=False
         )
         neighbor_state = np.array([5.0, 0.0, 0.0, 0.0, 0.0])
 
-        observe_and_stack(ego_tick1, neighbor_state)
-        stacked = observe_and_stack(ego_tick2, neighbor_state)
+        state_tick1 = np.concatenate([ego_tick1, neighbor_state])
+        state_tick2 = np.concatenate([ego_tick2, neighbor_state])
+        full_obs = simulator.observe(state_tick2, previous_state=state_tick1)
+        per_robot = [simulator.decentralized_policy_observation(full_obs, r) for r in range(2)]
 
         observation_dict = {
-            name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
-            for name in stacked[0]
+            name: torch.as_tensor(np.stack([per_robot[r][name] for r in range(2)]), dtype=torch.float32)
+            for name in per_robot[0]
         }
         ego_obs_np = policy._extract_ego_observation(observation_dict)
         x0_batch = np.stack([policy.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(2)])
 
         neighbor_trajs, _ = policy._build_neighbor_trajectories(observation_dict, x0_batch)
 
-        # atol reflects ObservationHistoryBuffer's float32 storage (this
-        # test's nonzero heading puts real cos/sin roundoff in play, unlike
-        # the theta=0 cases elsewhere in this file where cos(0)/sin(0) are
-        # exact) -- several orders of magnitude tighter than the >0.1 m
-        # error a lost-rotation regression would produce here.
+        # atol reflects float32 storage (this test's nonzero heading puts
+        # real cos/sin roundoff in play, unlike the theta=0 cases elsewhere
+        # in this file where cos(0)/sin(0) are exact) -- several orders of
+        # magnitude tighter than the >0.1 m error a lost-rotation regression
+        # would produce here.
         robot0_neighbor_traj = neighbor_trajs[0, 0]
         np.testing.assert_allclose(robot0_neighbor_traj[0], 5.0, atol=1e-4)
         np.testing.assert_allclose(robot0_neighbor_traj[1], 0.0, atol=1e-4)
@@ -863,16 +815,6 @@ class EgoRotationNeighborVelocityConsistencyTests(unittest.TestCase):
     def test_moving_neighbors_constant_global_velocity_survives_ego_turn(self) -> None:
         simulator = _build_two_robot_simulator(goal0=[0.0, 0.0, 0.0], goal1=[0.0, 0.0, 0.0])
         policy = _build_safe_flow_policy(simulator)
-        history_buffer = ObservationHistoryBuffer(2, 2)
-
-        def observe_and_stack(ego_state: np.ndarray, neighbor_state: np.ndarray):
-            state = np.concatenate([ego_state, neighbor_state])
-            simulator.reset(state)
-            full_obs = simulator.observe(state)
-            return [
-                history_buffer.append_and_stack(r, simulator.decentralized_policy_observation(full_obs, r))
-                for r in range(2)
-            ]
 
         # Ego (robot 0) both moves and turns: v=1.0, omega=2.0 advances its
         # heading by 0.1 rad and its position along the arc between frames.
@@ -898,12 +840,14 @@ class EgoRotationNeighborVelocityConsistencyTests(unittest.TestCase):
             neighbor_tick1, np.array([0.0, 0.0]), validate=False
         )
 
-        observe_and_stack(ego_tick1, neighbor_tick1)
-        stacked = observe_and_stack(ego_tick2, neighbor_tick2)
+        state_tick1 = np.concatenate([ego_tick1, neighbor_tick1])
+        state_tick2 = np.concatenate([ego_tick2, neighbor_tick2])
+        full_obs = simulator.observe(state_tick2, previous_state=state_tick1)
+        per_robot = [simulator.decentralized_policy_observation(full_obs, r) for r in range(2)]
 
         observation_dict = {
-            name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
-            for name in stacked[0]
+            name: torch.as_tensor(np.stack([per_robot[r][name] for r in range(2)]), dtype=torch.float32)
+            for name in per_robot[0]
         }
         ego_obs_np = policy._extract_ego_observation(observation_dict)
         x0_batch = np.stack([policy.local_sims[b].invert_obs(ego_obs_np[b]) for b in range(2)])
@@ -932,16 +876,12 @@ class SelectActionBatchSizeGuardTests(unittest.TestCase):
 
     @staticmethod
     def _build_observation_dict(simulator) -> dict[str, torch.Tensor]:
-        history_buffer = ObservationHistoryBuffer(2, 2)
         state = simulator.reset_random()
         full_obs = simulator.observe(state)
-        stacked = [
-            history_buffer.append_and_stack(r, simulator.decentralized_policy_observation(full_obs, r))
-            for r in range(2)
-        ]
+        per_robot = [simulator.decentralized_policy_observation(full_obs, r) for r in range(2)]
         return {
-            name: torch.as_tensor(np.stack([stacked[r][name] for r in range(2)]), dtype=torch.float32)
-            for name in stacked[0]
+            name: torch.as_tensor(np.stack([per_robot[r][name] for r in range(2)]), dtype=torch.float32)
+            for name in per_robot[0]
         }
 
     def test_full_fleet_batch_succeeds(self) -> None:

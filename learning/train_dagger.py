@@ -23,7 +23,7 @@ from learning.config_loaders import (
     default_dataset_root_for_system, default_repo_id_for_system,
     load_dagger_training_config,
     load_encoder_config, load_flow_config, load_mlp_hidden_dims,
-    load_observation_horizon, load_policy_type, load_prediction_horizon,
+    load_policy_type, load_prediction_horizon,
 )
 from learning.dagger import DaggerConfig, DaggerTrainer
 from systems.initial_state_utils import parse_goal_states_argument, parse_initial_states_argument
@@ -104,7 +104,6 @@ def _summarize_dagger_config(cfg: Any) -> dict[str, Any]:
         "batch_size": cfg.batch_size,
         "learning_rate": cfg.learning_rate,
         "prediction_horizon": cfg.prediction_horizon,
-        "observation_horizon": cfg.observation_horizon,
         "policy_type": cfg.policy_type,
         "checkpoint_dir": str(cfg.checkpoint_dir),
         "seed": cfg.seed,
@@ -387,7 +386,6 @@ def main() -> None:
         learning_rate=float(option("learning_rate", 1e-3)),
         mlp_hidden_dims=load_mlp_hidden_dims(args.policy_config),
         prediction_horizon=load_prediction_horizon(args.policy_config),
-        observation_horizon=load_observation_horizon(args.policy_config),
         encoder_config=load_encoder_config(args.policy_config),
         policy_type=load_policy_type(args.policy_config),
         flow_config=load_flow_config(args.policy_config),

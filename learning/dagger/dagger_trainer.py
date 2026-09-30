@@ -16,7 +16,6 @@ from core.config import validate_system_config
 from core.factory import DynamicsFactory, PlannerFactory
 from learning.data_utils import (
     build_action_window_cache,
-    build_observation_history_cache,
     create_collate_fn_with_dataset,
 )
 from learning.models.encoder import EncoderFactory
@@ -27,7 +26,7 @@ from systems.seed_utils import default_action_noise_seed_for_config
 from .beta_controller import ExpertMixBetaController
 from .dagger_config import DaggerConfig
 from .metrics import DaggerEvalMetrics
-from .rollouts import ObservationHistoryBuffer, build_decentralized_joint_action, collect_dagger_rollouts, evaluate_policy_rollouts
+from .rollouts import build_decentralized_joint_action, collect_dagger_rollouts, evaluate_policy_rollouts
 from .utils import (
     apply_config_overrides,
     print_rollout_metrics,
@@ -81,7 +80,6 @@ class DaggerTrainer:
         self.obs_feature_names: list[str] = []
         self.state_dim = self.action_dim = self.neighbor_slots = 0
         self.neighbor_feature_dim: int | None = None
-        self.observation_horizon = 1
 
     @staticmethod
     def schedules(
@@ -126,20 +124,16 @@ class DaggerTrainer:
 
         self.action_noise_seed = default_action_noise_seed_for_config(self.seeded_config)
         self.initial_state_seed = resolve_initial_state_seed(self.seeded_config, self.cfg.seed)
-        self.observation_horizon = self.cfg.observation_horizon
         features = self.simulator.get_dataset_features()
         if self.cfg.dataset_root.exists():
             existing_meta = LeRobotDatasetMetadata(repo_id=self.cfg.repo_id, root=self.cfg.dataset_root)
             _validate_resumable_dataset_schema(existing_meta.features, features)
         self.obs_feature_names = [n for n in features if n.startswith("observation.")]
-        # observation.state (proprioception) and its companion
-        # observation.state_mask are stacked across observation_horizon like
-        # the neighbor tensors; observation.environment_state (goal-relative
-        # encoding) stays single-frame.
+        # observation.environment_state (goal-relative encoding) and
+        # observation.state (proprioception) are both single-frame.
         environment_state_dim = int(features["observation.environment_state"]["shape"][0])
         proprioception_dim = int(features["observation.state"]["shape"][0])
-        state_mask_dim = int(features["observation.state_mask"]["shape"][0])
-        base_ego_dim = environment_state_dim + (proprioception_dim + state_mask_dim) * self.observation_horizon
+        base_ego_dim = environment_state_dim + proprioception_dim
         self.action_dim = int(features["action"]["shape"][0])
         self.neighbor_slots = max(0, int(self.simulator.num_robots) - 1)
         neighbor_state_dim = int(features["observation.neighbor_state"]["shape"][0])
@@ -149,20 +143,12 @@ class DaggerTrainer:
                     "observation.neighbor_state dimension must be a positive multiple of the neighbor count; "
                     f"got dimension {neighbor_state_dim} for {self.neighbor_slots} neighbors."
                 )
-            self.neighbor_feature_dim = (
-                neighbor_state_dim // self.neighbor_slots
-            ) * self.observation_horizon
-            stacked_neighbor_mask_dim = self.neighbor_slots * self.observation_horizon
+            self.neighbor_feature_dim = neighbor_state_dim // self.neighbor_slots
         else:
             # The encoder still requires a valid input width when there are no slots.
-            self.neighbor_feature_dim = max(1, neighbor_state_dim) * self.observation_horizon
-            stacked_neighbor_mask_dim = 0
+            self.neighbor_feature_dim = max(1, neighbor_state_dim)
 
-        self.state_dim = (
-            base_ego_dim
-            + self.neighbor_slots * self.neighbor_feature_dim
-            + stacked_neighbor_mask_dim
-        )
+        self.state_dim = base_ego_dim + self.neighbor_slots * self.neighbor_feature_dim
 
         if self.neighbor_feature_dim is None:
             raise RuntimeError("Neighbor feature dimension was not initialized from the dataset schema.")
@@ -172,7 +158,6 @@ class DaggerTrainer:
             self.state_dim,
             self.neighbor_feature_dim,
             self.neighbor_slots,
-            observation_horizon=self.observation_horizon,
             **self.cfg.encoder_config.kwargs,
         )
         flow = (
@@ -305,7 +290,6 @@ class DaggerTrainer:
             root=self.cfg.dataset_root,
         )
         action_window_cache = build_action_window_cache(dataset, self.cfg.prediction_horizon)
-        observation_history_cache = build_observation_history_cache(dataset, self.cfg.observation_horizon)
         generator = torch.Generator().manual_seed(self.cfg.seed + training_round)
         loader = DataLoader(
             dataset,
@@ -316,9 +300,7 @@ class DaggerTrainer:
                 dataset=dataset,
                 simulator=self.simulator,
                 prediction_horizon=self.cfg.prediction_horizon,
-                observation_horizon=self.cfg.observation_horizon,
                 action_window_cache=action_window_cache,
-                observation_history_cache=observation_history_cache,
             ),
         )
         steps, approx = resolve_round_steps(
@@ -372,23 +354,11 @@ class DaggerTrainer:
             system_name=self.cfg.system,
             config=eval_config,
         )
-        history_buffer = ObservationHistoryBuffer(
-            self.cfg.observation_horizon,
-            int(simulator.num_robots),
-        )
 
         def action_fn(obs: np.ndarray) -> np.ndarray:
-            return build_decentralized_joint_action(
-                simulator,
-                self.policy,
-                obs,
-                self.device,
-                observation_horizon=self.cfg.observation_horizon,
-                history_buffer=history_buffer,
-            )
+            return build_decentralized_joint_action(simulator, self.policy, obs, self.device)
 
         def reset_policy_state() -> None:
-            history_buffer.reset()
             self.policy.reset()
 
         metrics = evaluate_policy_rollouts(
@@ -570,7 +540,6 @@ class DaggerTrainer:
             "state_dim": self.state_dim,
             "action_dim": self.action_dim,
             "prediction_horizon": self.cfg.prediction_horizon,
-            "observation_horizon": self.cfg.observation_horizon,
             "hidden_dims": list(self.cfg.mlp_hidden_dims),
             "obs_feature_names": self.obs_feature_names,
             "system": self.cfg.system,
@@ -713,23 +682,10 @@ class DaggerTrainer:
                 )
 
             try:
-                history_buffer = ObservationHistoryBuffer(
-                    self.cfg.observation_horizon,
-                    int(simulator.num_robots),
-                )
-
                 def action_fn(obs: np.ndarray) -> np.ndarray:
-                    return build_decentralized_joint_action(
-                        simulator,
-                        self.policy,
-                        obs,
-                        self.device,
-                        observation_horizon=self.cfg.observation_horizon,
-                        history_buffer=history_buffer,
-                    )
+                    return build_decentralized_joint_action(simulator, self.policy, obs, self.device)
 
                 def reset_policy_state() -> None:
-                    history_buffer.reset()
                     self.policy.reset()
 
                 frames = simulator.format_dataset_frame

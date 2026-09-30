@@ -17,7 +17,7 @@ from learning.models.flow_policy import FlowPolicy
 def _build_policy(action_scale=None) -> FlowPolicy:
     encoder = EncoderFactory.create(
         "deepset", state_dim=6, neighbor_feature_dim=4, neighbor_slots=0,
-        observation_horizon=1, phi_dims=[8], rho_dims=[4],
+        phi_dims=[8], rho_dims=[4],
     )
     # These are correctness checks on the normalization math, not on
     # torch.compile's own codegen -- patched out to avoid depending on
@@ -32,8 +32,7 @@ def _build_policy(action_scale=None) -> FlowPolicy:
 def _fake_observation(batch_size: int) -> dict[str, torch.Tensor]:
     return {
         "observation.environment_state": torch.zeros(batch_size, 2),
-        "observation.state": torch.zeros(batch_size, 3),
-        "observation.state_mask": torch.ones(batch_size, 1),
+        "observation.state": torch.zeros(batch_size, 4),
         "observation.neighbor_state": torch.zeros(batch_size, 0),
         "observation.neighbor_mask": torch.zeros(batch_size, 0),
     }

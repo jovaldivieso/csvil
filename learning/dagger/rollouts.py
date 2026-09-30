@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-from collections import deque
 from collections.abc import Callable, Mapping
 
 import numpy as np
@@ -22,100 +21,20 @@ from .utils import evaluation_seed_specs, rng_for_seed_spec, sample_initial_stat
 from systems.initial_state_utils import normalize_goal_state_specs, normalize_initial_state_specs
 
 
-class ObservationHistoryBuffer:
-    """Per-robot rolling buffer that zero-fills missing frames during warm-up."""
-
-    def __init__(self, observation_horizon: int, num_robots: int) -> None:
-        if observation_horizon <= 0:
-            raise ValueError("'observation_horizon' must be positive.")
-        if num_robots <= 0:
-            raise ValueError("'num_robots' must be positive.")
-        self.observation_horizon = int(observation_horizon)
-        self._buffers: list[deque[Mapping[str, np.ndarray]]] = [
-            deque(maxlen=self.observation_horizon) for _ in range(num_robots)
-        ]
-
-    def reset(self) -> None:
-        for buffer in self._buffers:
-            buffer.clear()
-
-    def append_and_stack(
-        self,
-        robot_id: int,
-        observation: Mapping[str, np.ndarray],
-    ) -> dict[str, np.ndarray]:
-        """Stack neighbor history time-major, zero-padding any not-yet-collected frames.
-
-        Zero-filling both the feature and mask for a padded slot (rather than
-        repeating the earliest real frame) matches how an out-of-visibility
-        neighbor is already represented elsewhere: a masked-out (feature=0,
-        mask=0) pair, not a plausible-looking duplicate the model could mistake
-        for real motion history.
-        """
-        if robot_id < 0 or robot_id >= len(self._buffers):
-            raise IndexError(f"robot_id {robot_id} is out of bounds for {len(self._buffers)} robots.")
-        frame = {
-            name: np.asarray(value, dtype=np.float32).reshape(-1)
-            for name, value in observation.items()
-        }
-        buffer = self._buffers[robot_id]
-        buffer.append(frame)
-        frames = list(buffer)
-        pad_count = self.observation_horizon - len(frames)
-        # observation.state (this robot's own proprioception, e.g. [v, omega])
-        # is stacked too, so the policy sees its own recent motion history,
-        # not just the current instant -- needed to correctly interpret the
-        # neighbor history, which is expressed in this robot's own frame at
-        # each past instant. observation.state_mask is its companion (mirrors
-        # observation.neighbor_mask): always 1.0 at generation time, so
-        # stacking's zero-padding for not-yet-collected frames is
-        # distinguishable from a genuine [v=0, omega=0] reading rather than
-        # silently identical to one. observation.environment_state
-        # (goal-relative encoding) stays single-frame.
-        history_stacked_fields = (
-            "observation.neighbor_state",
-            "observation.neighbor_mask",
-            "observation.state",
-            "observation.state_mask",
-        )
-        stacked: dict[str, np.ndarray] = {}
-        for name in frame:
-            if name in history_stacked_fields:
-                padding = [np.zeros_like(frames[0][name]) for _ in range(pad_count)]
-                stacked[name] = np.concatenate(padding + [f[name] for f in frames]).astype(np.float32, copy=False)
-            else:
-                stacked[name] = frames[-1][name]
-        return stacked
-
-
 def build_decentralized_joint_action(
     simulator: DynamicsProtocol,
     policy,
     observation: np.ndarray,
     device: torch.device,
-    observation_horizon: int = 1,
-    history_buffer: ObservationHistoryBuffer | None = None,
 ) -> np.ndarray:
     """Query the shared decentralized policy once for the entire robot fleet."""
     robot_observations = [
         simulator.decentralized_policy_observation(observation, robot_id)
         for robot_id in range(int(simulator.num_robots))
     ]
-    if observation_horizon <= 0:
-        raise ValueError("'observation_horizon' must be positive.")
-    if observation_horizon > 1 and history_buffer is None:
-        raise ValueError("history_buffer is required when observation_horizon is greater than one.")
-    if history_buffer is not None and history_buffer.observation_horizon != observation_horizon:
-        raise ValueError("history_buffer horizon must match observation_horizon.")
-    stacked_robot_observations = [
-        history_buffer.append_and_stack(robot_id, robot_observation)
-        if history_buffer is not None
-        else robot_observation
-        for robot_id, robot_observation in enumerate(robot_observations)
-    ]
     policy_input = {
         name: torch.as_tensor(
-            np.stack([robot_observation[name] for robot_observation in stacked_robot_observations]),
+            np.stack([robot_observation[name] for robot_observation in robot_observations]),
             dtype=torch.float32,
         ).to(device)
         for name in robot_observations[0]
@@ -389,38 +308,17 @@ def collect_dagger_rollouts(
                 expert_planner.reset()
 
             # A Phase 2 (beta < 1.0) attempt is the only case where
-            # choose_action below will actually call policy_action_fn.
-            # That callable closes over its own history_buffer/recurrent
-            # state (see train_dagger.py's action_fn/reset_policy_state),
-            # which policy_reset_fn only clears once at episode start --
-            # otherwise it still holds frames from the discarded path past
-            # this candidate (or a previous failed attempt at it), so the
-            # first query here would see a rolling window that jumps
-            # straight from s_candidate_index to a "future" it hasn't
-            # reached yet. Reset it and replay the real, already-visited
-            # prefix (observation-only, actions discarded) so the window
-            # is exactly what it would have been had this candidate state
-            # been reached for the first time.
-            if policy_action_fn is not None and beta < 1.0:
-                if policy_reset_fn is not None:
-                    policy_reset_fn()
-                for prefix_state in visited_states[:candidate_index]:
-                    try:
-                        policy_action_fn(simulator.observe(prefix_state))
-                    except PlannerSolveError:
-                        # policy_reset_fn() just cleared SafeFlow's projector
-                        # warm-start cache, so this replay's first query is a
-                        # cold start with no cached fallback trajectory to
-                        # lean on -- exactly the case CasadiTrajectoryProjector
-                        # can't recover from itself (see its own
-                        # PlannerSolveError raise). Safe to ignore here only
-                        # because build_decentralized_joint_action appends to
-                        # history_buffer *before* running the policy forward
-                        # pass/projection, and this call's returned action is
-                        # discarded either way -- unlike choose_action's own
-                        # try/except below, which falls back to the expert
-                        # action because that one's result is actually used.
-                        pass
+            # choose_action below will actually call policy_action_fn. Reset
+            # its policy state (e.g. SafeFlow's projector warm-start cache)
+            # before continuing from the candidate: backtracking jumps to an
+            # earlier point in the trajectory, so any cached solve from the
+            # now-discarded future is a stale, possibly-misleading warm
+            # start for the new continuation -- starting fresh from this
+            # known-good state is the conservative choice. Observations
+            # themselves need no such reset (each is a stateless function of
+            # the current and previous state, not an accumulated window).
+            if policy_action_fn is not None and beta < 1.0 and policy_reset_fn is not None:
+                policy_reset_fn()
 
             def choose_action(observation: np.ndarray, expert_action: np.ndarray) -> tuple[np.ndarray, bool]:
                 # beta >= 1.0 (the default) short-circuits to the original
@@ -438,12 +336,6 @@ def collect_dagger_rollouts(
                 # driven steps are exactly as seed-uncontrolled as normal
                 # forward-pass mixing always has been, backtracking or not.
                 use_expert_action = bool(episode_expert_mixing_rng.random() < beta)
-                # Query the policy regardless of the coin flip, matching the
-                # main loop's should_query_policy pattern above: history_buffer
-                # advances its rolling observation window on every call, so
-                # skipping it on "expert wins" steps would leave gaps that
-                # corrupt whatever the policy is asked next within this same
-                # recovery.
                 try:
                     policy_action = policy_action_fn(observation)
                 except PlannerSolveError:
@@ -451,7 +343,12 @@ def collect_dagger_rollouts(
                 return (expert_action, True) if use_expert_action else (policy_action, False)
 
             completion_steps = 0
-            observation = simulator.observe(state_after_action)
+            # No real previous state exists at this fresh reset point (see
+            # simulator.reset(candidate_state) above) -- observe() reports
+            # every neighbor as momentarily stationary for this one tick
+            # rather than fabricating a velocity across the backtrack seam.
+            previous_state_after_action: np.ndarray | None = None
+            observation = simulator.observe(state_after_action, previous_state_after_action)
             try:
                 candidate_action = expert_planner(observation)
             except PlannerSolveError as exc:
@@ -484,6 +381,7 @@ def collect_dagger_rollouts(
             if frame_count <= candidate_index:
                 append_frame(observation, candidate_action, is_expert_action=used_expert)
 
+            previous_state_after_action = state_after_action
             state_after_action = simulator.step(state_after_action, executed_action)
             completion_steps += 1
             collided, collision_summary = _detect_collision(simulator, state_after_action)
@@ -493,7 +391,7 @@ def collect_dagger_rollouts(
                 return True, state_after_action, completion_steps, "goal reached"
 
             for _ in range(completion_steps, steps_per_trajectory - candidate_index):
-                observation = simulator.observe(state_after_action)
+                observation = simulator.observe(state_after_action, previous_state_after_action)
                 try:
                     expert_action = expert_planner(observation)
                 except PlannerSolveError as exc:
@@ -521,6 +419,7 @@ def collect_dagger_rollouts(
                     return False, state_after_action, completion_steps, collision_summary
 
                 append_frame(observation, expert_action, is_expert_action=used_expert)
+                previous_state_after_action = state_after_action
                 state_after_action = simulator.step(state_after_action, executed_action)
                 completion_steps += 1
                 collided, collision_summary = _detect_collision(simulator, state_after_action)
@@ -687,8 +586,9 @@ def collect_dagger_rollouts(
             return False, state.copy(), 0
 
         for step in range(1, steps_per_trajectory + 1):
+            previous_state = visited_states[-1] if visited_states else None
             visited_states.append(state.copy())
-            observation = simulator.observe(state)
+            observation = simulator.observe(state, previous_state)
             try:
                 expert_action = expert_planner(observation)
             except PlannerSolveError as exc:
@@ -845,6 +745,7 @@ def rollout_policy_with_action_fn(
     count.
     """
     state = simulator.reset(initial_state)
+    previous_state: np.ndarray | None = None
     if reset_fn is not None:
         reset_fn()
     if simulator.is_collision(state):
@@ -853,7 +754,7 @@ def rollout_policy_with_action_fn(
         return True, 0, None
     for step in range(1, num_steps + 1):
         try:
-            action = action_fn(simulator.observe(state))
+            action = action_fn(simulator.observe(state, previous_state))
         except PlannerSolveError as exc:
             # No expert running alongside evaluation to fall back to (unlike
             # collect_dagger_rollouts) -- treat like any other episode
@@ -865,6 +766,7 @@ def rollout_policy_with_action_fn(
             # each of which only reaches `step` after simulator.step() ran.
             print(f"Policy solve failed during evaluation at step={step}: {exc}")
             return False, step - 1, "solve_failure"
+        previous_state = state
         state = simulator.step(state, apply_execution_noise(simulator, action, action_noise_std, action_noise_rng))
         if simulator.is_collision(state):
             return False, step, "collision"

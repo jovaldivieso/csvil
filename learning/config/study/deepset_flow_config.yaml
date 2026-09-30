@@ -1,0 +1,17 @@
+# [template-only] DeepSet flow model; generate_study_policy_configs.py builds the per-fleet configs from it.
+model:
+  policy_type: flow
+
+  flow:
+    num_inference_steps: 3      # Euler integration steps for ODE sampling
+
+  observation_horizon: 2        # number of past observation steps to consider
+  prediction_horizon: 1
+  hidden_dims: [256, 256, 256]
+
+  encoder: deepset
+
+  deepset:
+    phi_dims: [128, 128]
+    rho_dims: [128]
+    pool_type: mean        # options: sum, max, mean

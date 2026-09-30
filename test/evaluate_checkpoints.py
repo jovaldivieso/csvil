@@ -29,7 +29,6 @@ import yaml
 from core.config import load_and_validate_system_config, validate_system_config
 from core.factory import DynamicsFactory
 from learning.dagger import (
-    ObservationHistoryBuffer,
     apply_config_overrides,
     build_decentralized_joint_action,
     evaluate_policy_rollouts,
@@ -72,7 +71,7 @@ def build_eval_config(expert_config_path: str, eval_config_path: str, system: st
 
 
 def build_policy(policy_type: str, checkpoint_path: str, simulator, device, validated_config):
-    checkpoint, state_dict, obs_encoder, action_dim, hidden_dims, prediction_horizon, observation_horizon = (
+    checkpoint, state_dict, obs_encoder, action_dim, hidden_dims, prediction_horizon = (
         _load_checkpoint_policy_components(checkpoint_path, simulator, policy_type, device)
     )
     flow_config_raw = checkpoint.get("flow_config", {})
@@ -93,7 +92,7 @@ def build_policy(policy_type: str, checkpoint_path: str, simulator, device, vali
     policy.load_state_dict(state_dict)
     policy.eval()
     policy.to(device)
-    return policy, observation_horizon
+    return policy
 
 
 def evaluate_mode(
@@ -112,8 +111,7 @@ def evaluate_mode(
     dt: float,
 ) -> dict[str, float]:
     simulator = DynamicsFactory.create(system_name="multi_robot", config=validated_config)
-    policy, observation_horizon = build_policy(policy_type, checkpoint_path, simulator, device, validated_config)
-    history_buffer = ObservationHistoryBuffer(observation_horizon, int(simulator.num_robots))
+    policy = build_policy(policy_type, checkpoint_path, simulator, device, validated_config)
     step_times: list[float] = []
 
     # Untimed warm-up: triggers FlowPolicy.net's lazy torch.compile and (for
@@ -126,27 +124,20 @@ def evaluate_mode(
     try:
         build_decentralized_joint_action(
             simulator, policy, simulator.observe(np.zeros(simulator.nx)), device,
-            observation_horizon=observation_horizon, history_buffer=None if observation_horizon <= 1 else history_buffer,
         )
     except PlannerSolveError:
         pass
     policy.reset()
-    history_buffer.reset()
 
     def action_fn(obs: np.ndarray) -> np.ndarray:
         _synchronize_device(device)
         t0 = time.perf_counter()
-        action = build_decentralized_joint_action(
-            simulator, policy, obs, device,
-            observation_horizon=observation_horizon,
-            history_buffer=history_buffer,
-        )
+        action = build_decentralized_joint_action(simulator, policy, obs, device)
         _synchronize_device(device)
         step_times.append(time.perf_counter() - t0)
         return action
 
     def reset_fn() -> None:
-        history_buffer.reset()
         policy.reset()
 
     config_successes = config_total = config_collisions = config_timeouts = 0

@@ -46,7 +46,15 @@ class SingleIntegrator(DynamicsSimulator):
         clipped_action = np.clip(action_array, -self.max_action, self.max_action)
         return self.predict_next_state(state_array, clipped_action)
 
-    def observe(self, state: np.ndarray, validate: bool = True) -> np.ndarray:
+    def observe(
+        self,
+        state: np.ndarray,
+        previous_state: np.ndarray | None = None,
+        validate: bool = True,
+    ) -> np.ndarray:
+        """``previous_state`` is accepted for interface uniformity with
+        ``MultiRobotSimulator.observe()`` but unused here (no proprioception
+        to difference for this system)."""
         state_array = self.validate_state(state) if validate else np.asarray(state, dtype=float)
         obs = self.goal - state_array
         return self.validate_observation(obs) if validate else obs
@@ -75,7 +83,6 @@ class SingleIntegrator(DynamicsSimulator):
                 "names": exteroception_names,
             },
             "observation.state": {"dtype": "float32", "shape": (0,), "names": []},
-            "observation.state_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_state": {"dtype": "float32", "shape": (0,), "names": []},
             "observation.neighbor_mask": {"dtype": "float32", "shape": (0,), "names": []},
             "action": {
@@ -111,7 +118,6 @@ class SingleIntegrator(DynamicsSimulator):
         return [{
             "observation.environment_state": np.asarray(obs[:2], dtype=np.float32),
             "observation.state": np.empty(0, dtype=np.float32),
-            "observation.state_mask": np.empty(0, dtype=np.float32),
             "observation.neighbor_state": np.empty(0, dtype=np.float32),
             "observation.neighbor_mask": np.empty(0, dtype=np.float32),
             "action": np.asarray(action, dtype=np.float32),

@@ -229,7 +229,8 @@ def rollout_trajectory(
     planner_failed = False
 
     for _ in range(num_steps):
-        observation = simulator.observe(state)
+        previous_state = trajectory[-2] if len(trajectory) >= 2 else None
+        observation = simulator.observe(state, previous_state)
         try:
             action = planner(observation)
         except PlannerSolveError as exc:

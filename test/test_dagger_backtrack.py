@@ -72,7 +72,7 @@ class _FakeSimulator:
         self._rollout_done_counter = 0
         return self.state.copy()
 
-    def observe(self, state: np.ndarray) -> np.ndarray:
+    def observe(self, state: np.ndarray, previous_state: np.ndarray | None = None) -> np.ndarray:
         return np.asarray(state, dtype=float).copy()
 
     def predict_next_state(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
@@ -734,20 +734,23 @@ class BacktrackRecoveryEscalationTests(unittest.TestCase):
         self.assertEqual(policy_calls, [])
         self.assertEqual(writer.frames[0]["action"], [1.0])
 
-    def test_phase_two_resets_and_replays_history_before_querying_the_policy(self) -> None:
-        """Regression guard: a Phase 2 (beta_recovery < 1.0) attempt must not
-        let policy_action_fn's own history_buffer/recurrent state carry over
-        stale frames from the discarded path past the candidate -- it must be
-        reset and rebuilt from the real, already-visited prefix first.
+    def test_phase_two_resets_policy_state_without_replaying_history(self) -> None:
+        """Regression guard: a Phase 2 (beta_recovery < 1.0) attempt resets
+        policy state (e.g. a SafeFlow policy's projector warm-start cache)
+        before continuing from the candidate, but must NOT replay the
+        already-visited prefix through policy_action_fn afterward: with
+        stateless, single-frame observations (see
+        systems/multi_robot.py's observe()) there is no rolling window left
+        to rebuild, so policy_action_fn should only ever be called for the
+        "live" steps from the candidate onward.
         """
         simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
         # Two safe forward steps (0.0 -> 0.1 -> 0.3) establish a real,
-        # 2-state prefix (visited_states[:2] = [0.0, 0.1]) before the third
-        # planner call's [100.0] is flagged unsafe and triggers backtrack to
-        # candidate_index=2 (s_0.3, the most recent state). Its own repeated
-        # [0.8] both proves Phase 1 expert-only recoverable and (again, since
-        # complete_from_candidate always re-solves from scratch) resolves the
-        # Phase 2 attempt.
+        # 2-state prefix before the third planner call's [100.0] is flagged
+        # unsafe and triggers backtrack to candidate_index=2 (s_0.3, the
+        # most recent state). Its own repeated [0.8] both proves Phase 1
+        # expert-only recoverable and (since complete_from_candidate always
+        # re-solves from scratch) resolves the Phase 2 attempt in one step.
         planner = _SequencedPlanner(actions=[[0.1], [0.2], [100.0], [0.8]])
         policy_calls: list[list[float]] = []
         reset_calls = 0
@@ -786,25 +789,20 @@ class BacktrackRecoveryEscalationTests(unittest.TestCase):
         self.assertEqual(metrics.success_rate, 1.0)
         self.assertIn("Recovery from s_2 succeeded at beta_recovery=0.500", stdout.getvalue())
         # One reset at episode start (unconditional) plus exactly one more
-        # for the single Phase 2 attempt -- not zero (which would mean the
-        # stale-history bug is back) and not more (which would mean it's
-        # being reset redundantly per policy query instead of once per
-        # attempt).
+        # for the single Phase 2 attempt.
         self.assertEqual(reset_calls, 2)
-        # The replay must cover exactly the true prefix before the
-        # candidate (s_0.0, s_0.1), in order, before the "live" query at the
-        # candidate state itself (s_0.3) -- not the stale frames a forward
-        # pass continuing past s_0.3 would have produced.
-        np.testing.assert_allclose(policy_calls, [[0.0], [0.1], [0.3]])
+        # Only the live query at the candidate state itself (s_0.3) -- no
+        # replay of the prefix (s_0.0, s_0.1) that a stale-history design
+        # would have required.
+        np.testing.assert_allclose(policy_calls, [[0.3]])
 
-    def test_phase_two_replay_survives_a_planner_solve_error_from_a_stale_cache(self) -> None:
-        """Regression guard: policy_reset_fn() (called right before replay)
-        clears a SafeFlow policy's projector warm-start cache, so replaying
-        the prefix can hit a cold-start PlannerSolveError with no cached
-        fallback trajectory to lean on. That must not escape and abort the
-        whole collection run -- the replayed action is discarded either way,
-        and history_buffer is already updated before the policy forward
-        pass/projection that would raise.
+    def test_phase_two_live_query_solve_error_falls_back_to_expert(self) -> None:
+        """A PlannerSolveError from policy_action_fn's live query during a
+        Phase 2 attempt (e.g. a SafeFlow policy hitting a cold-start
+        failure right after policy_reset_fn() clears its projector
+        warm-start cache) must not escape and abort the whole collection
+        run -- choose_action's own fallback treats it like any other
+        expert-wins coin flip and the episode still completes.
         """
         simulator = _FakeSimulator(collision_threshold=10.0, goal_threshold=1.0)
         planner = _SequencedPlanner(actions=[[0.1], [0.2], [100.0], [0.8]])
@@ -813,9 +811,7 @@ class BacktrackRecoveryEscalationTests(unittest.TestCase):
         def flaky_policy(observation: np.ndarray) -> np.ndarray:
             nonlocal policy_calls
             policy_calls += 1
-            if policy_calls == 1:
-                raise PlannerSolveError("forced cold-start solve failure")
-            return np.array([0.8])
+            raise PlannerSolveError("forced cold-start solve failure")
 
         writer = _FakeDatasetWriter()
         stdout = io.StringIO()
@@ -840,9 +836,10 @@ class BacktrackRecoveryEscalationTests(unittest.TestCase):
 
         self.assertEqual(metrics.num_episodes, 1)
         self.assertEqual(metrics.success_rate, 1.0)
-        # 2 replay calls (s_0.0 raises, s_0.1 succeeds) + 1 live query at the
-        # candidate itself.
-        self.assertEqual(policy_calls, 3)
+        # Exactly one live query at the candidate state itself; it raises,
+        # choose_action falls back to the expert action, and the episode
+        # still succeeds via that fallback.
+        self.assertEqual(policy_calls, 1)
 
 
 class EvaluatePolicyRolloutsTorchSeedingTests(unittest.TestCase):
