@@ -93,16 +93,20 @@ class MultiRobotSimulator(DynamicsSimulator):
 
         self.dt = dt0
         
-        # workspace bounds shared by whole multi-robot environment:
-        environment = merged_config.get("environment", {})
-        self.environment_min = np.asarray(
-            environment.get("min", [-1.0, -1.0]),
-            dtype=float,
-        )
-        self.environment_max = np.asarray(
-            environment.get("max", [1.0, 1.0]),
-            dtype=float,
-        )
+        # workspace bounds shared by the whole multi-robot environment: opt-in
+        # only. Position clipping after step() is only applied when a config
+        # explicitly declares an `environment` block (e.g. db-LaCAM's bounded
+        # motion-primitive grid); configs that don't set it get no clipping
+        # at all, matching every pre-existing config's own assumption of
+        # unrestricted movement -- there is no sensible universal default
+        # box to fall back to instead.
+        environment = merged_config.get("environment")
+        if environment is not None:
+            self.environment_min: np.ndarray | None = np.asarray(environment["min"], dtype=float)
+            self.environment_max: np.ndarray | None = np.asarray(environment["max"], dtype=float)
+        else:
+            self.environment_min = None
+            self.environment_max = None
 
         self.robot_state_slices: list[slice] = []
         self.robot_action_slices: list[slice] = []
@@ -436,15 +440,18 @@ class MultiRobotSimulator(DynamicsSimulator):
             split_state,
             split_action,
         ):
-            # keeps position inside configured multi-robot workspace:
-            position_indices = sim.position_indices
+            next_state = sim.step(robot_state, robot_action)
 
-            next_state = sim.step(robot_state, robot_action).copy()
-            next_state[list(position_indices)] = np.clip(
-                next_state[list(position_indices)],
-                self.environment_min,
-                self.environment_max,
-            )
+            # keeps position inside the configured multi-robot workspace,
+            # only when a config explicitly opts in via `environment`:
+            if self.environment_min is not None:
+                position_indices = sim.position_indices
+                next_state = next_state.copy()
+                next_state[list(position_indices)] = np.clip(
+                    next_state[list(position_indices)],
+                    self.environment_min,
+                    self.environment_max,
+                )
 
             next_parts.append(next_state)
 
